@@ -36,7 +36,7 @@ GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
 
 # Constants
-SHEET_RANGE = 'Sheet1!A2:L100'  # Updated to include image column (L)
+SHEET_RANGE = 'Sheet1!A2:N100'  # Columns: A-L (existing) + M (Teaser) + N (Desc)
 TIMEZONE = 'America/Toronto'
 
 
@@ -119,8 +119,8 @@ def fetch_events_from_sheet() -> List[Dict[str, Any]]:
 
         events = []
         for row in rows:
-            # Pad row to ensure we have all columns
-            while len(row) < 12:
+            # Pad row to ensure we have all columns (A-N = 14 columns)
+            while len(row) < 14:
                 row.append('')
 
             # Handle registration type (convert TICKETS → TICKETING for REST API)
@@ -141,7 +141,9 @@ def fetch_events_from_sheet() -> List[Dict[str, Any]]:
                 'ticket_price': float(row[8]) if row[8] else 0.0,
                 'capacity': int(row[9]) if row[9] else 100,
                 'registration_type': reg_type,
-                'image_url': row[11]  # Google Drive URL or file ID
+                'image_url': row[11],  # Google Drive URL or file ID
+                'teaser': row[12],      # Short description/teaser (column M)
+                'detailed_desc': row[13]  # Detailed description (column N)
             })
 
         print(f"Found {len(events)} events in spreadsheet\n")
@@ -258,8 +260,8 @@ def download_from_google_drive(file_id: str) -> tuple:
         return None, None, None
 
 
-def upload_image_to_wix(image_url: str, event_name: str) -> str:
-    """Upload an image from Google Drive to Wix and return the media ID"""
+def upload_image_to_wix(image_url: str, event_name: str) -> Dict[str, Any]:
+    """Upload an image from Google Drive to Wix and return file descriptor"""
     if not image_url:
         return None
 
@@ -284,11 +286,12 @@ def upload_image_to_wix(image_url: str, event_name: str) -> str:
             return None
 
         # Upload to Wix Media Manager using WixClient
+        # Returns file descriptor: {'id': '...', 'url': '...', ...}
         client = WixClient()
-        wix_file_id = client.upload_image(image_data, filename, mime_type)
+        file_descriptor = client.upload_image(image_data, filename, mime_type)
 
         print(f"✅ Uploaded image for: {event_name}")
-        return wix_file_id
+        return file_descriptor
 
     except Exception as e:
         print(f"⚠️  Failed to upload image for {event_name}: {e}")
@@ -304,9 +307,9 @@ def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) ->
         auto_create_tickets: If True, automatically create tickets for TICKETING events
     """
     # Upload image if URL provided
-    media_id = None
+    file_descriptor = None
     if event.get('image_url'):
-        media_id = upload_image_to_wix(event['image_url'], event['name'])
+        file_descriptor = upload_image_to_wix(event['image_url'], event['name'])
 
     # Build event data
     event_data = {
@@ -328,11 +331,31 @@ def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) ->
         }
     }
 
+    # Add optional teaser (short description) if provided
+    if event.get('teaser'):
+        event_data['shortDescription'] = event['teaser']
+
+    # Add optional detailed description if provided
+    if event.get('detailed_desc'):
+        event_data['detailedDescription'] = event['detailed_desc']
+
     # Add main image if uploaded successfully
-    if media_id:
-        event_data['mainImage'] = {
-            'id': media_id
-        }
+    # The file descriptor contains: {'id': '...', 'url': '...', 'media': {'image': {'image': {'width': ..., 'height': ...}}}}
+    if file_descriptor and 'id' in file_descriptor:
+        # Extract image dimensions from file descriptor
+        width = height = None
+        if 'media' in file_descriptor and 'image' in file_descriptor['media']:
+            image_data = file_descriptor['media']['image'].get('image', {})
+            width = image_data.get('width')
+            height = image_data.get('height')
+
+        # mainImage requires id, width, and height (all 3 fields are mandatory)
+        if width and height:
+            event_data['mainImage'] = {
+                'id': file_descriptor['id'],
+                'width': width,
+                'height': height
+            }
 
     try:
         client = WixClient()

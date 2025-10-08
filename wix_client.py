@@ -159,9 +159,6 @@ class WixClient:
 
         Supports registration types: RSVP, TICKETS, RSVP_AND_TICKETS
         """
-        # Try without draft field - might be causing issues
-        # draft = event_data.pop('draft', False)
-
         response = self._request(
             'POST',
             '/events/v3/events',
@@ -263,12 +260,12 @@ class WixClient:
 
     # Media Operations
 
-    def upload_image(self, image_data: bytes, filename: str, mime_type: str) -> str:
-        """Upload an image to Wix Media Manager"""
+    def upload_image(self, image_data: bytes, filename: str, mime_type: str) -> Dict[str, Any]:
+        """Upload an image to Wix Media Manager and return file descriptor"""
         # Get upload URL
         response = self._request(
             'POST',
-            '/media-manager/v1/files/upload/url',
+            '/site-media/v1/files/generate-upload-url',
             json={
                 'mimeType': mime_type,
                 'fileName': filename
@@ -286,7 +283,13 @@ class WixClient:
         )
         upload_response.raise_for_status()
 
-        return upload_data.get('fileId')
+        # Get file descriptor from upload response
+        upload_result = upload_response.json()
+        if 'file' in upload_result:
+            return upload_result['file']
+
+        # Fallback (shouldn't happen)
+        raise Exception("Upload succeeded but no file descriptor returned")
 
     def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
                                  capacity: int = None, currency: str = "USD") -> Dict[str, Any]:
