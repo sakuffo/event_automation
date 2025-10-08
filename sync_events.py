@@ -295,8 +295,14 @@ def upload_image_to_wix(image_url: str, event_name: str) -> str:
         return None
 
 
-def create_wix_event(event: Dict[str, Any]) -> bool:
-    """Create an event in Wix using WixClient"""
+def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) -> bool:
+    """
+    Create an event in Wix using WixClient
+
+    Args:
+        event: Event data dictionary from Google Sheets
+        auto_create_tickets: If True, automatically create tickets for TICKETING events
+    """
     # Upload image if URL provided
     media_id = None
     if event.get('image_url'):
@@ -330,9 +336,35 @@ def create_wix_event(event: Dict[str, Any]) -> bool:
 
     try:
         client = WixClient()
-        client.create_event(event_data)
+        created_event = client.create_event(event_data)
+        event_id = created_event.get('id')
 
         print(f"✅ Created event: {event['name']}")
+
+        # Automatically create tickets for TICKETING events if enabled
+        should_create_ticket = (
+            auto_create_tickets and
+            event['registration_type'] == 'TICKETING' and
+            event.get('ticket_price', 0) > 0
+        )
+
+        if should_create_ticket:
+            try:
+                print(f"   🎫 Creating ticket definition...")
+                client.create_ticket_definition(
+                    event_id=event_id,
+                    ticket_name="General Admission",
+                    price=event['ticket_price'],
+                    capacity=event['capacity']
+                )
+                print(f"   ✅ Ticket created: ${event['ticket_price']:.2f} (capacity: {event['capacity']})")
+            except Exception as ticket_error:
+                print(f"   ⚠️  Failed to create ticket (event still exists): {ticket_error}")
+                print(f"   💡 You can add tickets manually via Wix Dashboard")
+        elif event['registration_type'] == 'TICKETING' and not auto_create_tickets:
+            print(f"   ℹ️  Ticket creation skipped (use --auto-tickets to enable)")
+            print(f"   💡 Add tickets manually via Wix Dashboard")
+
         return True
 
     except Exception as e:
@@ -340,9 +372,20 @@ def create_wix_event(event: Dict[str, Any]) -> bool:
         return False
 
 
-def sync_events():
-    """Main sync function"""
+def sync_events(auto_create_tickets: bool = True):
+    """
+    Main sync function
+
+    Args:
+        auto_create_tickets: If True, automatically create tickets for TICKETING events
+    """
     print("🚀 Starting Google Sheets → Wix Events sync...\n")
+
+    if auto_create_tickets:
+        print("🎫 Auto-ticket creation: ENABLED")
+    else:
+        print("🎫 Auto-ticket creation: DISABLED")
+    print()
 
     try:
         # Fetch events from Google Sheets
@@ -371,8 +414,8 @@ def sync_events():
                 results['skipped'].append(event['name'])
                 continue
 
-            # Create the event
-            if create_wix_event(event):
+            # Create the event (with optional ticket creation)
+            if create_wix_event(event, auto_create_tickets=auto_create_tickets):
                 results['success'].append(event['name'])
             else:
                 results['failed'].append(event['name'])
@@ -412,10 +455,21 @@ def main():
 Wix Events + Google Sheets Integration
 
 Usage:
-  python sync_events.py validate  - Validate all credentials
-  python sync_events.py test      - Test Wix API connection
-  python sync_events.py list      - List existing events in Wix
-  python sync_events.py sync      - Sync events from Google Sheets to Wix
+  python sync_events.py validate       - Validate all credentials
+  python sync_events.py test           - Test Wix API connection
+  python sync_events.py list           - List existing events in Wix
+  python sync_events.py sync           - Sync events from Google Sheets to Wix
+  python sync_events.py sync --no-tickets  - Sync without auto-creating tickets
+
+Ticket Creation:
+  By default, tickets are automatically created for TICKETING events that have
+  a ticket_price > 0 in the Google Sheets (Column I).
+
+  Use --no-tickets flag to disable automatic ticket creation:
+    python sync_events.py sync --no-tickets
+
+  When disabled, TICKETING events are created but you'll need to add tickets
+  manually via the Wix Dashboard.
 
 Setup:
 1. Create a .env file with your credentials
@@ -425,6 +479,9 @@ Setup:
         sys.exit(0)
 
     command = sys.argv[1]
+
+    # Parse flags
+    auto_tickets = '--no-tickets' not in sys.argv
 
     try:
         if command == 'validate':
@@ -446,7 +503,7 @@ Setup:
         elif command == 'sync':
             if not validate_credentials():
                 sys.exit(1)
-            success = sync_events()
+            success = sync_events(auto_create_tickets=auto_tickets)
             sys.exit(0 if success else 1)
 
         else:

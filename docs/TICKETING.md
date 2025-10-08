@@ -194,60 +194,130 @@ event_data = {
 }
 ```
 
-## Why Manual Ticket Creation?
+## Automated Ticket Creation ✅
 
-### Ticket Definitions API is Complex
+### Ticket Automation Now Available!
 
-The Wix Ticket Definitions API requires:
-- Complex fee configuration (FEE_ADDED_AT_CHECKOUT vs FEE_INCLUDED)
-- Detailed pricing structures
-- Currency and tax handling
-- Policy management
+As of the latest update, this project **automatically creates tickets** for TICKETING events during Google Sheets sync.
 
-### Dashboard is Simpler
+### How It Works
 
-For a small business (<2000 customers):
-- ✅ Visual interface for pricing
-- ✅ Easy to modify tickets
-- ✅ No API complexity
-- ✅ Better for non-technical staff
+When you sync events from Google Sheets:
 
-### Automated Ticket Creation (If Needed)
+1. **Event Created** → TICKETING event with `initialType: "TICKETING"`
+2. **Ticket Auto-Created** → "General Admission" ticket with price and capacity from spreadsheet
+3. **Tickets On Sale** → Immediately available for purchase
 
-If you need to automate ticket creation in the future:
+### Implementation
+
+The ticket creation uses the Wix Ticket Definitions V3 API:
 
 ```python
-# Ticket Definitions API v1 (complex)
-ticket_data = {
-    'eventId': event_id,
-    'definition': {
-        'name': 'General Admission',
-        'limitPerCheckout': 10,
-        'pricingMethod': 'FIXED_PRICE',
-        'price': {
-            'amount': '25.0',
-            'currency': 'USD'
-        },
-        'feeConfig': {
-            'type': 'FEE_ADDED_AT_CHECKOUT',  # Buyer pays fees
-            'feeAmount': {
-                'amount': '2.0',
-                'currency': 'USD'
-            }
-        }
-    }
-}
+from wix_client import WixClient
 
-response = requests.post(
-    'https://www.wixapis.com/events/v1/ticket-definitions',
-    headers={'Authorization': API_KEY, 'wix-site-id': SITE_ID},
-    json=ticket_data
+client = WixClient()
+
+# Create TICKETING event first
+event = client.create_event({
+    'title': 'My Event',
+    'dateAndTimeSettings': {...},
+    'location': {...},
+    'registration': {'initialType': 'TICKETING'}
+})
+
+# Automatically create ticket
+ticket = client.create_ticket_definition(
+    event_id=event['id'],
+    ticket_name="General Admission",
+    price=25.00,
+    capacity=50
 )
 ```
 
-**Note:** This is intentionally not implemented to keep the codebase simple.
+### API Payload Structure (V3)
+
+The correct payload structure for Ticket Definitions V3:
+
+```python
+ticket_data = {
+    "ticketDefinition": {
+        "eventId": event_id,  # Required in body (not query param)
+        "name": "General Admission",
+        "limitPerCheckout": 10,  # Max tickets per order
+        "pricingMethod": {  # Object format (not string)
+            "fixedPrice": {
+                "value": "25.00",
+                "currency": "USD"
+            }
+        },
+        "feeType": "FEE_ADDED_AT_CHECKOUT",  # Buyer pays fees
+        "capacity": 50  # Optional: total tickets available
+    }
+}
+```
+
+### Key Discoveries
+
+**API Endpoint:**
+- ✅ `POST /events-ticket-definitions/v3/ticket-definitions`
+
+**Required Fields:**
+- `eventId` - Must be in request body (not query parameter)
+- `pricingMethod` - Must be an object with nested pricing type (e.g., `fixedPrice`)
+- `feeType` - Must be `"FEE_ADDED_AT_CHECKOUT"` (not `"BUYER_PAYS"`)
+
+**Common Errors Resolved:**
+- ❌ `"pricingMethod": "FIXED_PRICE"` → ✅ `"pricingMethod": {"fixedPrice": {...}}`
+- ❌ `"feeType": "BUYER_PAYS"` → ✅ `"feeType": "FEE_ADDED_AT_CHECKOUT"`
+- ❌ `eventId` in URL params → ✅ `eventId` in request body
+
+### Graceful Failure Handling
+
+If ticket creation fails, the event is still created successfully:
+
+```
+✅ Created event: My Event
+   🎫 Creating ticket definition...
+   ⚠️  Failed to create ticket (event still exists): API error
+   💡 You can add tickets manually via Wix Dashboard
+```
+
+This ensures your events are never lost due to ticket creation issues.
+
+### Manual Ticket Creation (Still Supported)
+
+You can still add tickets manually via Wix Dashboard:
+
+1. Open Wix Dashboard → Events
+2. Click on your event
+3. Click "Manage Tickets" button
+4. Add ticket types with pricing
+5. Tickets automatically go on sale when added
+
+This is useful for:
+- ✅ Complex ticket configurations (early bird, VIP, etc.)
+- ✅ Multiple ticket tiers
+- ✅ Custom policies or descriptions
+- ✅ Events that need manual review before going on sale
 
 ## Testing
+
+### Test Ticket Automation
+
+```bash
+# Test end-to-end ticket automation
+python test_ticket_automation.py
+```
+
+This script:
+1. Creates a TICKETING event
+2. Automatically creates a "General Admission" ticket ($25, capacity 50)
+3. Verifies the event and ticket were created successfully
+
+**Expected Output:**
+```
+✅ TEST PASSED - Ticket Automation Working!
+```
 
 ### Test All Registration Formats
 
@@ -259,15 +329,14 @@ This script tests 10 different registration field formats to verify which works.
 
 **Result:** Only `initialType: "TICKETING"` succeeds.
 
-### Create Test Event
+### Create Test Event (Manual)
 
 ```bash
-# Create ticketed event placeholder
+# Create ticketed event with automatic ticket creation
 python dev_events.py create "Test Ticket Event" 7 false TICKETS
 
-# Verify event shows "Tickets are not on sale" on your Wix site
-# Add tickets via Dashboard
-# Verify tickets go on sale
+# Verify event and ticket appear in Wix Dashboard
+# Try purchasing a ticket to confirm it works
 ```
 
 ## Best Practices
@@ -287,6 +356,7 @@ python dev_events.py create "Test Ticket Event" 7 false TICKETS
 ## Summary
 
 ✅ **Solution Found:** Use `registration.initialType = "TICKETING"` (not "TICKETS")
-✅ **Workflow:** API creates event → Dashboard adds tickets
-✅ **Simple:** Perfect for small business automation
-✅ **Maintainable:** One language (Python), one approach (REST API)
+✅ **Automated Workflow:** API creates event → API creates tickets → Tickets on sale immediately
+✅ **Graceful Fallback:** If ticket creation fails, manual Dashboard option available
+✅ **Simple:** Perfect for small business automation with end-to-end automation
+✅ **Maintainable:** One language (Python), one approach (REST API), shared WixClient library

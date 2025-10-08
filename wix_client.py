@@ -84,6 +84,13 @@ class WixClient:
                         print(f"[!] Rate limited. Retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
                         time.sleep(wait_time)
                         continue
+                # Print detailed error for debugging
+                if e.response is not None:
+                    try:
+                        error_body = e.response.json()
+                        print(f"[!] API Error: {error_body}")
+                    except:
+                        print(f"[!] API Error: {e.response.text}")
                 # Re-raise other HTTP errors or final retry
                 raise
 
@@ -281,8 +288,51 @@ class WixClient:
 
         return upload_data.get('fileId')
 
-    # NOTE: Ticket definitions must be created via Wix Dashboard
-    # The API requires complex setup that's better handled manually
+    def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
+                                 capacity: int = None, currency: str = "USD") -> Dict[str, Any]:
+        """
+        Create a ticket definition for a TICKETING event
+
+        Args:
+            event_id: The event ID to create tickets for
+            ticket_name: Name of the ticket (e.g., "General Admission")
+            price: Ticket price (e.g., 25.00)
+            capacity: Maximum number of tickets available (optional)
+            currency: Currency code (default: USD)
+
+        Returns:
+            Dict containing the created ticket definition
+
+        Note:
+            - Only works for events with registration.initialType = "TICKETING"
+            - Uses simple defaults suitable for small business use
+            - Buyer pays fees (standard Wix configuration)
+        """
+        ticket_data = {
+            "ticketDefinition": {
+                "eventId": event_id,  # Required in body
+                "name": ticket_name,
+                "limitPerCheckout": 10,  # Max tickets per order
+                "pricingMethod": {
+                    "fixedPrice": {
+                        "value": str(price),
+                        "currency": currency
+                    }
+                },
+                "feeType": "FEE_ADDED_AT_CHECKOUT"  # Required: Buyer pays fees
+            }
+        }
+
+        # Add capacity limit if specified
+        if capacity:
+            ticket_data["ticketDefinition"]["capacity"] = capacity
+
+        response = self._request(
+            'POST',
+            '/events-ticket-definitions/v3/ticket-definitions',
+            json=ticket_data
+        )
+        return response.json().get('ticketDefinition', {})
 
     # Utility Methods
 
