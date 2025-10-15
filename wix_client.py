@@ -292,7 +292,7 @@ class WixClient:
         raise Exception("Upload succeeded but no file descriptor returned")
 
     def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
-                                 capacity: int = None, currency: str = "USD") -> Dict[str, Any]:
+                                 capacity: Optional[int] = None, currency: str = "USD") -> Dict[str, Any]:
         """
         Create a ticket definition for a TICKETING event
 

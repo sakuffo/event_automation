@@ -6,7 +6,7 @@ Automate RSVP and ticket purchases for testing without using live site
 
 import sys
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from wix_client import WixClient
 
 # Fix Windows console encoding for emojis
@@ -16,7 +16,7 @@ if sys.platform == 'win32':
 
 
 def create_test_rsvp(client: WixClient, event_id: str, name: str = "Test User",
-                     email: str = "test@example.com", guests: int = 1) -> Dict[str, Any]:
+                     email: str = "test@example.com", guests: int = 1) -> Optional[Dict[str, Any]]:
     """
     Create a test RSVP for an event
 
@@ -111,7 +111,7 @@ def list_event_rsvps(client: WixClient, event_id: str):
 
 
 def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General Admission",
-                        price: float = 25.0, currency: str = "USD", quantity: int = None):
+                        price: float = 25.0, currency: str = "USD", quantity: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Add a ticket definition to an existing event"""
     print(f"Adding ticket to event {event_id}...")
     print(f"   Ticket: {name}")
@@ -121,10 +121,10 @@ def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General A
     try:
         result = client.create_ticket_definition(
             event_id=event_id,
-            name=name,
+            ticket_name=name,
             price=price,
             currency=currency,
-            quantity=quantity
+            capacity = quantity
         )
         print(f"✅ Ticket definition created successfully!")
         ticket_def = result.get('ticketDefinition', {})
@@ -133,17 +133,17 @@ def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General A
         return result
     except Exception as e:
         print(f"❌ Failed to create ticket definition: {e}")
-        if hasattr(e, 'response') and e.response is not None:
+        if hasattr(e, 'response') and e.response is not None: #type: ignore
             try:
-                error_detail = e.response.json()
+                error_detail = e.response.json() #type: ignore
                 print(f"   Error details: {json.dumps(error_detail, indent=2)}")
             except:
-                print(f"   Response: {e.response.text}")
+                print(f"   Response: {e.response.text}") #type: ignore
         return None
 
 
 def create_test_ticket_order(client: WixClient, event_id: str, ticket_definitions: List[Dict],
-                             buyer_name: str = "Test Buyer", buyer_email: str = "buyer@example.com"):
+                             buyer_name: str = "Test Buyer", buyer_email: str = "buyer@example.com") -> Optional[Dict[str, Any]]:
     """Create a test ticket order (for paid tickets)"""
     print(f"Creating ticket order for event {event_id}...")
 
