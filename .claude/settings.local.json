@@ -19,7 +19,9 @@
       "Bash(python:*)",
       "Bash(where python)",
       "Bash(tee:*)",
-      "Bash(del test_registration_api.py)"
+      "Bash(del test_registration_api.py)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
