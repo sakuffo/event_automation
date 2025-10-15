@@ -36,8 +36,26 @@ GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
 
 # Constants
-SHEET_RANGE = 'Sheet1!A2:N100'  # Columns: A-L (existing) + M (Teaser) + N (Desc)
+SHEET_RANGE = 'Sheet1!A1:Z100'  # Read all columns, headers in row 1
 TIMEZONE = 'America/Toronto'
+
+# Column mapping: Maps various possible header names to standardized field names
+# This allows flexibility in naming while maintaining code consistency
+COLUMN_MAPPING = {
+    'event_name': ['event_name', 'event name', 'name', 'title'],
+    'event_type': ['event_type', 'event type', 'type', 'category'],
+    'start_date': ['start_date', 'start date', 'date', 'event date'],
+    'start_time': ['start_time', 'start time', 'time'],
+    'end_date': ['end_date', 'end date'],
+    'end_time': ['end_time', 'end time'],
+    'location': ['location', 'venue', 'place', 'address'],
+    'ticket_price': ['ticket_price', 'ticket price', 'price', 'cost'],
+    'capacity': ['capacity', 'max capacity', 'max_capacity', 'seats'],
+    'registration_type': ['registration_type', 'registration type', 'reg type', 'type'],
+    'image_url': ['image_url', 'image url', 'image', 'photo', 'picture'],
+    'teaser': ['short_description', 'short description', 'teaser', 'summary'],
+    'description': ['detailed_description', 'detailed description', 'desc', 'details'],
+}
 
 
 def validate_credentials() -> bool:
@@ -99,8 +117,41 @@ def get_google_sheets_service():
         raise
 
 
+def normalize_header(header: str) -> str:
+    """Normalize header to lowercase with underscores"""
+    return header.strip().lower().replace(' ', '_').replace('-', '_')
+
+
+def build_column_map(headers: List[str]) -> Dict[str, int]:
+    """
+    Build a mapping from standardized field names to column indices.
+    This allows flexible column ordering and naming in the spreadsheet.
+
+    Args:
+        headers: List of column headers from the spreadsheet
+
+    Returns:
+        Dict mapping field names to column indices
+    """
+    column_map = {}
+    normalized_headers = [normalize_header(h) for h in headers]
+
+    # For each field we need, find which column it's in
+    for field_name, possible_names in COLUMN_MAPPING.items():
+        for possible_name in possible_names:
+            normalized_possible = normalize_header(possible_name)
+            if normalized_possible in normalized_headers:
+                column_map[field_name] = normalized_headers.index(normalized_possible)
+                break
+
+    return column_map
+
+
 def fetch_events_from_sheet() -> List[Dict[str, Any]]:
-    """Fetch events from Google Sheet"""
+    """
+    Fetch events from Google Sheet using flexible header-based column mapping.
+    This allows columns to be added, removed, or reordered without breaking the code.
+    """
     print("📊 Fetching events from Google Sheets...")
 
     service = get_google_sheets_service()
@@ -117,33 +168,76 @@ def fetch_events_from_sheet() -> List[Dict[str, Any]]:
             print("No data found in spreadsheet.")
             return []
 
+        # First row contains headers
+        headers = rows[0]
+        data_rows = rows[1:]
+
+        # Build column mapping from headers
+        column_map = build_column_map(headers)
+
+        # Check for required columns
+        required_fields = ['event_name', 'start_date', 'start_time', 'location']
+        missing_fields = [f for f in required_fields if f not in column_map]
+        if missing_fields:
+            raise ValueError(f"Missing required columns: {', '.join(missing_fields)}")
+
+        print(f"   ✓ Found {len(column_map)} recognized columns")
+
         events = []
-        for row in rows:
-            # Pad row to ensure we have all columns (A-N = 14 columns)
-            while len(row) < 14:
+        for row in data_rows:
+            # Skip empty rows
+            if not row or not any(row):
+                continue
+
+            # Pad row to match header length
+            while len(row) < len(headers):
                 row.append('')
 
+            # Helper function to safely get column value
+            def get_col(field_name: str, default: str = '') -> str:
+                idx = column_map.get(field_name)
+                if idx is None or idx >= len(row):
+                    return default
+                return row[idx].strip() if row[idx] else default
+
+            # Extract event data using column mapping
+            event_name = get_col('event_name')
+            if not event_name:  # Skip rows without event name
+                continue
+
             # Handle registration type (convert TICKETS → TICKETING for REST API)
-            reg_type = row[10] or 'RSVP'
-            if reg_type == 'TICKETS':
-                print(f'   📋 Note: "{row[0]}" uses TICKETS - creating TICKETING event (add tickets via Dashboard)')
+            reg_type = get_col('registration_type', 'RSVP')
+            if reg_type.upper() == 'TICKETS':
+                print(f'   📋 Note: "{event_name}" uses TICKETS - creating TICKETING event')
                 reg_type = 'TICKETING'  # REST API uses "TICKETING" not "TICKETS"
 
+            # Parse numeric fields with defaults
+            ticket_price_str = get_col('ticket_price', '0')
+            try:
+                ticket_price = float(ticket_price_str) if ticket_price_str else 0.0
+            except ValueError:
+                ticket_price = 0.0
+
+            capacity_str = get_col('capacity', '100')
+            try:
+                capacity = int(capacity_str) if capacity_str else 100
+            except ValueError:
+                capacity = 100
+
             events.append({
-                'name': row[0],
-                'event_type': row[1],
-                'start_date': row[2],  # YYYY-MM-DD
-                'start_time': row[3],  # HH:MM
-                'end_date': row[4],
-                'end_time': row[5],
-                'location': row[6],
-                'description': row[7],
-                'ticket_price': float(row[8]) if row[8] else 0.0,
-                'capacity': int(row[9]) if row[9] else 100,
+                'name': event_name,
+                'event_type': get_col('event_type'),
+                'start_date': get_col('start_date'),
+                'start_time': get_col('start_time'),
+                'end_date': get_col('end_date') or get_col('start_date'),  # Default to start_date
+                'end_time': get_col('end_time') or get_col('start_time'),  # Default to start_time
+                'location': get_col('location'),
+                'ticket_price': ticket_price,
+                'capacity': capacity,
                 'registration_type': reg_type,
-                'image_url': row[11],  # Google Drive URL or file ID
-                'teaser': row[12],      # Short description/teaser (column M)
-                'detailed_desc': row[13]  # Detailed description (column N)
+                'image_url': get_col('image_url'),
+                'teaser': get_col('teaser'),
+                'description': get_col('description'),
             })
 
         print(f"Found {len(events)} events in spreadsheet\n")
@@ -332,12 +426,14 @@ def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) ->
     }
 
     # Add optional teaser (short description) if provided
+    # NOTE: Wix API currently has a known issue where these fields don't persist
     if event.get('teaser'):
         event_data['shortDescription'] = event['teaser']
 
     # Add optional detailed description if provided
-    if event.get('detailed_desc'):
-        event_data['detailedDescription'] = event['detailed_desc']
+    # NOTE: Wix API currently has a known issue where these fields don't persist
+    if event.get('description'):
+        event_data['detailedDescription'] = event['description']
 
     # Add main image if uploaded successfully
     # The file descriptor contains: {'id': '...', 'url': '...', 'media': {'image': {'image': {'width': ..., 'height': ...}}}}
