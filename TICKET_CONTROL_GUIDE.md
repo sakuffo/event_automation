@@ -264,7 +264,7 @@ client.create_ticket_definition(
     ticket_name="General Admission",
     price=25.00,
     capacity=50,
-    currency="USD"  # Optional, defaults to USD
+    currency="CAD"  # Optional, defaults to CAD
 )
 ```
 
@@ -280,7 +280,7 @@ client.create_ticket_definition(
         "pricingMethod": {
             "fixedPrice": {
                 "value": "25.00",
-                "currency": "USD"
+                "currency": "CAD"
             }
         },
         "feeType": "FEE_ADDED_AT_CHECKOUT",

@@ -247,7 +247,7 @@ ticket_data = {
         "pricingMethod": {  # Object format (not string)
             "fixedPrice": {
                 "value": "25.00",
-                "currency": "USD"
+                "currency": "CAD"
             }
         },
         "feeType": "FEE_ADDED_AT_CHECKOUT",  # Buyer pays fees

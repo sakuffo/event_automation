@@ -111,7 +111,7 @@ def list_event_rsvps(client: WixClient, event_id: str):
 
 
 def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General Admission",
-                        price: float = 25.0, currency: str = "USD", quantity: Optional[int] = None) -> Optional[Dict[str, Any]]:
+                        price: float = 25.0, currency: str = "CAD", quantity: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Add a ticket definition to an existing event"""
     print(f"Adding ticket to event {event_id}...")
     print(f"   Ticket: {name}")
@@ -220,7 +220,7 @@ Usage:
 
 Examples:
   # Add ticket to existing event
-  python dev_tickets.py add-ticket abc123 "General Admission" 25 USD
+  python dev_tickets.py add-ticket abc123 "General Admission" 25 CAD
   python dev_tickets.py add-ticket abc123 "VIP Pass" 50 CAD
 
   # Create single RSVP
@@ -249,7 +249,7 @@ Examples:
             event_id = sys.argv[2]
             ticket_name = sys.argv[3] if len(sys.argv) > 3 else "General Admission"
             price = float(sys.argv[4]) if len(sys.argv) > 4 else 25.0
-            currency = sys.argv[5] if len(sys.argv) > 5 else "USD"
+            currency = sys.argv[5] if len(sys.argv) > 5 else "CAD"
 
             add_ticket_to_event(client, event_id, ticket_name, price, currency)
 

@@ -50,11 +50,17 @@ class WixClient:
 
     def _headers(self, content_type: str = 'application/json') -> Dict[str, str]:
         """Get standard headers for Wix API requests"""
-        return {
+        headers = {
             'Authorization': self.api_key,
             'wix-site-id': self.site_id,
             'Content-Type': content_type
         }
+
+        # Add account ID if available (required for some APIs like Site Media)
+        if self.account_id:
+            headers['wix-account-id'] = self.account_id
+
+        return headers
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make a request to Wix API with retry logic and error handling"""
@@ -292,7 +298,7 @@ class WixClient:
         raise Exception("Upload succeeded but no file descriptor returned")
 
     def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
-                                 capacity: Optional[int] = None, currency: str = "USD") -> Dict[str, Any]:
+                                 capacity: Optional[int] = None, currency: str = "CAD") -> Dict[str, Any]:
         """
         Create a ticket definition for a TICKETING event
 
@@ -301,7 +307,7 @@ class WixClient:
             ticket_name: Name of the ticket (e.g., "General Admission")
             price: Ticket price (e.g., 25.00)
             capacity: Maximum number of tickets available (optional)
-            currency: Currency code (default: USD)
+            currency: Currency code (default: CAD)
 
         Returns:
             Dict containing the created ticket definition

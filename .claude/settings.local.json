@@ -21,7 +21,11 @@
       "Bash(tee:*)",
       "Bash(del test_registration_api.py)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(git log:*)",
+      "Read(//c/Users/saaku/mcp-servers/wix-mcp-server/**)",
+      "Bash(npm:*)",
+      "Read(//c/Users/saaku/AppData/Roaming/Code/User/**)"
     ],
     "deny": [],
     "ask": []

@@ -45,7 +45,7 @@ Ensure ZERO regression when refactoring sync_events.py to use wix_client.py
 | Functionality | Status | Must Work |
 |---------------|--------|-----------|
 | Search events | `python dev_tickets.py search-event "Test"` | ✅ YES |
-| Add ticket (API) | `python dev_tickets.py add-ticket <id> "GA" 25 USD` | ⚠️ May not work (complex API) |
+| Add ticket (API) | `python dev_tickets.py add-ticket <id> "GA" 25 CAD` | ⚠️ May not work (complex API) |
 | RSVP creation | `python dev_tickets.py rsvp <id>` | ⚠️ DEPRECATED (404 error) |
 | List RSVPs | `python dev_tickets.py list-rsvps <id>` | ⚠️ DEPRECATED (404 error) |
 

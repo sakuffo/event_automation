@@ -62,7 +62,7 @@ POST /events/v1/ticket-definitions
     "pricingMethod": "FIXED_PRICE",
     "price": {
       "amount": "25.0",
-      "currency": "USD"
+      "currency": "CAD"
     },
     "feeConfig": {
       "type": "FEE_ADDED_AT_CHECKOUT",  # Complex fee configuration
@@ -127,7 +127,7 @@ For simplicity, use these defaults:
     "pricingMethod": "FIXED_PRICE",
     "price": {
         "amount": str(ticket_price),  # From Google Sheets
-        "currency": "USD"
+        "currency": "CAD"
     },
     "feeConfig": {
         "type": "FEE_ADDED_AT_CHECKOUT"  # Buyer pays fees (standard)

@@ -392,6 +392,22 @@ def upload_image_to_wix(image_url: str, event_name: str) -> Dict[str, Any]:
         return None
 
 
+def convert_date_to_iso(date_str: str) -> str:
+    """Convert date from MM/DD/YYYY to YYYY-MM-DD ISO 8601 format"""
+    from datetime import datetime
+
+    # Try common date formats
+    for fmt in ['%m/%d/%Y', '%Y-%m-%d', '%m-%d-%Y', '%d/%m/%Y']:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime('%Y-%m-%d')
+        except ValueError:
+            continue
+
+    # If no format works, return as-is and let it fail with a clear error
+    raise ValueError(f"Unable to parse date: {date_str}. Expected format: MM/DD/YYYY or YYYY-MM-DD")
+
+
 def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) -> bool:
     """
     Create an event in Wix using WixClient
@@ -404,14 +420,22 @@ def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) ->
     file_descriptor = None
     if event.get('image_url'):
         file_descriptor = upload_image_to_wix(event['image_url'], event['name'])
+        if file_descriptor:
+            print(f"   ✅ Image uploaded successfully")
+        else:
+            print(f"   ⚠️  Proceeding without image")
+
+    # Convert dates to ISO 8601 format
+    start_date_iso = convert_date_to_iso(event['start_date'])
+    end_date_iso = convert_date_to_iso(event['end_date'])
 
     # Build event data
     event_data = {
         'title': event['name'],
         'dateAndTimeSettings': {
             'dateAndTimeTbd': False,
-            'startDate': f"{event['start_date']}T{event['start_time']}:00Z",
-            'endDate': f"{event['end_date']}T{event['end_time']}:00Z",
+            'startDate': f"{start_date_iso}T{event['start_time']}:00Z",
+            'endDate': f"{end_date_iso}T{event['end_time']}:00Z",
             'timeZoneId': TIMEZONE
         },
         'location': {
@@ -427,13 +451,15 @@ def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) ->
 
     # Add optional teaser (short description) if provided
     # NOTE: Wix API currently has a known issue where these fields don't persist
-    if event.get('teaser'):
-        event_data['shortDescription'] = event['teaser']
+    teaser = event.get('teaser', '').strip() if event.get('teaser') else None
+    if teaser:
+        event_data['shortDescription'] = teaser
 
     # Add optional detailed description if provided
     # NOTE: Wix API currently has a known issue where these fields don't persist
-    if event.get('description'):
-        event_data['detailedDescription'] = event['description']
+    description = event.get('description', '').strip() if event.get('description') else None
+    if description:
+        event_data['detailedDescription'] = description
 
     # Add main image if uploaded successfully
     # The file descriptor contains: {'id': '...', 'url': '...', 'media': {'image': {'image': {'width': ..., 'height': ...}}}}
@@ -454,6 +480,11 @@ def create_wix_event(event: Dict[str, Any], auto_create_tickets: bool = True) ->
             }
 
     try:
+        # Debug: Print event data structure
+        import json
+        print(f"   🔍 Debug - Event data being sent:")
+        print(json.dumps(event_data, indent=2))
+
         client = WixClient()
         created_event = client.create_event(event_data)
         event_id = created_event.get('id')
