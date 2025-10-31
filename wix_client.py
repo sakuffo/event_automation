@@ -334,7 +334,8 @@ class WixClient:
 
         # Add capacity limit if specified
         if capacity:
-            ticket_data["ticketDefinition"]["capacity"] = capacity
+            ticket_data["ticketDefinition"]["limited"] = True
+            ticket_data["ticketDefinition"]["quantity"] = capacity
 
         response = self._request(
             'POST',
