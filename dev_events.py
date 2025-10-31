@@ -311,6 +311,91 @@ def delete_test_events(client: WixClient, confirm: bool = False):
     bulk_delete_events(client, pattern='test', drafts_only=False, confirm=confirm)
 
 
+def delete_events_after_date(client: WixClient, cutoff_date: str, confirm: bool = False):
+    """Delete all events starting on or after a specific date
+
+    Args:
+        client: WixClient instance
+        cutoff_date: Date string in YYYY-MM-DD format
+        confirm: If True, actually delete the events
+    """
+    from datetime import datetime
+
+    print(f"🔍 Fetching events starting on or after {cutoff_date}...\n")
+
+    # Parse cutoff date (make it timezone-aware UTC)
+    try:
+        from datetime import timezone
+        cutoff = datetime.strptime(cutoff_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    except ValueError:
+        print(f"❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-01-01)")
+        return
+
+    all_events = client.list_events(limit=100, include_drafts=True)
+
+    # Filter events by date
+    events_to_delete = []
+    for event in all_events:
+        start_datetime = event.get('dateAndTimeSettings', {}).get('startDate', '')
+        if not start_datetime:
+            continue
+
+        try:
+            event_date = datetime.fromisoformat(start_datetime.replace('Z', '+00:00'))
+            if event_date >= cutoff:
+                events_to_delete.append(event)
+        except Exception as e:
+            print(f"⚠️  Could not parse date for event {event.get('id')}: {e}")
+            continue
+
+    if not events_to_delete:
+        print(f"No events found starting on or after {cutoff_date}")
+        return
+
+    print(f"Found {len(events_to_delete)} event(s) to delete:\n")
+    for i, event in enumerate(events_to_delete, 1):
+        title = event.get('title', 'Untitled')
+        event_id = event.get('id')
+        start = event.get('dateAndTimeSettings', {}).get('startDate', 'N/A')
+        status = event.get('status', 'UNKNOWN')
+        print(f"{i}. {title}")
+        print(f"   Start: {start}")
+        print(f"   Status: {status}")
+        print(f"   ID: {event_id}")
+        print()
+
+    if not confirm:
+        print("⚠️  Add --confirm flag to proceed with deletion")
+        return
+
+    print("\n🗑️  Deleting events...\n")
+
+    deleted = 0
+    failed = 0
+
+    for event in events_to_delete:
+        event_id = event.get('id')
+        title = event.get('title', 'Untitled')
+
+        try:
+            success = client.delete_event(event_id)
+            if success:
+                print(f"✅ Deleted: {title}")
+                deleted += 1
+            else:
+                print(f"❌ Failed: {title}")
+                failed += 1
+        except Exception as e:
+            print(f"❌ Failed: {title} - {e}")
+            failed += 1
+
+        # Rate limiting
+        import time
+        time.sleep(0.3)
+
+    print(f"\n📊 Results: {deleted} deleted, {failed} failed")
+
+
 def create_sample_events(client: WixClient, count: int = 5):
     """Create multiple sample events for testing"""
     print(f"\n📝 Creating {count} sample events...\n")
@@ -418,6 +503,7 @@ Usage:
   python dev_events.py delete-drafts [--confirm]
   python dev_events.py delete-test [--confirm]
   python dev_events.py delete-pattern <pattern> [--confirm] [--drafts-only]
+  python dev_events.py delete-after-date <YYYY-MM-DD> [--confirm]
   python dev_events.py create-samples [count]
   python dev_events.py search <query>
   python dev_events.py check-tickets <event_id>
@@ -471,6 +557,9 @@ Examples:
 
   # Delete only draft events matching pattern
   python dev_events.py delete-pattern "Concert" --confirm --drafts-only
+
+  # Delete all events starting from January 2026 onwards
+  python dev_events.py delete-after-date 2026-01-01 --confirm
 
   # Create 10 sample events (mix of RSVP and TICKETS, prefixed with "-test-")
   python dev_events.py create-samples 10
@@ -563,6 +652,15 @@ Examples:
             confirm = '--confirm' in sys.argv
             drafts_only = '--drafts-only' in sys.argv
             bulk_delete_events(client, pattern=pattern, drafts_only=drafts_only, confirm=confirm)
+
+        elif command == 'delete-after-date':
+            if len(sys.argv) < 3:
+                print("Error: date required (format: YYYY-MM-DD)")
+                sys.exit(1)
+
+            cutoff_date = sys.argv[2]
+            confirm = '--confirm' in sys.argv
+            delete_events_after_date(client, cutoff_date, confirm)
 
         elif command == 'create-samples':
             count = int(sys.argv[2]) if len(sys.argv) > 2 else 5

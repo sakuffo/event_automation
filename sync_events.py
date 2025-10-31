@@ -291,10 +291,12 @@ def get_existing_event_keys() -> Set[str]:
         existing_keys = set()
         for event in events:
             title = event.get('title', '')
-            start_date = event.get('dateAndTimeSettings', {}).get('startDate', '')
-            if start_date:
-                date_part = start_date.split('T')[0]
-                key = f"{title}|{date_part}"
+            start_datetime = event.get('dateAndTimeSettings', {}).get('startDate', '')
+            if start_datetime:
+                # Extract date and time: "2024-12-14T10:00:00Z" → "2024-12-14|10:00"
+                date_part = start_datetime.split('T')[0]  # "2024-12-14"
+                time_part = start_datetime.split('T')[1][:5] if 'T' in start_datetime else '00:00'  # "10:00"
+                key = f"{title}|{date_part}|{time_part}"
                 existing_keys.add(key)
 
         print(f"Found {len(existing_keys)} existing events\n")
@@ -556,7 +558,9 @@ def sync_events(auto_create_tickets: bool = True):
 
         for event in events:
             # Create unique key for duplicate detection
-            event_key = f"{event['name']}|{event['start_date']}"
+            # Convert date to ISO format to match Wix format (YYYY-MM-DD)
+            start_date_iso = convert_date_to_iso(event['start_date'])
+            event_key = f"{event['name']}|{start_date_iso}|{event['start_time']}"
 
             # Skip if already exists
             if event_key in existing_keys:
