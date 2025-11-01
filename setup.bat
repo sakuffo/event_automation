@@ -72,9 +72,18 @@ if %errorlevel% equ 0 (
 REM Create .env file if it doesn't exist
 echo.
 if not exist .env (
-    echo Creating .env file from template...
-    copy .env.example .env >nul
-    echo ✅ .env file created
+    echo Creating .env template...
+    (
+        echo # Wix Credentials
+        echo WIX_API_KEY=
+        echo WIX_ACCOUNT_ID=
+        echo WIX_SITE_ID=
+        echo.
+        echo # Google Sheets
+        echo GOOGLE_SHEET_ID=
+        echo GOOGLE_CREDENTIALS=
+    )> .env
+    echo ✅ .env template created
     echo.
     echo ⚠️  IMPORTANT: Edit .env file and add your credentials
     echo    - WIX_API_KEY

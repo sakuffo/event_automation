@@ -31,7 +31,7 @@ Track your progress setting up the Wix Events + Google Sheets sync.
 
 - [ ] Downloaded/cloned project files
 - [ ] Ran setup script (setup.sh or setup.bat)
-- [ ] Created .env file from .env.example
+- [ ] Created .env file in project root
 - [ ] Added Wix credentials to .env
 - [ ] Added Google Sheet ID to .env
 - [ ] Added Google credentials JSON to .env (one line)

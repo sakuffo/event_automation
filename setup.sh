@@ -72,9 +72,18 @@ fi
 # Create .env file if it doesn't exist
 echo ""
 if [ ! -f ".env" ]; then
-    echo "Creating .env file from template..."
-    cp .env.example .env
-    echo "✅ .env file created"
+    echo "Creating .env template..."
+    cat <<'EOF' > .env
+# Wix Credentials
+WIX_API_KEY=
+WIX_ACCOUNT_ID=
+WIX_SITE_ID=
+
+# Google Sheets
+GOOGLE_SHEET_ID=
+GOOGLE_CREDENTIALS=
+EOF
+    echo "✅ .env template created"
     echo ""
     echo "⚠️  IMPORTANT: Edit .env file and add your credentials"
     echo "   - WIX_API_KEY"

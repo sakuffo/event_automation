@@ -23,12 +23,7 @@ This folder contains technical documentation for the Event Automation project.
   - Duplication analysis
   - Refactoring recommendations
   - Architecture overview
-
-- [REFACTOR_COMPLETE.md](REFACTOR_COMPLETE.md) - Refactor summary (2025-10-07)
-  - Changes made
-  - Benefits achieved
-  - Testing results
-  - Zero regression verification
+  - References to the 2025-10-07 refactor
 
 ### Testing & Quality
 
@@ -40,7 +35,7 @@ This folder contains technical documentation for the Event Automation project.
 
 ### Change History
 
-- [CHANGELOG.md](CHANGELOG.md) - Version history
+- [HISTORY.md](HISTORY.md) - Project history and change log
   - Feature additions
   - Bug fixes
   - Deprecations
@@ -53,7 +48,7 @@ This folder contains technical documentation for the Event Automation project.
 1. **New to the project?** Start with [TICKETING.md](TICKETING.md)
 2. **Want to develop/test?** Read [DEV_TOOLS.md](DEV_TOOLS.md)
 3. **Understanding architecture?** Check [CODE_AUDIT.md](CODE_AUDIT.md)
-4. **Recent changes?** See [CHANGELOG.md](CHANGELOG.md)
+4. **Recent changes?** See [HISTORY.md](HISTORY.md)
 
 ### Project Status
 

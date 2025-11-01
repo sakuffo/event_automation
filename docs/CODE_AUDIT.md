@@ -1,243 +1,45 @@
-# Code Audit: Duplication & Architecture Analysis
+# Architecture Overview & Hardening Checklist (2025-10-31)
 
-## Current Architecture
+This supersedes the early duplication audit. The project now ships as a small package (`event_sync/`) with clear module boundaries and automated tests.
 
-### File Purposes
+## Module Map
 
-| File | Purpose | Uses wix_client.py? | Status |
-|------|---------|---------------------|--------|
-| **wix_client.py** | Core API client library | N/A (IS the client) | ✅ Clean |
-| **dev_events.py** | Event CRUD operations | ✅ YES | ✅ Clean |
-| **dev_tickets.py** | Ticket/RSVP tools | ✅ YES | ⚠️ Has deprecated methods |
-| **sync_events.py** | Google Sheets → Wix sync | ❌ **NO** | ⚠️ **DUPLICATED CODE** |
+| Module / Script | Responsibility | Notes |
+| --- | --- | --- |
+| `event_sync/cli.py` | Argparse CLI with `--log-level` support. | Invoked by the compatibility wrapper `sync_events.py`. |
+| `event_sync/config.py` | Loads and validates env configuration. | Raises `ConfigError` if required values are missing. |
+| `event_sync/runtime.py` | Lazy Google/Wix client factory + caches. | Shared by orchestration/tests. |
+| `event_sync/sheets.py` | Reads Sheet rows, maps headers, returns validated `EventRecord` models. | Skips invalid rows with structured logging. |
+| `event_sync/models.py` | Pydantic models for event rows (date/time validation, registration normalization). | Enables unit tests + safer orchestration. |
+| `event_sync/images.py` | Drive download, Pillow-based resizing, Wix upload caching. | Respects 25 MB limit, logs size reductions. |
+| `event_sync/orchestrator.py` | High-level flows: validate, test, list, sync. | Uses logging instead of prints, works with typed models. |
+| `event_sync/logging_utils.py` | Thin helper to configure package-wide logging. | CLI sets log level globally. |
+| `wix_client.py` | REST wrapper with retry logic. | Reused by dev scripts and orchestrator. |
+| `dev_events.py` / `dev_tickets.py` | Manual tooling for operators. | Still rely on `WixClient`; RSVP endpoints remain deprecated. |
+| `tests/` | Pytest suite covering models + image compression. | Run locally via `make unit` and automatically in CI. |
 
-## Code Duplication Issues
+## Recent Improvements
 
-### 🔴 CRITICAL: sync_events.py Duplicates wix_client.py
+- 🔁 **Modularisation:** All Sheets/Drive/Wix glue lives inside `event_sync/` and is importable for tests or future tooling.
+- 🧾 **Central config:** Single source of truth for required env vars (`AppConfig.ensure_valid()`), replacing scattered `os.getenv()` checks.
+- 📋 **Typed events:** `EventRecord` normalises registration types, validates dates/times, and guards against negative capacities.
+- 🖼️ **Image hardening:** `prepare_image_for_wix()` compresses oversize photos with Pillow; warnings and successes flow through the logger.
+- 🧪 **Automated tests:** `pytest` suite exercises models and image logic; CI workflow (`ci.yml`) runs on every push/PR.
+- 📣 **Structured logging:** All orchestration output now routes through `logging`, allowing CLI users to raise/lower verbosity.
 
-`sync_events.py` reimplements the SAME functionality that already exists in `wix_client.py`:
+## Remaining Opportunities
 
-#### Duplicated Functions
+1. **Dev scripts parity:** `dev_events.py` / `dev_tickets.py` still use print-style logging and could adopt shared logging helpers.
+2. **End-to-end dry run:** Add a mocked integration test (responses/httpretty) to cover the full sync loop without hitting real services.
+3. **Credential scaffolding:** Offer a typed `.env.example` (with comments) generated from `AppConfig` to reduce setup mistakes.
+4. **Ticket automation roadmap:** If Wix re-enables RSVP APIs, reintroduce higher-level ticket automation behind feature flags.
+5. **Observability:** Consider emitting structured JSON logs or hooking into a lightweight error notifier for production runs.
 
-| Functionality | sync_events.py | wix_client.py | Lines Duplicated |
-|---------------|----------------|---------------|------------------|
-| List events | `list_wix_events()` | `list_events()` | ~30 lines |
-| Test connection | `test_wix_connection()` | Built into `__init__` | ~20 lines |
-| Create event | `create_wix_event()` | `create_event()` | ~40 lines |
-| Upload image | Inside `create_wix_event()` | `upload_image()` | ~50 lines |
-| Build headers | Inline in each function | `_headers()` | Repeated 5+ times |
-| Query events | `check_existing_events()` | `list_events()` | ~30 lines |
+## How to Validate Changes
 
-**Total Duplicated Code: ~170+ lines**
+1. `make install-dev`
+2. `make unit`
+3. (Optional) `python sync_events.py validate --log-level DEBUG`
+4. Review CI status (`ci.yml`) on the PR.
 
-### Specific Duplication Examples
-
-#### 1. Headers - Repeated 5+ times in sync_events.py
-
-```python
-# sync_events.py - Repeated everywhere
-headers={
-    'Authorization': WIX_API_KEY,
-    'wix-site-id': WIX_SITE_ID,
-    'Content-Type': 'application/json'
-}
-
-# wix_client.py - DRY (Don't Repeat Yourself)
-def _headers(self) -> Dict[str, str]:
-    return {
-        'Authorization': self.api_key,
-        'wix-site-id': self.site_id,
-        'Content-Type': 'application/json'
-    }
-```
-
-#### 2. List Events - Duplicate Logic
-
-```python
-# sync_events.py lines 173-183
-response = requests.post(
-    f"{WIX_BASE_URL}/events/query",
-    json={'query': {'paging': {'limit': 50}}},
-    headers={
-        'Authorization': WIX_API_KEY,
-        'wix-site-id': WIX_SITE_ID,
-        'Content-Type': 'application/json'
-    }
-)
-response.raise_for_status()
-return response.json().get('events', [])
-
-# wix_client.py lines 134-139 - SAME LOGIC
-response = self._request(
-    'POST',
-    '/events/v3/events/query',
-    json={'query': query}
-)
-return response.json().get('events', [])
-```
-
-#### 3. Upload Image - Duplicate Logic
-
-```python
-# sync_events.py lines 308-338 (~30 lines)
-response = requests.post(
-    upload_url,
-    json={'mimeType': mime_type, 'fileName': filename},
-    headers={...}
-)
-upload_data = response.json()
-upload_url = upload_data.get('uploadUrl')
-upload_response = requests.put(...)
-return upload_data.get('fileId')
-
-# wix_client.py lines 254-277 - IDENTICAL
-response = self._request(
-    'POST',
-    '/media-manager/v1/files/upload/url',
-    json={'mimeType': mime_type, 'fileName': filename}
-)
-upload_data = response.json()
-upload_url = upload_data.get('uploadUrl')
-upload_response = requests.put(...)
-return upload_data.get('fileId')
-```
-
-## Problems with Current Duplication
-
-### 1. **Maintenance Burden**
-- Bug fixes need to be applied in TWO places
-- Features need to be added in TWO places
-- Changes to Wix API require updating TWO files
-
-### 2. **Inconsistency Risk**
-- `wix_client.py` has retry logic with exponential backoff
-- `sync_events.py` does NOT have retry logic
-- `wix_client.py` handles rate limiting (429 errors)
-- `sync_events.py` does NOT handle rate limiting
-
-### 3. **Missing Features in sync_events.py**
-- ❌ No retry on timeout
-- ❌ No retry on connection error
-- ❌ No rate limit handling
-- ❌ No exponential backoff
-- ❌ No dev/production mode switching
-
-### 4. **Code Smell**
-- Violates DRY (Don't Repeat Yourself) principle
-- Makes codebase harder to understand
-- Increases chance of bugs
-
-## Recommended Refactor
-
-### Option 1: Refactor sync_events.py to use wix_client.py ✅ RECOMMENDED
-
-**Changes Required:**
-
-```python
-# OLD (sync_events.py lines 1-32)
-import requests
-# ... manual config ...
-
-# NEW - Add one line
-from wix_client import WixClient
-
-# Initialize client
-wix = WixClient()
-
-# Replace all manual requests with:
-wix.list_events()        # Instead of list_wix_events()
-wix.create_event(data)   # Instead of create_wix_event()
-wix.upload_image(...)    # Instead of inline image upload
-```
-
-**Benefits:**
-- ✅ Remove ~170 lines of duplicated code
-- ✅ Automatic retry logic
-- ✅ Automatic rate limiting
-- ✅ Dev/production mode support
-- ✅ Single source of truth
-- ✅ Easier to maintain
-
-**Effort:** ~1-2 hours
-
-### Option 2: Keep as-is (NOT RECOMMENDED)
-
-**When this might make sense:**
-- If sync_events.py needs to remain completely standalone
-- If deploying without wix_client.py dependency
-
-**Problems:**
-- Still have all the duplication issues
-- Still missing retry/rate-limit logic
-- Higher maintenance cost
-
-## Impact Analysis
-
-### Files That Import wix_client.py
-
-```
-✅ dev_events.py
-✅ dev_tickets.py
-❌ sync_events.py  ← SHOULD import but doesn't
-```
-
-### Functions That Would Be Eliminated
-
-If we refactor sync_events.py to use wix_client.py:
-
-```python
-# Can DELETE these from sync_events.py:
-- test_wix_connection()      # Use: WixClient().__init__
-- list_wix_events()          # Use: wix.list_events()
-- check_existing_events()    # Use: wix.list_events() + search
-- create_wix_event()         # Use: wix.create_event()
-- Image upload logic         # Use: wix.upload_image()
-- All header building        # Built into wix_client
-
-# KEEP in sync_events.py (Google Sheets specific):
-- validate_credentials()
-- fetch_events_from_sheets()
-- parse_google_drive_url()
-- download_image_from_drive()
-- sync_events()             # Main orchestration
-```
-
-## Recommendation Summary
-
-### 🎯 Action Items (Priority Order)
-
-1. **HIGH PRIORITY:** Refactor `sync_events.py` to use `wix_client.py`
-   - Eliminates ~170 lines of duplicated code
-   - Adds retry/rate-limit logic automatically
-   - Single source of truth for API calls
-
-2. **MEDIUM PRIORITY:** Consider removing deprecated RSVP methods
-   - From `wix_client.py`
-   - From `dev_tickets.py`
-   - Only if confirmed permanently unavailable
-
-3. **LOW PRIORITY:** Add type hints consistency
-   - Some functions have type hints, some don't
-   - Consider using mypy for type checking
-
-### Why This Matters for Small Business
-
-**Current state:**
-- 3 separate scripts
-- 2 ways of calling Wix API (wix_client + direct requests)
-- ~170 lines of duplicated code
-- Missing features in production sync script
-
-**After refactor:**
-- 3 scripts, but all using same client library
-- 1 way of calling Wix API (wix_client)
-- ~170 fewer lines to maintain
-- Production sync gets retry/rate-limit for free
-
-**Simple = Maintainable = Better for small business (<2000 customers)**
-
----
-
-## ✅ REFACTOR COMPLETE (2025-10-07)
-
-All action items completed successfully. See [REFACTOR_COMPLETE.md](REFACTOR_COMPLETE.md) for details.
+Keep this document synced with future architectural changes so operators understand the moving pieces.

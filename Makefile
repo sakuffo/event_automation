@@ -1,4 +1,4 @@
-.PHONY: help setup install validate test list sync clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-rsvp dev-bulk-rsvp dev-search dev-clean-drafts dev-clean-test dev-clean-all
+.PHONY: help setup install install-dev validate test list sync unit clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-rsvp dev-bulk-rsvp dev-search dev-clean-drafts dev-clean-test dev-clean-all
 
 # Default target
 help:
@@ -7,10 +7,12 @@ help:
 	@echo "Production Commands:"
 	@echo "  make setup      - Complete setup (create venv, install deps, create .env)"
 	@echo "  make install    - Install Python dependencies"
+	@echo "  make install-dev- Install Python + dev/test dependencies"
 	@echo "  make validate   - Validate credentials configuration"
 	@echo "  make test       - Test Wix API connection"
 	@echo "  make list       - List existing Wix events"
 	@echo "  make sync       - Run the event sync"
+	@echo "  make unit       - Run automated unit tests"
 	@echo "  make clean      - Remove virtual environment and cache files"
 	@echo "  make activate   - Show how to activate virtual environment"
 	@echo ""
@@ -38,13 +40,20 @@ setup:
 	@python3 -m venv venv
 	@./venv/bin/pip install --upgrade pip
 	@./venv/bin/pip install -r requirements.txt
-	@if [ ! -f .env ]; then cp .env.example .env; echo "Created .env file - please add your credentials"; fi
+	@if [ ! -f .env ]; then \
+		printf "# Wix Credentials\nWIX_API_KEY=\nWIX_ACCOUNT_ID=\nWIX_SITE_ID=\n\n# Google Sheets\nGOOGLE_SHEET_ID=\nGOOGLE_CREDENTIALS=\n" > .env; \
+		echo "Created .env template - please add your credentials"; \
+	fi
 	@echo "Setup complete! Activate venv with: source venv/bin/activate"
 
 # Install dependencies
 install:
 	@echo "Installing dependencies..."
 	@pip install -r requirements.txt
+
+install-dev:
+	@echo "Installing dev/test dependencies..."
+	@pip install -r requirements-dev.txt
 
 # Validate credentials
 validate:
@@ -61,6 +70,9 @@ list:
 # Run sync
 sync:
 	@python sync_events.py sync
+
+unit:
+	@pytest
 
 # Clean up
 clean:

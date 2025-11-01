@@ -146,7 +146,7 @@ make setup
 
 ### 3.3 Configure Environment Variables
 
-1. Open `.env` file (created from `.env.example`)
+1. Create a new `.env` file in the project root (if it doesn't already exist) and open it in your editor.
 2. Add your credentials:
 
 ```bash

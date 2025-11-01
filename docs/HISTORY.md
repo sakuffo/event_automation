@@ -8,9 +8,10 @@ This document consolidates all historical documentation, changelogs, and develop
 
 1. [Project Timeline](#project-timeline)
 2. [Changelog](#changelog)
-3. [Code Refactor (2025-10-07)](#code-refactor-2025-10-07)
-4. [Ticket Automation Implementation (2025-10-08)](#ticket-automation-implementation-2025-10-08)
-5. [Documentation Organization (2025-10-07)](#documentation-organization-2025-10-07)
+3. [Hardening & Modularization (2025-10-31)](#hardening--modularization-2025-10-31)
+4. [Code Refactor (2025-10-07)](#code-refactor-2025-10-07)
+5. [Ticket Automation Implementation (2025-10-08)](#ticket-automation-implementation-2025-10-08)
+6. [Documentation Organization (2025-10-07)](#documentation-organization-2025-10-07)
 6. [Code Audit](#code-audit)
 
 ---
@@ -60,6 +61,25 @@ This document consolidates all historical documentation, changelogs, and develop
 ---
 
 ## Changelog
+
+### [2025-10-31] - Hardening & Modularization
+**Status:** ✅ Complete
+
+#### Added
+- `event_sync/` package (CLI, config, runtime, sheets, images, models, orchestrator, logging utilities).
+- `EventRecord` Pydantic model for sheet validation (dates, times, registration types, numeric guards).
+- Pillow-based image compression and structured logging pipeline.
+- Pytest suite (`tests/`), dev requirements file, and `make unit` target.
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`) running tests on push/PR.
+- `docs/ARCHITECTURE_AUDIT.md` snapshot of the new module layout.
+
+#### Changed
+- `sync_events.py` now a thin wrapper delegating to the package CLI with `--log-level` support.
+- `docs/CODE_AUDIT.md`, `README.md`, and `DEV_TOOLS.md` refreshed to describe modular architecture and testing workflow.
+
+#### Fixed
+- Replaced ad-hoc print statements with structured logging output.
+- Prevent oversized Google Drive images from failing Wix uploads by auto-compressing.
 
 ### [2025-10-15] - Cross-Platform Compatibility
 **Status:** ✅ Complete
@@ -487,10 +507,8 @@ event_automation/
     ├── TICKETING.md
     ├── DEV_TOOLS.md
     ├── CODE_AUDIT.md
-    ├── REFACTOR_COMPLETE.md
     ├── FUNCTIONALITY_TEST_PLAN.md
-    ├── CHANGELOG.md
-    └── HISTORY.md        ← This file
+    └── HISTORY.md        ← Consolidated change log + release history
 ```
 
 #### Benefits
@@ -520,7 +538,7 @@ All documentation verified against working code:
 |------|-----|--------|
 | README.md | docs/DEV_TOOLS.md | ✅ Valid |
 | README.md | docs/TICKETING.md | ✅ Valid |
-| README.md | docs/CHANGELOG.md | ✅ Valid |
+| README.md | docs/HISTORY.md | ✅ Valid |
 | .claude/claude.md | docs/* | ✅ Valid |
 | docs/README.md | All doc files | ✅ Valid |
 
@@ -692,5 +710,5 @@ All documentation verified against working code:
 ---
 
 **Document Created:** 2025-10-15
-**Last Updated:** 2025-10-15
+**Last Updated:** 2025-10-31
 **Status:** Complete

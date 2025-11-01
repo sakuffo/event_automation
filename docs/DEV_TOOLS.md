@@ -6,6 +6,7 @@ Automation scripts for testing and development without needing to use the live s
 
 The development toolkit includes:
 
+- **event_sync/** - Modular package used by the sync CLI (config, runtime, orchestrator)
 - **wix_client.py** - Reusable Python client for Wix APIs
 - **dev_events.py** - Full CRUD operations for events (RSVP, TICKETING, EXTERNAL, NO_REGISTRATION)
 - **dev_tickets.py** - Ticket management and search tools
@@ -21,6 +22,10 @@ The development toolkit includes:
 bash setup.sh
 # or
 make setup
+
+# For test tooling / CI parity
+make install-dev
+make unit
 ```
 
 ### 2. Configure Environment

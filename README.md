@@ -41,8 +41,12 @@ make validate       # Validate credentials
 make test          # Test connection
 make list          # List events
 make sync          # Run sync
+make install-dev   # Install dev/test dependencies
+make unit          # Run pytest suite
 make clean         # Clean up files
 ```
+
+All CLI subcommands accept `--log-level` (e.g., `python sync_events.py sync --log-level DEBUG`).
 
 ## Google Sheet Format
 
@@ -65,7 +69,7 @@ Your spreadsheet should have these columns (A-L):
 
 ## How It Works
 
-- **Simple procedural Python script** - easy to understand and modify
+- **Modular Python package (`event_sync/`)** - reusable components for Sheets, Drive, and Wix
 - **Google Sheets API** reads your spreadsheet using service account auth
 - **Wix Events API v3** creates events on your Wix site via REST API
 - **GitHub Actions** runs the sync automatically (daily + manual trigger)
@@ -87,22 +91,35 @@ This project uses Python + Wix REST API instead of JavaScript SDK because:
 
 ```
 .
-├── sync_events.py              # Main sync script
+├── event_sync/                # Modular sync package (config, CLI, services)
+│   ├── __init__.py
+│   ├── cli.py
+│   ├── config.py
+│   ├── constants.py
+│   ├── images.py
+│   ├── logging_utils.py
+│   ├── models.py
+│   ├── orchestrator.py
+│   ├── runtime.py
+│   └── sheets.py
+├── sync_events.py             # Compatibility wrapper (delegates to package CLI)
 ├── wix_client.py              # Reusable Wix API client library
 ├── dev_events.py              # Development: Event CRUD operations
 ├── dev_tickets.py             # Development: Ticket/RSVP automation
 ├── requirements.txt            # Python dependencies
-├── .env.example               # Environment variables template
-├── .env                       # Your credentials (create from .env.example)
+├── requirements-dev.txt        # Dev/test dependencies (pytest)
+├── .env                       # Your credentials (create manually; see SETUP.md)
 ├── setup.sh                   # Unix/Mac setup script
 ├── setup.bat                  # Windows setup script
 ├── Makefile                   # Command shortcuts
 ├── .github/
 │   └── workflows/
+│       ├── ci.yml             # CI pipeline (lint + tests)
 │       └── sync-events.yml    # GitHub Actions workflow
 ├── README.md                  # This file
 ├── SETUP.md                   # Detailed setup guide
 ├── DEV_TOOLS.md              # Development tools documentation
+├── docs/ARCHITECTURE_AUDIT.md # Current-state architecture snapshot
 └── CHECKLIST.md              # Setup checklist
 ```
 
@@ -180,6 +197,13 @@ DEV_WIX_API_KEY=your_dev_api_key
 DEV_WIX_SITE_ID=your_dev_site_id
 ```
 
+## Testing & Quality Checks
+
+- `make install-dev` – install production + testing dependencies.
+- `make unit` – run the pytest suite locally (includes new event model + image helpers).
+- GitHub Actions (`.github/workflows/ci.yml`) runs the same tests on every push/pull request.
+- Scheduled workflow (`sync-events.yml`) continues to run the production sync once credentials are validated.
+
 ## Documentation
 
 ### Getting Started
@@ -191,7 +215,7 @@ DEV_WIX_SITE_ID=your_dev_site_id
 
 - [docs/DEV_TOOLS.md](docs/DEV_TOOLS.md) - Development tools and commands
 - [docs/TICKETING.md](docs/TICKETING.md) - Creating ticketed events (technical guide)
-- [docs/CHANGELOG.md](docs/CHANGELOG.md) - Version history and changes
+- [docs/HISTORY.md](docs/HISTORY.md) - Project history and change log
 - [docs/CODE_AUDIT.md](docs/CODE_AUDIT.md) - Architecture analysis
 
 ## License

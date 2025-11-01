@@ -1,1 +1,0 @@
-- before any critical coding implemntation. Especially one that will take us down a very specific architecture or path and force us to make trade offs, provide options and let me know which option is recommended and why
