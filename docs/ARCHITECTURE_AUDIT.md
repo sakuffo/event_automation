@@ -1,37 +1,35 @@
-# Architecture Audit (2025-10-31)
+# Architecture Audit (2025-11-01)
 
-This note captures the current structure of the event automation tool prior to refactoring.
+This snapshot reflects the post-modularisation state of the automation project.
 
 ## Code Inventory
 
-- `sync_events.py` – 750+ line procedural script. Owns env loading, Google auth/service construction, event parsing, image download + resizing, duplicate checks, Wix writes, CLI dispatch.
-- `wix_client.py` – Thin REST wrapper with retry logic and upload helper; consumer code imports directly. Credentials handled implicitly via `load_dotenv()` at import time.
-- `dev_events.py`, `dev_tickets.py`, `inspect_tickets.py` – Standalone scripts that construct `WixClient` and perform ad‑hoc operations. Each contains its own CLI plumbing and prints.
-- `test_*.py` – Legacy experiment scripts (not wired into CI, only partially exercising code paths).
+- `sync_events.py` – Thin compatibility wrapper that forwards to `event_sync.cli.main()`.
+- `event_sync/` – Modular package containing CLI, config, runtime, Sheets/Drive helpers, image handling, typed models, and orchestration.
+- `wix_client.py` – Reusable REST client with retry + media upload utilities leveraged by the package and dev scripts.
+- `tests/` – Pytest suite covering models, image compression, and CLI error handling (executed locally via `make unit` and in CI via `ci.yml`).
+- `dev_events.py`, `dev_tickets.py`, `inspect_tickets.py` – Operator tooling built on `WixClient`; still use print-style output and can adopt shared logging in future iterations.
 
-## Monolithic Pressure Points
+## Current Strengths
 
-1. **Runtime coupling** – `SyncRuntime` instantiates Google + Wix clients, caches downloads, enforces rate limits, and is global to the script.
-2. **Stateful globals** – Environment variables read at module import; hard to override for tests or alternate deployments.
-3. **No modular boundaries** – Fetching from Sheets, Drive download, Wix upload, and event orchestration all live in one module.
-4. **Ad-hoc CLI** – `main()` processes `sys.argv` without reusable parser; dev scripts repeat similar logic.
-5. **Testing gaps** – Only manual scripts exist; no unit tests or mocks to exercise data validation, caching, or upload flow.
+1. **Modular boundaries** – Core sync functionality lives in importable modules, enabling re-use and testing.
+2. **Central config** – `AppConfig` validates required environment variables and surfaces clear errors.
+3. **Structured logging** – CLI + orchestrator log through `logging`, with `--log-level` available on every command.
+4. **Automated tests** – Unit tests exercise data validation, image compression, and command-line failure paths; CI runs on every push/PR.
+5. **Image resilience** – `prepare_image_for_wix()` automatically compresses oversized Drive assets before upload.
 
-## Documentation Check
+## Remaining Opportunities
+
+1. **Dev tooling parity** – Migrate `dev_events.py` / `dev_tickets.py` to the shared logging helpers for consistent output.
+2. **End-to-end dry run** – Add a mocked integration test that exercises the full sync orchestration without external calls.
+3. **Credential scaffolding** – Generate an `.env.example` from `AppConfig` to reduce onboarding errors.
+4. **Observability** – Consider optional structured JSON logging or lightweight error notifications for production runs.
+
+## Documentation Status
 
 | Doc | Status | Notes |
 | --- | --- | --- |
-| `README.md` | Mostly accurate | Describes project as a “simple script,” matches current state but will become outdated once modularised. Mentions GitHub Actions schedule that is currently disabled (workflow present but not verified). |
-| `docs/CODE_AUDIT.md` | Partially outdated | Still references historic duplication inside `sync_events.py` that was moved into `WixClient` during recent refactor; needs rewrite post-modularisation. |
-| `docs/DEV_TOOLS.md` | Mostly accurate | Command list matches Make targets, but assumes monolithic script; add new module entry points once refactor lands. |
-| `docs/HISTORY.md` | Accurate | Change log current through latest edit. |
-
-## Immediate Opportunities
-
-- Introduce a small package (e.g., `event_sync/`) with modules for config, data sources, services, and CLI. Re-export minimal surface for backwards compatibility.
-- Centralise environment validation (dataclass or Pydantic) and log setup; avoid `load_dotenv()` at import time.
-- Add typed event model with validation for dates, registration types, numeric fields, and image metadata.
-- Establish unit tests around parsing + image prep, plus a smoke test using mocked HTTP responses.
-- Refresh documentation/Make targets after modular split.
-
-
+| `README.md` | ✅ Current | Describes modular package, testing, and logging options.
+| `docs/CODE_AUDIT.md` | ✅ Current | Mirrors this audit and tracks hardening progress.
+| `docs/DEV_TOOLS.md` | ✅ Updated | Includes logging guidance and dev/test workflow pointers.
+| `docs/HISTORY.md` | ✅ Current | Change log intact.

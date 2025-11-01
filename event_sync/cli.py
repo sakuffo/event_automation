@@ -88,10 +88,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         parser.print_help()
         return 1
     except KeyboardInterrupt:
-        print("\n\nOperation cancelled by user")
+        logger.warning("Operation cancelled by user")
         return 1
-    except Exception as exc:
-        print(f"\n❌ Error: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.exception("Unhandled error: %s", exc)
         return 1
 
 

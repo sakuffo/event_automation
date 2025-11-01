@@ -49,6 +49,12 @@ ENV_MODE=development  # or production
 
 When `ENV_MODE=development` and `DEV_*` credentials are set, all dev scripts will use the sandbox site instead of production.
 
+### 3. Logging & Verbosity
+
+- Every `python sync_events.py ...` command accepts `--log-level` (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+- Example: `python sync_events.py sync --log-level DEBUG` prints detailed Sheets/Wix calls for troubleshooting.
+- The CLI and orchestration modules emit logs via Python's `logging` module, so `LOGGING_LEVEL` environment tweaks or custom handlers work out of the box.
+
 ## Event Operations (dev_events.py)
 
 Manage events programmatically without the Wix dashboard.

@@ -24,8 +24,9 @@ This supersedes the early duplication audit. The project now ships as a small pa
 - 🧾 **Central config:** Single source of truth for required env vars (`AppConfig.ensure_valid()`), replacing scattered `os.getenv()` checks.
 - 📋 **Typed events:** `EventRecord` normalises registration types, validates dates/times, and guards against negative capacities.
 - 🖼️ **Image hardening:** `prepare_image_for_wix()` compresses oversize photos with Pillow; warnings and successes flow through the logger.
-- 🧪 **Automated tests:** `pytest` suite exercises models and image logic; CI workflow (`ci.yml`) runs on every push/PR.
+- 🧪 **Automated tests:** `pytest` suite exercises models, image logic, and CLI error paths; CI workflow (`ci.yml`) runs on every push/PR.
 - 📣 **Structured logging:** All orchestration output now routes through `logging`, allowing CLI users to raise/lower verbosity.
+- 🧩 **CLI hardening:** The top-level CLI now reports failures through the logging system (no bare `print` statements) and returns non-zero exit codes on configuration issues.
 
 ## Remaining Opportunities
 
