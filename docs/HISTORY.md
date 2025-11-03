@@ -62,6 +62,17 @@ This document consolidates all historical documentation, changelogs, and develop
 
 ## Changelog
 
+### [2025-11-03] - Wix Description Formatting & Timezone Fix
+**Status:** ✅ Complete
+
+#### Added
+- `format_description_as_html()` helper to preserve paragraphs and bullet lists when syncing event descriptions.
+- Unit coverage for description formatting and timezone conversion in `tests/test_description_formatting.py`.
+
+#### Changed
+- Wix event creation now converts sheet timestamps to UTC using the configured site timezone.
+- Event descriptions sent to Wix now emit HTML instead of collapsing whitespace.
+
 ### [2025-11-01] - Documentation Convergence
 **Status:** ✅ Complete
 

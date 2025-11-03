@@ -7,6 +7,7 @@ Full CRUD operations for events without needing the live site
 import sys
 import json
 from datetime import datetime, timedelta
+from itertools import islice
 from typing import Dict, Any, Optional
 
 # Fix Windows console encoding for emojis
@@ -23,7 +24,18 @@ def list_all_events(client: WixClient, limit: int = 50):
     print(f"📋 Fetching events (limit: {limit})...\n")
 
     try:
-        events = client.list_events(limit=limit)
+        max_results = limit if limit and limit > 0 else None
+        page_size = max_results if max_results else 100
+        page_size = max(1, min(page_size, 200))
+
+        iterator = client.iter_events(page_size=page_size)
+        if max_results:
+            fetched = list(islice(iterator, max_results + 1))
+            more_available = len(fetched) > max_results
+            events = fetched[:max_results]
+        else:
+            events = list(iterator)
+            more_available = False
 
         if not events:
             print("No events found.")
@@ -41,6 +53,9 @@ def list_all_events(client: WixClient, limit: int = 50):
             print(f"   Start: {start}")
             print(f"   Status: {status}")
             print()
+
+        if more_available:
+            print("… additional events not shown. Increase the limit to view more.")
 
     except Exception as e:
         print(f"❌ Failed to fetch events: {e}")
@@ -240,7 +255,7 @@ def bulk_delete_events(client: WixClient, pattern: str = None, drafts_only: bool
     """Delete multiple events matching criteria"""
     print("🔍 Fetching events to delete...\n")
 
-    all_events = client.list_events(limit=100, include_drafts=True)
+    all_events = list(client.iter_events(page_size=200, include_drafts=True))
 
     # Filter events
     events_to_delete = []
@@ -331,7 +346,7 @@ def delete_events_after_date(client: WixClient, cutoff_date: str, confirm: bool 
         print(f"❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-01-01)")
         return
 
-    all_events = client.list_events(limit=100, include_drafts=True)
+    all_events = list(client.iter_events(page_size=200, include_drafts=True))
 
     # Filter events by date
     events_to_delete = []

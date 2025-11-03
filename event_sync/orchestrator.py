@@ -4,7 +4,20 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
+from html import escape
 from typing import Any, Dict, List, Optional, Set
+
+try:  # pragma: no cover - standard library on Python 3.9+
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover - fallback for older runtimes
+    ZoneInfo = None  # type: ignore
+    ZoneInfoNotFoundError = Exception  # type: ignore
+
+try:  # pragma: no cover - optional dependency
+    import pytz  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    pytz = None  # type: ignore
 
 from .config import AppConfig
 from .logging_utils import get_logger
@@ -16,6 +29,96 @@ from .utils import convert_date_to_iso
 
 
 logger = get_logger(__name__)
+
+
+def _wix_timestamp(date_iso: str, time_24h: str, tz_name: str) -> str:
+    """Return a UTC timestamp string for Wix while respecting the site timezone."""
+
+    naive = datetime.strptime(f"{date_iso} {time_24h}", "%Y-%m-%d %H:%M")
+
+    if ZoneInfo is not None:
+        try:
+            local_tz = ZoneInfo(tz_name)
+            utc_tz = ZoneInfo("UTC")
+            localized = naive.replace(tzinfo=local_tz)
+            return localized.astimezone(utc_tz).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ZoneInfoNotFoundError as exc:
+            logger.warning("⚠️  Unknown timezone '%s' via zoneinfo: %s", tz_name, exc)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("⚠️  Failed zoneinfo conversion for %s: %s", tz_name, exc)
+
+    if pytz is not None:
+        try:
+            local_tz = pytz.timezone(tz_name)
+            localized = local_tz.localize(naive)
+            return localized.astimezone(pytz.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("⚠️  Failed pytz conversion for %s: %s", tz_name, exc)
+
+    logger.warning(
+        "⚠️  Falling back to naive UTC timestamp for timezone '%s'", tz_name
+    )
+    return f"{date_iso}T{time_24h}:00Z"
+
+
+_BULLET_MARKERS = ("- ", "* ", "\u2022 ", "\u2013 ", "\u2014 ")
+
+
+def _extract_bullet_text(line: str) -> Optional[str]:
+    stripped = line.lstrip()
+    for marker in _BULLET_MARKERS:
+        if stripped.startswith(marker):
+            return stripped[len(marker) :].strip()
+    return None
+
+
+def format_description_as_html(raw: str) -> str:
+    """Convert plain text from Sheets into minimal HTML for Wix."""
+
+    if not raw:
+        return ""
+
+    normalized = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return ""
+
+    lines = normalized.split("\n")
+    paragraphs: List[List[str]] = []
+    current: List[str] = []
+
+    for line in lines:
+        if line.strip() == "":
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        current.append(line.rstrip())
+
+    if current:
+        paragraphs.append(current)
+
+    html_blocks: List[str] = []
+
+    for para in paragraphs:
+        bullet_items: List[str] = []
+        all_bullets = True
+
+        for entry in para:
+            bullet = _extract_bullet_text(entry)
+            if bullet is None:
+                all_bullets = False
+                break
+            bullet_items.append(escape(bullet))
+
+        if all_bullets and bullet_items:
+            items_html = "".join(f"<li>{item}</li>" for item in bullet_items)
+            html_blocks.append(f"<ul>{items_html}</ul>")
+            continue
+
+        joined = "<br/>".join(escape(item.strip()) for item in para)
+        html_blocks.append(f"<p>{joined}</p>")
+
+    return "".join(html_blocks)
 
 
 def validate_credentials(config: AppConfig) -> bool:
@@ -74,12 +177,15 @@ def test_wix_connection(runtime: SyncRuntime) -> bool:
 def list_wix_events(runtime: SyncRuntime) -> List[Dict[str, object]]:
     try:
         client = runtime.get_wix_client()
-        events = client.list_events(limit=50)
+        events = list(client.iter_events(page_size=100))
 
         logger.info("\n📅 Existing Events in Wix:\n")
-        for event in events:
+        for event in events[:50]:
             start_date = event.get("dateAndTimeSettings", {}).get("startDate", "No date")
             logger.info("  • %s - %s", event.get("title", "Untitled"), start_date)
+
+        if len(events) > 50:
+            logger.info("  • ...and %d more", len(events) - 50)
 
         return events
     except Exception as exc:
@@ -91,18 +197,18 @@ def get_existing_event_keys(runtime: SyncRuntime) -> Set[str]:
     logger.info("🔍 Checking for existing events in Wix...")
     try:
         client = runtime.get_wix_client()
-        events = client.list_events(limit=100)
-
         existing_keys: Set[str] = set()
-        for event in events:
+        total_events = 0
+        for event in client.iter_events(page_size=200):
             title = event.get("title", "")
             start_datetime = event.get("dateAndTimeSettings", {}).get("startDate", "")
             if start_datetime:
                 date_part = start_datetime.split("T")[0]
                 time_part = start_datetime.split("T")[1][:5] if "T" in start_datetime else "00:00"
                 existing_keys.add(f"{title}|{date_part}|{time_part}")
+            total_events += 1
 
-        logger.info("Found %d existing events\n", len(existing_keys))
+        logger.info("Found %d existing events (from %d Wix records)\n", len(existing_keys), total_events)
         return existing_keys
     except Exception as exc:
         logger.warning("Warning: Could not fetch existing events: %s", exc)
@@ -129,8 +235,12 @@ def create_wix_event(
         "title": event.name,
         "dateAndTimeSettings": {
             "dateAndTimeTbd": False,
-            "startDate": f"{start_date_iso}T{event.start_time}:00Z",
-            "endDate": f"{end_date_iso}T{event.end_time}:00Z",
+            "startDate": _wix_timestamp(
+                start_date_iso, event.start_time, runtime.config.timezone
+            ),
+            "endDate": _wix_timestamp(
+                end_date_iso, event.end_time, runtime.config.timezone
+            ),
             "timeZoneId": runtime.config.timezone,
         },
         "location": {
@@ -144,9 +254,10 @@ def create_wix_event(
     if teaser:
         event_data["shortDescription"] = teaser
 
-    description = event.description.strip() if event.description else None
-    if description:
-        event_data["detailedDescription"] = description
+    if event.description:
+        formatted_description = format_description_as_html(event.description)
+        if formatted_description:
+            event_data["detailedDescription"] = formatted_description
 
     if file_descriptor and "id" in file_descriptor:
         width = height = None

@@ -5,8 +5,11 @@ Reusable client for interacting with Wix Events and related APIs
 """
 
 import os
+from copy import deepcopy
+from itertools import islice
+from typing import Any, Dict, Iterator, List, Optional
+
 import requests
-from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -119,37 +122,95 @@ class WixClient:
 
     # Event Operations
 
+    def _paged_post(
+        self,
+        endpoint: str,
+        array_key: str,
+        base_query: Optional[Dict[str, Any]],
+        page_size: int,
+        *,
+        initial_offset: int = 0,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield results across all pages for Wix POST query endpoints."""
+
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+
+        cursor: Optional[str] = None
+        offset = max(initial_offset, 0)
+
+        while True:
+            query: Dict[str, Any] = deepcopy(base_query) if base_query else {}
+            paging = query.setdefault('paging', {})
+            paging['limit'] = page_size
+
+            if cursor:
+                paging.pop('offset', None)
+                paging['cursor'] = cursor
+            else:
+                paging.pop('cursor', None)
+                if offset:
+                    paging['offset'] = offset
+                elif 'offset' in paging:
+                    # Normalise any user-provided offset when zero
+                    paging['offset'] = 0
+
+            response = self._request('POST', endpoint, json={'query': query})
+            payload = response.json() or {}
+            items = payload.get(array_key, []) or []
+
+            for item in items:
+                yield item
+
+            metadata = payload.get('pagingMetadata') or {}
+            cursor = metadata.get('nextCursor')
+
+            if cursor:
+                continue
+
+            if len(items) < page_size:
+                break
+
+            if not items:
+                break
+
+            offset += page_size
+
     def list_events(self, limit: int = 50, offset: int = 0, include_drafts: bool = True,
                     status_filter: str = None) -> List[Dict[str, Any]]:
-        """List all events
+        """Return up to ``limit`` events starting at ``offset``."""
 
-        Args:
-            limit: Maximum number of events to return
-            offset: Number of events to skip
-            include_drafts: If True, attempts to include draft events (may not work with API)
-            status_filter: Optional status to filter by (e.g., 'DRAFT', 'PUBLISHED')
-        """
-        query = {
-            'paging': {
-                'limit': limit,
-                'offset': offset
-            }
-        }
-
-        # Add status filter if specified
-        if status_filter:
-            query['filter'] = {
-                'status': {
-                    '$eq': status_filter
-                }
-            }
-
-        response = self._request(
-            'POST',
-            '/events/v3/events/query',
-            json={'query': query}
+        iterator = self.iter_events(
+            page_size=max(limit, 1),
+            include_drafts=include_drafts,
+            status_filter=status_filter,
+            offset=offset,
         )
-        return response.json().get('events', [])
+        return list(islice(iterator, limit))
+
+    def iter_events(
+        self,
+        *,
+        page_size: int = 100,
+        include_drafts: bool = True,
+        status_filter: Optional[str] = None,
+        offset: int = 0,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield events across all pages with cursor/offset pagination."""
+
+        base_query: Dict[str, Any] = {}
+        if status_filter:
+            base_query['filter'] = {'status': {'$eq': status_filter}}
+        elif not include_drafts:
+            base_query['filter'] = {'status': {'$ne': 'DRAFT'}}
+
+        yield from self._paged_post(
+            '/events/v3/events/query',
+            'events',
+            base_query,
+            page_size,
+            initial_offset=offset,
+        )
 
     def get_event(self, event_id: str, include_registration: bool = True) -> Dict[str, Any]:
         """Get a specific event by ID"""
@@ -221,18 +282,29 @@ class WixClient:
         return response.json()
 
     def get_rsvps(self, event_id: str = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get RSVPs for an event"""
-        query = {'paging': {'limit': limit}}
+        """Return up to ``limit`` RSVP records."""
 
+        iterator = self.iter_rsvps(event_id=event_id, page_size=max(limit, 1))
+        return list(islice(iterator, limit))
+
+    def iter_rsvps(
+        self,
+        event_id: Optional[str] = None,
+        *,
+        page_size: int = 100,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield RSVP records across all pages."""
+
+        base_query: Dict[str, Any] = {}
         if event_id:
-            query['filter'] = {'eventId': event_id}
+            base_query['filter'] = {'eventId': event_id}
 
-        response = self._request(
-            'POST',
+        yield from self._paged_post(
             '/events/v3/rsvps/query',
-            json={'query': query}
+            'rsvps',
+            base_query,
+            page_size,
         )
-        return response.json().get('rsvps', [])
 
     def create_ticket_order(self, event_id: str, tickets: List[Dict[str, Any]],
                            checkout_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,18 +323,29 @@ class WixClient:
         return response.json()
 
     def get_orders(self, event_id: str = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get ticket orders"""
-        query = {'paging': {'limit': limit}}
+        """Return up to ``limit`` ticket orders."""
 
+        iterator = self.iter_orders(event_id=event_id, page_size=max(limit, 1))
+        return list(islice(iterator, limit))
+
+    def iter_orders(
+        self,
+        event_id: Optional[str] = None,
+        *,
+        page_size: int = 100,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield order records across all pages."""
+
+        base_query: Dict[str, Any] = {}
         if event_id:
-            query['filter'] = {'eventId': event_id}
+            base_query['filter'] = {'eventId': event_id}
 
-        response = self._request(
-            'POST',
+        yield from self._paged_post(
             '/events/v3/orders/query',
-            json={'query': query}
+            'orders',
+            base_query,
+            page_size,
         )
-        return response.json().get('orders', [])
 
     # Media Operations
 
@@ -348,8 +431,11 @@ class WixClient:
 
     def search_events_by_title(self, title: str) -> List[Dict[str, Any]]:
         """Search for events by title"""
-        all_events = self.list_events(limit=100)
-        return [e for e in all_events if title.lower() in e.get('title', '').lower()]
+        return [
+            event
+            for event in self.iter_events(page_size=100)
+            if title.lower() in event.get('title', '').lower()
+        ]
 
     def get_event_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Get the first event matching a title"""

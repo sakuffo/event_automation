@@ -16,16 +16,17 @@ def main():
     client = WixClient()
 
     print("Fetching TICKETING events...")
-    events = client.list_events(limit=10)
+    events_iter = client.iter_events(page_size=50)
+    ticketing_event = next(
+        (e for e in events_iter if e.get('registration', {}).get('type') == 'TICKETING'),
+        None,
+    )
 
-    # Find a TICKETING event
-    ticketing_events = [e for e in events if e.get('registration', {}).get('type') == 'TICKETING']
-
-    if not ticketing_events:
+    if not ticketing_event:
         print("No TICKETING events found")
         return
 
-    event = ticketing_events[0]
+    event = ticketing_event
     event_id = event['id']
     event_title = event['title']
 
