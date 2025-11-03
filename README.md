@@ -119,7 +119,7 @@ This project uses Python + Wix REST API instead of JavaScript SDK because:
 ├── README.md                  # This file
 ├── SETUP.md                   # Detailed setup guide
 ├── DEV_TOOLS.md              # Development tools documentation
-├── docs/ARCHITECTURE_AUDIT.md # Current-state architecture snapshot
+├── docs/CODE_AUDIT.md        # Architecture snapshot & hardening checklist
 └── CHECKLIST.md              # Setup checklist
 ```
 

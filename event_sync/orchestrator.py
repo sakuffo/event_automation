@@ -198,8 +198,8 @@ def create_wix_event(
                 )
                 logger.info("   💡 You can add tickets manually via Wix Dashboard")
         elif event.registration_type == "TICKETING" and not auto_create_tickets:
-            logger.info("   ℹ️  Ticket creation skipped (use --auto-tickets to enable)")
-            logger.info("   💡 Add tickets manually via Wix Dashboard")
+            logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
+            logger.info("   💡 Re-run without --no-tickets to enable automatic tickets or add them manually via Wix Dashboard")
 
         return True
     except Exception as exc:

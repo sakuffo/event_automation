@@ -208,6 +208,54 @@ When you sync events from Google Sheets:
 2. **Ticket Auto-Created** → "General Admission" ticket with price and capacity from spreadsheet
 3. **Tickets On Sale** → Immediately available for purchase
 
+### Ticket Creation Controls
+
+Automatic ticketing only fires when **all** of these conditions are true:
+
+1. `registration_type` (Column K) resolves to `TICKETING` (`TICKETS` is auto-normalised).
+2. `ticket_price` (Column I) parses to a value greater than zero.
+3. You run `python sync_events.py sync` **without** the `--no-tickets` flag.
+
+If any condition fails, the sync logs:
+
+```
+ℹ️  Ticket creation skipped (--no-tickets flag set)
+💡 Re-run without --no-tickets to enable automatic tickets or add them manually via Wix Dashboard
+```
+
+#### Skip Ticket Creation
+
+- **Per event:** leave Column I empty or set it to `0`. The event is still created; tickets can be added manually in Wix.
+- **Entire run:** call `python sync_events.py sync --no-tickets`. The log will remind you to rerun without the flag when you are ready.
+
+#### Mixed Sheets Example
+
+| Title | Price | Capacity | Registration | Auto tickets? |
+|-------|-------|----------|--------------|----------------|
+| Workshop A | `25.00` | `50` | `TICKETS` | ✅ Yes |
+| Workshop B | `0` | `50` | `TICKETS` | ❌ No (price = 0) |
+| Webinar C | `15` | `200` | `RSVP` | ❌ No (registration) |
+
+#### Command Reference
+
+```bash
+# Default behaviour (auto tickets when eligible)
+python sync_events.py sync
+
+# Skip ticket creation for this run
+python sync_events.py sync --no-tickets
+```
+
+#### Spreadsheet Column Refresher
+
+| Column | Field | Required for tickets? | Notes |
+|--------|-------|-----------------------|-------|
+| I | Ticket Price | ✅ | Must be > 0 to auto-create tickets |
+| J | Capacity | ✅ | Optional but recommended (defaults to spreadsheet value) |
+| K | Registration Type | ✅ | `TICKETS` becomes `TICKETING` for REST API |
+
+This section replaces the standalone `TICKET_CONTROL_GUIDE.md`, giving operators a single home for ticket automation guidance.
+
 ### Implementation
 
 The ticket creation uses the Wix Ticket Definitions V3 API:

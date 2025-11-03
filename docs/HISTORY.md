@@ -62,6 +62,21 @@ This document consolidates all historical documentation, changelogs, and develop
 
 ## Changelog
 
+### [2025-11-01] - Documentation Convergence
+**Status:** ✅ Complete
+
+#### Added
+- Integrated the standalone regression checklist into `docs/DEV_TOOLS.md`.
+- Merged ticket control guidance into `docs/TICKETING.md` so operators have a single reference.
+- Folded the architecture snapshot into `docs/CODE_AUDIT.md` (superseding `docs/ARCHITECTURE_AUDIT.md`).
+
+#### Changed
+- `docs/README.md` now indexes the reduced documentation set.
+- Sync log messaging references the `--no-tickets` flag for clarity.
+
+#### Removed
+- `docs/ARCHITECTURE_AUDIT.md`, `docs/FUNCTIONALITY_TEST_PLAN.md`, `FUNCTIONALITY_TEST_PLAN.md`, and `TICKET_CONTROL_GUIDE.md` (content migrated to the surviving docs).
+
 ### [2025-10-31] - Hardening & Modularization
 **Status:** ✅ Complete
 
@@ -71,7 +86,7 @@ This document consolidates all historical documentation, changelogs, and develop
 - Pillow-based image compression and structured logging pipeline.
 - Pytest suite (`tests/`), dev requirements file, and `make unit` target.
 - GitHub Actions CI workflow (`.github/workflows/ci.yml`) running tests on push/PR.
-- `docs/ARCHITECTURE_AUDIT.md` snapshot of the new module layout.
+- `docs/ARCHITECTURE_AUDIT.md` snapshot of the new module layout *(later merged into `docs/CODE_AUDIT.md`).*
 
 #### Changed
 - `sync_events.py` now a thin wrapper delegating to the package CLI with `--log-level` support.
@@ -107,7 +122,7 @@ This document consolidates all historical documentation, changelogs, and develop
 #### Documentation
 - Updated [docs/TICKETING.md](TICKETING.md) with automation details
 - Created [docs/TICKET_AUTOMATION_COMPLETE.md](TICKET_AUTOMATION_COMPLETE.md) (now merged into this file)
-- Added [TICKET_CONTROL_GUIDE.md](../TICKET_CONTROL_GUIDE.md) for users
+- Added `TICKET_CONTROL_GUIDE.md` for users *(merged into `docs/TICKETING.md` on 2025-11-01)*
 
 ### [2025-10-07] - Code Cleanup & Architecture Refactor
 **Status:** ✅ Complete
@@ -507,7 +522,7 @@ event_automation/
     ├── TICKETING.md
     ├── DEV_TOOLS.md
     ├── CODE_AUDIT.md
-    ├── FUNCTIONALITY_TEST_PLAN.md
+    ├── FUNCTIONALITY_TEST_PLAN.md   (removed 2025-11-01 → merged into docs/DEV_TOOLS.md)
     └── HISTORY.md        ← Consolidated change log + release history
 ```
 

@@ -344,6 +344,38 @@ ENV_MODE=production   # Uses regular credentials (default)
 4. **Clean up** - Delete test events/RSVPs when done testing
 5. **Search first** - Use search to find events instead of copying IDs manually
 
+## Testing & Regression Checklist
+
+Run this mini-regression before shipping changes to the sync pipeline:
+
+1. `make install-dev`
+2. `make unit`
+3. `python sync_events.py validate --log-level DEBUG`
+4. `python sync_events.py test`
+5. `python sync_events.py sync` (against a sandbox sheet)
+
+### Event Creation Coverage
+
+| Registration Type | Command | Expected Result |
+|-------------------|---------|-----------------|
+| `RSVP` | `python dev_events.py create "Test RSVP" 7 false RSVP` | Event includes `registration.initialType = "RSVP"` |
+| `TICKETING` | `python dev_events.py create "Test Ticket" 7 false TICKETS` | Event converted to `"TICKETING"`; tickets must exist or be added |
+| `EXTERNAL` | `python dev_events.py create "Test External" 7 false EXTERNAL` | Event published with external registration link placeholder |
+| `NO_REGISTRATION` | `python dev_events.py create "Test NoReg" 7 false NO_REGISTRATION` | Display-only event created successfully |
+
+### Sync Flow Essentials
+
+- Sheet ingestion maps headers → `EventRecord` validation (watch for logged skips).
+- Duplicate detection keys on `title|date|time`; verify an existing row is skipped.
+- Auto-ticket creation is enabled by default when `registration_type == "TICKETING"` and `ticket_price > 0`.
+- Run `python sync_events.py sync --no-tickets` to confirm the opt-out path still logs the skip message.
+
+### Follow-Up Checks
+
+- `python dev_events.py list` → confirm newly created events.
+- `python dev_events.py delete-pattern "Test" --confirm` → clean up fixtures.
+- Review GitHub Actions (`ci.yml`) to ensure tests run in CI.
+
 ## Troubleshooting
 
 ### "WIX_API_KEY is required"
