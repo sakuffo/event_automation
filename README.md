@@ -73,7 +73,7 @@ Your spreadsheet should have these columns (A-L):
 - **Google Sheets API** reads your spreadsheet using service account auth
 - **Wix Events API v3** creates events on your Wix site via REST API
 - **GitHub Actions** runs the sync automatically (daily + manual trigger)
-- **Duplicate detection** - won't create the same event twice
+- **Duplicate detection & updates** - skips identical events and patches changes from Sheets
 
 ### Why Python REST API?
 
@@ -86,6 +86,13 @@ This project uses Python + Wix REST API instead of JavaScript SDK because:
 - ✅ No complex ticket pricing automation needed
 
 **JavaScript SDK would be better for:** Web apps, Node.js backends, real-time webhooks, or automated ticket creation/pricing via API.
+
+### Update Behavior
+
+- Events are keyed by title, start date, and start time so the sync can spot existing records.
+- When the sheet changes schedule, location, registration type, teaser, description, or title, the Wix event is patched instead of skipped.
+- Unchanged rows log as skipped to avoid unnecessary API calls.
+- Ticket definitions are still created only on insert; adjust them manually in Wix if pricing or capacity changes later.
 
 ## Project Structure
 

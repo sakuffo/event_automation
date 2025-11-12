@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Tuple
 
 try:  # pragma: no cover - standard library on Python 3.9+
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -59,6 +59,82 @@ def _wix_timestamp(date_iso: str, time_24h: str, tz_name: str) -> str:
         "⚠️  Falling back to naive UTC timestamp for timezone '%s'", tz_name
     )
     return f"{date_iso}T{time_24h}:00Z"
+
+
+def _localize_wix_start(start_datetime: str, tz_name: str) -> Optional[Tuple[str, str]]:
+    """Return (date_iso, time_24h) converted to the requested timezone."""
+
+    if not start_datetime:
+        return None
+
+    try:
+        normalized = start_datetime.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            trimmed = start_datetime
+            if "." in trimmed:
+                trimmed = trimmed.split(".")[0]
+            trimmed = trimmed.replace("Z", "")
+            dt_utc = datetime.strptime(trimmed, "%Y-%m-%dT%H:%M:%S")
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        except Exception:
+            logger.warning("⚠️  Could not parse Wix startDate '%s'", start_datetime)
+            return None
+    else:
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+
+    if ZoneInfo is not None:
+        try:
+            local_tz = ZoneInfo(tz_name)
+            local_dt = dt_utc.astimezone(local_tz)
+            return local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M")
+        except ZoneInfoNotFoundError as exc:
+            logger.warning("⚠️  Unknown timezone '%s' via zoneinfo: %s", tz_name, exc)
+        except Exception as exc:
+            logger.warning("⚠️  Failed zoneinfo localization for %s: %s", tz_name, exc)
+
+    if pytz is not None:
+        try:
+            local_tz = pytz.timezone(tz_name)
+            local_dt = dt_utc.astimezone(local_tz)
+            return local_dt.strftime("%Y-%m-%d"), local_dt.strftime("%H:%M")
+        except Exception as exc:
+            logger.warning("⚠️  Failed pytz localization for %s: %s", tz_name, exc)
+
+    fallback = dt_utc.astimezone(timezone.utc)
+    logger.warning(
+        "⚠️  Falling back to UTC startDate for timezone '%s'", tz_name
+    )
+    return fallback.strftime("%Y-%m-%d"), fallback.strftime("%H:%M")
+
+
+def _normalize_wix_timestamp(timestamp: str) -> Optional[str]:
+    """Return a canonical UTC timestamp string for comparison against expected values."""
+
+    if not timestamp:
+        return None
+
+    try:
+        normalized = timestamp.replace("Z", "+00:00")
+        dt_utc = datetime.fromisoformat(normalized)
+    except ValueError:
+        trimmed = timestamp
+        if "." in trimmed:
+            trimmed = trimmed.split(".")[0]
+        trimmed = trimmed.replace("Z", "")
+        try:
+            dt_utc = datetime.strptime(trimmed, "%Y-%m-%dT%H:%M:%S")
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+        except Exception:
+            logger.warning("⚠️  Could not normalize Wix timestamp '%s'", timestamp)
+            return None
+    else:
+        if dt_utc.tzinfo is None:
+            dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+
+    return dt_utc.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 _BULLET_MARKERS = ("- ", "* ", "\u2022 ", "\u2013 ", "\u2014 ")
@@ -193,46 +269,56 @@ def list_wix_events(runtime: SyncRuntime) -> List[Dict[str, object]]:
         return []
 
 
-def get_existing_event_keys(runtime: SyncRuntime) -> Set[str]:
+def get_existing_event_keys(runtime: SyncRuntime) -> Dict[str, Dict[str, Any]]:
     logger.info("🔍 Checking for existing events in Wix...")
     try:
         client = runtime.get_wix_client()
-        existing_keys: Set[str] = set()
+        existing_events: Dict[str, Dict[str, Any]] = {}
         total_events = 0
-        for event in client.iter_events(page_size=200):
-            title = event.get("title", "")
-            start_datetime = event.get("dateAndTimeSettings", {}).get("startDate", "")
-            if start_datetime:
-                date_part = start_datetime.split("T")[0]
-                time_part = start_datetime.split("T")[1][:5] if "T" in start_datetime else "00:00"
-                existing_keys.add(f"{title}|{date_part}|{time_part}")
-            total_events += 1
 
-        logger.info("Found %d existing events (from %d Wix records)\n", len(existing_keys), total_events)
-        return existing_keys
+        for event in client.iter_events(page_size=200):
+            total_events += 1
+            title = (event.get("title") or "").strip()
+            start_settings = event.get("dateAndTimeSettings", {}) or {}
+            start_datetime = start_settings.get("startDate", "")
+            event_id = event.get("id")
+
+            if not title or not start_datetime or not event_id:
+                continue
+
+            local_parts = _localize_wix_start(start_datetime, runtime.config.timezone)
+            if local_parts is None:
+                continue
+
+            date_part, time_part = local_parts
+            key = f"{title}|{date_part}|{time_part}"
+            existing_events[key] = {"id": event_id, "event": event}
+
+        logger.info(
+            "Found %d existing events (from %d Wix records)\n",
+            len(existing_events),
+            total_events,
+        )
+        return existing_events
     except Exception as exc:
         logger.warning("Warning: Could not fetch existing events: %s", exc)
-        return set()
+        return {}
 
 
-def create_wix_event(
+def _build_wix_event_payload(
     event: EventRecord,
     runtime: SyncRuntime,
-    auto_create_tickets: bool = True,
-) -> bool:
-    file_descriptor = None
-    if event.image_url:
-        file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
-        if file_descriptor:
-            logger.info("   ✅ Image uploaded successfully")
-        else:
-            logger.warning("   ⚠️  Proceeding without image")
-
+    *,
+    file_descriptor: Optional[Dict[str, Any]] = None,
+    existing_event: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     start_date_iso = convert_date_to_iso(event.start_date)
     end_date_iso = convert_date_to_iso(event.end_date)
 
+    title = event.name.strip()
+
     event_data: Dict[str, Any] = {
-        "title": event.name,
+        "title": title,
         "dateAndTimeSettings": {
             "dateAndTimeTbd": False,
             "startDate": _wix_timestamp(
@@ -250,28 +336,106 @@ def create_wix_event(
         "registration": {"initialType": event.registration_type},
     }
 
-    teaser = event.teaser.strip() if event.teaser else None
+    teaser = event.teaser.strip() if event.teaser else ""
     if teaser:
         event_data["shortDescription"] = teaser
+    elif existing_event and existing_event.get("shortDescription"):
+        event_data["shortDescription"] = ""
 
-    if event.description:
-        formatted_description = format_description_as_html(event.description)
-        if formatted_description:
-            event_data["detailedDescription"] = formatted_description
+    formatted_description = format_description_as_html(event.description or "")
+    if formatted_description:
+        event_data["detailedDescription"] = formatted_description
+    elif existing_event and existing_event.get("detailedDescription"):
+        event_data["detailedDescription"] = ""
 
     if file_descriptor and "id" in file_descriptor:
         width = height = None
-        if "media" in file_descriptor and "image" in file_descriptor["media"]:
-            image_data = file_descriptor["media"]["image"].get("image", {})
-            width = image_data.get("width")
-            height = image_data.get("height")
+        media = file_descriptor.get("media") or {}
+        if isinstance(media, dict) and "image" in media:
+            media_image = media.get("image") or {}
+            if isinstance(media_image, dict):
+                image_info = media_image.get("image") or {}
+                if isinstance(image_info, dict):
+                    width = image_info.get("width")
+                    height = image_info.get("height")
 
+        main_image: Dict[str, Any] = {"id": file_descriptor["id"]}
         if width and height:
-            event_data["mainImage"] = {
-                "id": file_descriptor["id"],
-                "width": width,
-                "height": height,
-            }
+            main_image["width"] = width
+            main_image["height"] = height
+        event_data["mainImage"] = main_image
+    elif existing_event and existing_event.get("mainImage"):
+        event_data["mainImage"] = existing_event["mainImage"]
+
+    return event_data
+
+
+def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: SyncRuntime) -> bool:
+    expected_title = event.name.strip()
+    if expected_title != existing_event.get("title"):
+        return True
+
+    expected_start = _wix_timestamp(
+        convert_date_to_iso(event.start_date),
+        event.start_time,
+        runtime.config.timezone,
+    )
+    expected_end = _wix_timestamp(
+        convert_date_to_iso(event.end_date),
+        event.end_time,
+        runtime.config.timezone,
+    )
+
+    date_settings = existing_event.get("dateAndTimeSettings") or {}
+    actual_start = _normalize_wix_timestamp(date_settings.get("startDate") or "")
+    if actual_start is None or actual_start != expected_start:
+        return True
+    actual_end = _normalize_wix_timestamp(date_settings.get("endDate") or "")
+    if actual_end is None or actual_end != expected_end:
+        return True
+    if runtime.config.timezone != date_settings.get("timeZoneId"):
+        return True
+
+    location_settings = existing_event.get("location") or {}
+    formatted_address = (
+        (location_settings.get("address") or {}).get("formattedAddress") or ""
+    )
+    if event.location != formatted_address:
+        return True
+
+    registration_settings = existing_event.get("registration") or {}
+    if event.registration_type != registration_settings.get("initialType"):
+        return True
+
+    expected_teaser = event.teaser.strip() if event.teaser else ""
+    if expected_teaser != (existing_event.get("shortDescription") or ""):
+        return True
+
+    expected_description = format_description_as_html(event.description or "")
+    if expected_description != (existing_event.get("detailedDescription") or ""):
+        return True
+
+    return False
+
+
+def create_wix_event(
+    event: EventRecord,
+    runtime: SyncRuntime,
+    auto_create_tickets: bool = True,
+) -> bool:
+    file_descriptor = None
+    if event.image_url:
+        file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
+        if file_descriptor:
+            logger.info("   ✅ Image uploaded successfully")
+        else:
+            logger.warning("   ⚠️  Proceeding without image")
+
+    event_data = _build_wix_event_payload(
+        event,
+        runtime,
+        file_descriptor=file_descriptor,
+    )
 
     try:
         logger.debug("Event payload for %s: %s", event.name, json.dumps(event_data))
@@ -318,6 +482,40 @@ def create_wix_event(
         return False
 
 
+def update_wix_event(
+    event: EventRecord,
+    runtime: SyncRuntime,
+    existing_event_id: str,
+    existing_event: Dict[str, Any],
+) -> bool:
+    file_descriptor = None
+    if event.image_url:
+        file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
+        if file_descriptor:
+            logger.info("   ✅ Image uploaded successfully")
+        else:
+            logger.info("   ℹ️  Keeping existing image")
+
+    event_data = _build_wix_event_payload(
+        event,
+        runtime,
+        file_descriptor=file_descriptor,
+        existing_event=existing_event,
+    )
+
+    try:
+        logger.debug("Update payload for %s: %s", event.name, json.dumps(event_data))
+
+        client = runtime.get_wix_client()
+        client.update_event(existing_event_id, event_data)
+        logger.info("♻️  Updated event: %s", event.name)
+
+        return True
+    except Exception as exc:
+        logger.error("❌ Failed to update event %s: %s", event.name, exc)
+        return False
+
+
 def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True) -> bool:
     logger.info("🚀 Starting Google Sheets → Wix Events sync...\n")
     if auto_create_tickets:
@@ -328,23 +526,53 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True) -> bool:
 
     try:
         events = fetch_events(runtime)
-        existing_keys = get_existing_event_keys(runtime)
+        existing_events = get_existing_event_keys(runtime)
 
-        results = {"success": [], "failed": [], "skipped": []}
+        results = {"success": [], "updated": [], "failed": [], "skipped": []}
 
         logger.info("📅 Creating new events in Wix...\n")
 
         for event in events:
             start_date_iso = convert_date_to_iso(event.start_date)
-            event_key = f"{event.name}|{start_date_iso}|{event.start_time}"
+            event_name = event.name.strip()
+            event_key = f"{event_name}|{start_date_iso}|{event.start_time}"
 
-            if event_key in existing_keys:
-                logger.info(
-                    "⏭️  Skipped: %s on %s (already exists)",
-                    event.name,
-                    event.start_date,
-                )
-                results["skipped"].append(event.name)
+            existing_entry = existing_events.get(event_key)
+            if existing_entry:
+                wix_event = existing_entry.get("event") or {}
+                event_id = existing_entry.get("id")
+
+                if not event_id or not wix_event:
+                    logger.warning(
+                        "⚠️  Missing data for existing event %s - skipping update",
+                        event.name,
+                    )
+                    results["skipped"].append(event.name)
+                    continue
+
+                if needs_update(event, wix_event, runtime):
+                    logger.info(
+                        "♻️  Updating: %s on %s",
+                        event.name,
+                        event.start_date,
+                    )
+                    if update_wix_event(
+                        event,
+                        runtime=runtime,
+                        existing_event_id=event_id,
+                        existing_event=wix_event,
+                    ):
+                        results["updated"].append(event.name)
+                    else:
+                        results["failed"].append(event.name)
+                    time.sleep(1)
+                else:
+                    logger.info(
+                        "⏭️  Skipped: %s on %s (no changes)",
+                        event.name,
+                        event.start_date,
+                    )
+                    results["skipped"].append(event.name)
                 continue
 
             if create_wix_event(event, runtime=runtime, auto_create_tickets=auto_create_tickets):
@@ -361,9 +589,14 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True) -> bool:
             for name in results["success"]:
                 logger.info("  • %s", name)
 
+        if results["updated"]:
+            logger.info("\n♻️  Updated: %d events", len(results["updated"]))
+            for name in results["updated"]:
+                logger.info("  • %s", name)
+
         if results["skipped"]:
             logger.info(
-                "\n⏭️  Skipped (already exist): %d events",
+                "\n⏭️  Skipped (already exist / unchanged): %d events",
                 len(results["skipped"]),
             )
             for name in results["skipped"]:
