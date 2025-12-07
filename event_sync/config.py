@@ -28,6 +28,8 @@ class AppConfig:
     google_credentials_raw: Optional[str]
     sheet_range: str = "Sheet1!A1:Z100"
     timezone: str = "America/Toronto"
+    rolling_schedule_tab: str = "rolling_schedule"
+    class_info_tab: str = "class_info"
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
         default=None, init=False, repr=False
     )
@@ -78,6 +80,8 @@ def load_config() -> AppConfig:
         wix_site_id=os.getenv("WIX_SITE_ID"),
         google_sheet_id=os.getenv("GOOGLE_SHEET_ID"),
         google_credentials_raw=os.getenv("GOOGLE_CREDENTIALS"),
+        rolling_schedule_tab=os.getenv("ROLLING_SCHEDULE_TAB", "rolling_schedule"),
+        class_info_tab=os.getenv("CLASS_INFO_TAB", "class_info"),
     )
 
 

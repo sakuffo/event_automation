@@ -7,6 +7,7 @@ import sys
 from typing import Iterable, Optional
 
 from .config import ConfigError, load_config
+from .generator import generate_events
 from .logging_utils import configure_logging, get_logger
 from .orchestrator import (
     list_wix_events,
@@ -46,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic ticket creation",
     )
 
+    generate_parser = subparsers.add_parser(
+        "generate",
+        help="Generate event data from rolling_schedule + class_info tabs",
+    )
+    generate_parser.add_argument(
+        "--output-sheet",
+        metavar="TAB_NAME",
+        help="Write output to a new sheet tab instead of stdout",
+    )
+
     return parser
 
 
@@ -83,6 +94,10 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if args.command == "sync":
             auto_tickets = not args.no_tickets
             ok = sync_events(runtime, auto_create_tickets=auto_tickets)
+            return 0 if ok else 1
+
+        if args.command == "generate":
+            ok = generate_events(runtime, output_sheet=args.output_sheet)
             return 0 if ok else 1
 
         parser.print_help()
