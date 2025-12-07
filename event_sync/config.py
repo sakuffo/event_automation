@@ -30,9 +30,16 @@ class AppConfig:
     timezone: str = "America/Toronto"
     rolling_schedule_tab: str = "rolling_schedule"
     class_info_tab: str = "class_info"
+    # Separate source sheet for generate command (defaults to google_sheet_id if not set)
+    source_sheet_id: Optional[str] = None
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
         default=None, init=False, repr=False
     )
+
+    @property
+    def generator_sheet_id(self) -> Optional[str]:
+        """Sheet ID for generate command (source data)."""
+        return self.source_sheet_id or self.google_sheet_id
 
     def validation_errors(self) -> List[str]:
         errors: List[str] = []
@@ -82,6 +89,7 @@ def load_config() -> AppConfig:
         google_credentials_raw=os.getenv("GOOGLE_CREDENTIALS"),
         rolling_schedule_tab=os.getenv("ROLLING_SCHEDULE_TAB", "rolling_schedule"),
         class_info_tab=os.getenv("CLASS_INFO_TAB", "class_info"),
+        source_sheet_id=os.getenv("SOURCE_SHEET_ID"),
     )
 
 
