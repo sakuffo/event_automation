@@ -222,6 +222,19 @@ def merge_event_data(
             missing_categories.add(category)
         ticket_price = round(base_price * HST_MULTIPLIER, 2)
 
+        # Build instructor team from instructor + model columns
+        instructor = sched.get("instructor", "").strip()
+        model = sched.get("model", "").strip()
+        team_parts = [p for p in [instructor, model] if p]
+        team = " & ".join(team_parts) if team_parts else ""
+
+        # Prepend instructors to description if we have a team
+        description = details.get("description", "")
+        if team and description:
+            description = f"Instructors: {team}\n\n{description}"
+        elif team:
+            description = f"Instructors: {team}"
+
         event = {
             "event_name": class_name,
             "catagories": category,
@@ -237,7 +250,7 @@ def merge_event_data(
             "registration_type": DEFAULT_REGISTRATION_TYPE,
             "image_url": details.get("image_link", ""),
             "short_description": details.get("class_tagline", ""),
-            "detailed_description": details.get("description", ""),
+            "detailed_description": description,
         }
 
         merged_events.append(event)
