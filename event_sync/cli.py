@@ -21,6 +21,21 @@ from .runtime import SyncRuntime
 logger = get_logger(__name__)
 
 
+def _ensure_command_config(command: str, config) -> None:
+    """Validate only the settings required for a given command."""
+    if command in {"sync", "test", "list"}:
+        config.ensure_valid()
+        return
+
+    if command in {"generate", "prepare-sheet", "prepare"}:
+        if not config.google_sheet_id:
+            raise ConfigError("GOOGLE_SHEET_ID is missing")
+        if not config.google_credentials_raw or not config.google_credentials:
+            raise ConfigError(
+                "GOOGLE_CREDENTIALS is missing or invalid JSON (client_email required)"
+            )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python sync_events.py",
@@ -56,6 +71,23 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TAB_NAME",
         help="Write output to a new sheet tab instead of stdout",
     )
+    generate_parser.add_argument(
+        "-m",
+        "--month",
+        metavar="MONTH",
+        help="Filter prepared events by month (e.g., mar, MAR, March)",
+    )
+    prepare_parser = subparsers.add_parser(
+        "prepare-sheet",
+        aliases=["prepare"],
+        help="Step 1: Rebuild destination tab in GOOGLE_SHEET_ID from SOURCE_SHEET_ID",
+    )
+    prepare_parser.add_argument(
+        "-m",
+        "--month",
+        metavar="MONTH",
+        help="Filter prepared events by month (e.g., mar, MAR, March)",
+    )
 
     return parser
 
@@ -78,7 +110,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             return 0 if ok else 1
 
         try:
-            config.ensure_valid()
+            _ensure_command_config(args.command, config)
         except ConfigError as exc:
             logger.error("Configuration error: %s", exc)
             return 1
@@ -97,7 +129,19 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             return 0 if ok else 1
 
         if args.command == "generate":
-            ok = generate_events(runtime, output_sheet=args.output_sheet)
+            ok = generate_events(
+                runtime,
+                output_sheet=args.output_sheet,
+                month_filter=args.month,
+            )
+            return 0 if ok else 1
+
+        if args.command in {"prepare-sheet", "prepare"}:
+            ok = generate_events(
+                runtime,
+                output_sheet=config.generated_events_tab,
+                month_filter=args.month,
+            )
             return 0 if ok else 1
 
         parser.print_help()

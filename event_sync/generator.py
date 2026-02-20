@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import csv
 import sys
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+
+from googleapiclient.errors import HttpError
 
 from .constants import (
     CATEGORY_PRICING,
@@ -81,7 +84,68 @@ def _should_skip_event(class_name: str) -> bool:
     return False
 
 
-def fetch_rolling_schedule(runtime: SyncRuntime) -> List[Dict[str, str]]:
+def _parse_month_value(value: str) -> int:
+    """Parse month value from names/abbreviations into month number."""
+    token = value.strip().lower()
+    if not token:
+        raise ValueError("Month filter cannot be empty")
+
+    month_map = {
+        "jan": 1,
+        "january": 1,
+        "feb": 2,
+        "february": 2,
+        "mar": 3,
+        "march": 3,
+        "apr": 4,
+        "april": 4,
+        "may": 5,
+        "jun": 6,
+        "june": 6,
+        "jul": 7,
+        "july": 7,
+        "aug": 8,
+        "august": 8,
+        "sep": 9,
+        "sept": 9,
+        "september": 9,
+        "oct": 10,
+        "october": 10,
+        "nov": 11,
+        "november": 11,
+        "dec": 12,
+        "december": 12,
+    }
+    if token in month_map:
+        return month_map[token]
+
+    raise ValueError(
+        "Invalid month filter. Use values like 'mar', 'MAR', or 'March'."
+    )
+
+
+def _record_month_number(record: Dict[str, str]) -> Optional[int]:
+    """Resolve month number from full_date first, then month column."""
+    full_date = (record.get("full_date") or "").strip()
+    if full_date:
+        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+            try:
+                return datetime.strptime(full_date, fmt).month
+            except ValueError:
+                continue
+
+    month_text = (record.get("month") or "").strip()
+    if month_text:
+        try:
+            return _parse_month_value(month_text)
+        except ValueError:
+            return None
+    return None
+
+
+def fetch_rolling_schedule(
+    runtime: SyncRuntime, month_filter: Optional[str] = None
+) -> List[Dict[str, str]]:
     """Fetch events from the rolling_schedule tab."""
     logger.info("Fetching rolling_schedule tab...")
 
@@ -105,9 +169,13 @@ def fetch_rolling_schedule(runtime: SyncRuntime) -> List[Dict[str, str]]:
 
     headers = [h.strip().lower() for h in rows[0]]
     data_rows = rows[1:]
+    month_number: Optional[int] = None
+    if month_filter:
+        month_number = _parse_month_value(month_filter)
 
     events: List[Dict[str, str]] = []
     skipped_count = 0
+    skipped_month = 0
     for row in data_rows:
         if not row or not any(row):
             continue
@@ -124,8 +192,8 @@ def fetch_rolling_schedule(runtime: SyncRuntime) -> List[Dict[str, str]]:
         if not record.get("class") or not record.get("full_date"):
             continue
 
-        # Skip holidays or unavailable dates
-        if record.get("holiday") or record.get("unavailability_notice"):
+        # Skip holidays
+        if record.get("holiday"):
             continue
 
         # Skip placeholder events like [No Class], [TBD], N/A
@@ -133,9 +201,29 @@ def fetch_rolling_schedule(runtime: SyncRuntime) -> List[Dict[str, str]]:
             skipped_count += 1
             continue
 
+        if month_number is not None:
+            row_month = _record_month_number(record)
+            if row_month != month_number:
+                skipped_month += 1
+                continue
+
         events.append(record)
 
-    logger.info("   Found %d scheduled events (skipped %d placeholders)", len(events), skipped_count)
+    if month_number is not None:
+        logger.info(
+            "   Found %d scheduled events for month=%s "
+            "(skipped %d placeholders, %d outside month filter)",
+            len(events),
+            month_filter,
+            skipped_count,
+            skipped_month,
+        )
+    else:
+        logger.info(
+            "   Found %d scheduled events (skipped %d placeholders)",
+            len(events),
+            skipped_count,
+        )
     return events
 
 
@@ -185,6 +273,83 @@ def fetch_class_info(runtime: SyncRuntime) -> Dict[str, Dict[str, str]]:
     return class_info
 
 
+def fetch_defaults(runtime: SyncRuntime) -> Dict[str, str]:
+    """Fetch defaults from the defaults tab.
+
+    Expected format: a standard table with `key` and `value` headers.
+    """
+    logger.info("Fetching defaults tab...")
+
+    service = runtime.get_sheets_service()
+    source_sheet_id = runtime.config.generator_sheet_id
+    destination_sheet_id = runtime.config.google_sheet_id
+    if not source_sheet_id and not destination_sheet_id:
+        raise ValueError("SOURCE_SHEET_ID or GOOGLE_SHEET_ID is not configured")
+
+    tab_name = runtime.config.defaults_tab
+    # Quote sheet names in A1 notation to support spaces/special chars safely.
+    safe_tab_name = tab_name.replace("'", "''")
+    range_name = f"'{safe_tab_name}'!A1:Z50"
+
+    candidate_sheet_ids: List[str] = []
+    if source_sheet_id:
+        candidate_sheet_ids.append(source_sheet_id)
+    if destination_sheet_id and destination_sheet_id not in candidate_sheet_ids:
+        candidate_sheet_ids.append(destination_sheet_id)
+
+    result = None
+    for candidate_sheet_id in candidate_sheet_ids:
+        try:
+            result = (
+                service.spreadsheets()
+                .values()
+                .get(spreadsheetId=candidate_sheet_id, range=range_name)
+                .execute()
+            )
+            logger.info(
+                "   Loaded defaults from spreadsheet: %s",
+                candidate_sheet_id,
+            )
+            break
+        except HttpError as exc:
+            logger.warning(
+                "Could not read defaults tab '%s' from spreadsheet %s (%s)",
+                tab_name,
+                candidate_sheet_id,
+                exc,
+            )
+
+    if result is None:
+        logger.warning("Continuing without defaults.")
+        return {}
+
+    rows = result.get("values", [])
+    if not rows:
+        logger.info("   No defaults found in tab '%s'", tab_name)
+        return {}
+
+    headers = [h.strip().lower() for h in rows[0]]
+    defaults: Dict[str, str] = {}
+
+    if "key" not in headers or "value" not in headers:
+        logger.warning(
+            "Defaults tab '%s' is missing required headers: key, value",
+            tab_name,
+        )
+        return {}
+
+    key_idx = headers.index("key")
+    value_idx = headers.index("value")
+    for row in rows[1:]:
+        key = row[key_idx].strip().lower() if len(row) > key_idx and row[key_idx] else ""
+        value = row[value_idx].strip() if len(row) > value_idx and row[value_idx] else ""
+        if key and value:
+            defaults[key] = value
+
+    logger.info("   Loaded %d defaults", len(defaults))
+    return defaults
+
+
 def _lookup_category_price(category: str) -> tuple:
     """Look up price for a category, case-insensitive. Returns (price, matched)."""
     # Try exact match first
@@ -201,17 +366,27 @@ def _lookup_category_price(category: str) -> tuple:
     return 30, False  # Default to $30
 
 
+def _normalize_category_slug(category: str) -> str:
+    """Normalize category text to a lowercase, hyphen-joined slug."""
+    collapsed = " ".join(category.strip().split())
+    return collapsed.lower().replace(" ", "-")
+
+
 def merge_event_data(
     schedule: List[Dict[str, str]],
     class_info: Dict[str, Dict[str, str]],
+    defaults: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Merge rolling_schedule with class_info and apply pricing."""
     merged_events: List[Dict[str, Any]] = []
     missing_categories: set = set()
+    defaults = defaults or {}
+    default_image = defaults.get("default_img", "").strip()
 
     for sched in schedule:
         class_name = sched.get("class", "")
         category = sched.get("catagories", "")
+        normalized_category = _normalize_category_slug(category) if category else ""
 
         # Look up class details
         details = class_info.get(class_name, {})
@@ -235,9 +410,11 @@ def merge_event_data(
         elif team:
             description = f"Instructors: {team}"
 
+        image_url = (details.get("image_link") or "").strip() or default_image
+
         event = {
             "event_name": class_name,
-            "catagories": category,
+            "catagories": normalized_category,
             "event_type": "TICKETS",
             "start_date": sched.get("full_date", ""),
             "start_time": sched.get("time_start", ""),
@@ -248,7 +425,7 @@ def merge_event_data(
             "ticket_price": ticket_price,
             "capacity": DEFAULT_CAPACITY,
             "registration_type": DEFAULT_REGISTRATION_TYPE,
-            "image_url": details.get("image_link", ""),
+            "image_url": image_url,
             "short_description": details.get("class_tagline", ""),
             "detailed_description": description,
         }
@@ -289,9 +466,11 @@ def write_to_sheet(
         raise ValueError("GOOGLE_SHEET_ID is not configured")
 
     # Prepare data rows (header + data)
-    rows: List[List[str]] = [OUTPUT_COLUMNS]
+    rows: List[List[Any]] = [OUTPUT_COLUMNS]
     for event in events:
-        row = [str(event.get(col, "")) for col in OUTPUT_COLUMNS]
+        # Preserve native types so numeric/date/time-looking values are not forced
+        # into text cells when writing to Google Sheets.
+        row = [event.get(col, "") for col in OUTPUT_COLUMNS]
         rows.append(row)
 
     # Check if tab exists; if not, create it
@@ -331,7 +510,7 @@ def write_to_sheet(
         service.spreadsheets().values().update(
             spreadsheetId=sheet_id,
             range=f"{tab_name}!A1",
-            valueInputOption="RAW",
+            valueInputOption="USER_ENTERED",
             body={"values": rows},
         ).execute()
 
@@ -345,6 +524,7 @@ def write_to_sheet(
 def generate_events(
     runtime: SyncRuntime,
     output_sheet: Optional[str] = None,
+    month_filter: Optional[str] = None,
 ) -> bool:
     """Main entry point for generating merged event data."""
     # When outputting CSV to stdout, send all logs to stderr
@@ -358,14 +538,15 @@ def generate_events(
     logger.info("Generating event data from rolling_schedule + class_info...\n")
 
     try:
-        schedule = fetch_rolling_schedule(runtime)
+        schedule = fetch_rolling_schedule(runtime, month_filter=month_filter)
         class_info = fetch_class_info(runtime)
+        defaults = fetch_defaults(runtime)
 
         if not schedule:
             logger.warning("No scheduled events found.")
             return False
 
-        merged = merge_event_data(schedule, class_info)
+        merged = merge_event_data(schedule, class_info, defaults=defaults)
         logger.info("\nMerged %d events with class info\n", len(merged))
 
         if output_sheet:

@@ -30,6 +30,8 @@ class AppConfig:
     timezone: str = "America/Toronto"
     rolling_schedule_tab: str = "rolling_schedule"
     class_info_tab: str = "class_info"
+    defaults_tab: str = "defaults"
+    generated_events_tab: str = "generated_events"
     # Separate source sheet for generate command (defaults to google_sheet_id if not set)
     source_sheet_id: Optional[str] = None
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
@@ -89,6 +91,8 @@ def load_config() -> AppConfig:
         google_credentials_raw=os.getenv("GOOGLE_CREDENTIALS"),
         rolling_schedule_tab=os.getenv("ROLLING_SCHEDULE_TAB", "rolling_schedule"),
         class_info_tab=os.getenv("CLASS_INFO_TAB", "class_info"),
+        defaults_tab=os.getenv("DEFAULTS_TAB", "defaults"),
+        generated_events_tab=os.getenv("GENERATED_EVENTS_TAB", "generated_events"),
         source_sheet_id=os.getenv("SOURCE_SHEET_ID"),
     )
 
