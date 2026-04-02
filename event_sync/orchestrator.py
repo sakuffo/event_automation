@@ -422,20 +422,21 @@ def _build_wix_event_payload(
             "type": "VENUE",
             "address": {"formattedAddress": event.location},
         },
-        "registration": {
-            "initialType": event.registration_type,
-        },
     }
 
-    if event.registration_type == "TICKETING":
-        from .constants import DEFAULT_TAX_NAME, DEFAULT_TAX_RATE, DEFAULT_TAX_TYPE
-        event_data["registration"]["tickets"] = {
-            "taxSettings": {
-                "type": DEFAULT_TAX_TYPE,
-                "name": DEFAULT_TAX_NAME,
-                "rate": DEFAULT_TAX_RATE,
-            }
+    if existing_event is None:
+        event_data["registration"] = {
+            "initialType": event.registration_type,
         }
+        if event.registration_type == "TICKETING":
+            from .constants import DEFAULT_TAX_NAME, DEFAULT_TAX_RATE, DEFAULT_TAX_TYPE
+            event_data["registration"]["tickets"] = {
+                "taxSettings": {
+                    "type": DEFAULT_TAX_TYPE,
+                    "name": DEFAULT_TAX_NAME,
+                    "rate": DEFAULT_TAX_RATE,
+                }
+            }
 
     teaser = event.teaser.strip() if event.teaser else ""
     if teaser:
@@ -506,10 +507,6 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
         (location_settings.get("address") or {}).get("formattedAddress") or ""
     )
     if event.location != formatted_address:
-        return True
-
-    registration_settings = existing_event.get("registration") or {}
-    if event.registration_type != registration_settings.get("initialType"):
         return True
 
     expected_teaser = event.teaser.strip() if event.teaser else ""
@@ -593,6 +590,12 @@ def _ensure_ticket_definition(
     event: EventRecord,
 ) -> bool:
     """Create a ticket definition if one doesn't already exist. Returns True on success."""
+    existing = client.get_ticket_definitions(event_id)
+    if existing:
+        names = [d.get("name", "") for d in existing]
+        logger.info("   ℹ️  Tickets already exist (%s) — skipping", ", ".join(names))
+        return True
+
     try:
         logger.info("   🎫 Creating ticket definition...")
         result = client.create_ticket_definition(
@@ -947,14 +950,17 @@ def push_config_events(
             sheet_tax_name = event.tax_name or ""
             sheet_tax_rate = event.tax_rate or ""
             sheet_tax_type = event.tax_type or ""
+            wix_has_tax = bool(wix_tax.get("name") or wix_tax.get("rate"))
+            sheet_has_tax = bool(sheet_tax_name or sheet_tax_rate)
             tax_changed = (
-                (sheet_tax_name and sheet_tax_name != wix_tax.get("name", ""))
-                or (sheet_tax_rate and sheet_tax_rate != wix_tax.get("rate", ""))
-                or (sheet_tax_type and sheet_tax_type != wix_tax.get("type", ""))
+                (wix_has_tax != sheet_has_tax)
+                or (sheet_tax_name != (wix_tax.get("name") or ""))
+                or (sheet_tax_rate != (wix_tax.get("rate") or ""))
+                or (sheet_tax_type != (wix_tax.get("type") or ""))
             )
 
-            # Check ticket price/capacity
-            wix_ticket_defs = client.get_ticket_definitions(event_id)
+            # Check ticket price/capacity (with sales data for safety)
+            wix_ticket_defs = client.get_ticket_definitions(event_id, include_sales=True)
             sheet_specs = parse_tickets(
                 ticket_name=event.ticket_name,
                 ticket_price=event.ticket_price,
@@ -967,16 +973,29 @@ def push_config_events(
                     if td.get("name") == spec.name:
                         wix_price = float(td.get("pricingMethod", {}).get("fixedPrice", {}).get("value", "0"))
                         wix_cap = td.get("initialLimit") or td.get("actualLimit")
-                        if wix_price != spec.price or (wix_cap and wix_cap != spec.capacity):
+                        sold = (td.get("salesDetails") or {}).get("soldCount", 0)
+
+                        new_price = spec.price if wix_price != spec.price else None
+                        new_capacity = spec.capacity if (wix_cap and wix_cap != spec.capacity) else None
+
+                        if new_capacity is not None and new_capacity < sold:
+                            logger.warning(
+                                "   ⚠️  Cannot reduce '%s' capacity to %d — %d tickets already sold",
+                                spec.name, new_capacity, sold,
+                            )
+                            new_capacity = None
+
+                        if new_price is not None or new_capacity is not None:
                             tickets_changed = True
                             ticket_updates.append({
                                 "id": td["id"],
                                 "revision": td["revision"],
                                 "name": spec.name,
-                                "new_price": spec.price if wix_price != spec.price else None,
-                                "new_capacity": spec.capacity if wix_cap != spec.capacity else None,
+                                "new_price": new_price,
+                                "new_capacity": new_capacity,
                                 "old_price": wix_price,
                                 "old_capacity": wix_cap,
+                                "sold": sold,
                             })
                         break
 
@@ -1019,21 +1038,27 @@ def push_config_events(
                     ok = False
 
             if tax_changed:
-                try:
-                    client.update_event(event_id, {
-                        "registration": {
-                            "tickets": {
-                                "taxSettings": {
-                                    "type": sheet_tax_type,
-                                    "name": sheet_tax_name,
-                                    "rate": sheet_tax_rate,
+                if not sheet_has_tax and wix_has_tax:
+                    logger.warning(
+                        "   ⚠️  Cannot remove tax via API (Wix limitation) — "
+                        "use Wix Dashboard to disable tax for %s", event_name,
+                    )
+                elif sheet_has_tax:
+                    try:
+                        client.update_event(event_id, {
+                            "registration": {
+                                "tickets": {
+                                    "taxSettings": {
+                                        "type": sheet_tax_type or "ADDED_AT_CHECKOUT",
+                                        "name": sheet_tax_name,
+                                        "rate": sheet_tax_rate,
+                                    }
                                 }
                             }
-                        }
-                    })
-                    logger.info("   💰 Tax updated: %s %s%%", sheet_tax_name, sheet_tax_rate)
-                except Exception as exc:
-                    logger.warning("   ⚠️  Failed to update tax: %s", exc)
+                        })
+                        logger.info("   💰 Tax updated: %s %s%%", sheet_tax_name, sheet_tax_rate)
+                    except Exception as exc:
+                        logger.warning("   ⚠️  Failed to update tax: %s", exc)
 
             if tickets_changed:
                 for tu in ticket_updates:

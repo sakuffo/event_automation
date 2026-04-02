@@ -446,13 +446,18 @@ class WixClient:
         )
         return response.json().get('ticketDefinition', {})
 
-    def get_ticket_definitions(self, event_id: str) -> List[Dict[str, Any]]:
+    def get_ticket_definitions(
+        self, event_id: str, include_sales: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Return all ticket definitions for an event."""
         try:
+            body: Dict[str, Any] = {'query': {'filter': {'eventId': event_id}}}
+            if include_sales:
+                body['fields'] = ['SALES_DETAILS']
             response = self._request(
                 'POST',
                 '/events-ticket-definitions/v3/ticket-definitions/query',
-                json={'query': {'filter': {'eventId': event_id}}},
+                json=body,
             )
             return response.json().get('ticketDefinitions', [])
         except Exception as exc:
@@ -467,7 +472,7 @@ class WixClient:
             response = self._request(
                 'POST',
                 '/events/v1/categories/query',
-                json={'query': {}},
+                json={'query': {'paging': {'limit': 100}}},
             )
             return response.json().get('categories', [])
         except Exception as exc:

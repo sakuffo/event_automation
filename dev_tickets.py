@@ -23,6 +23,12 @@ def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General A
     print(f"   Price: ${price} {currency}")
     print(f"   Quantity: {'Unlimited' if quantity is None else quantity}\n")
 
+    existing = client.get_ticket_definitions(event_id)
+    existing_names = [d.get("name", "") for d in existing]
+    if name in existing_names:
+        print(f"⚠️  Ticket '{name}' already exists on this event — skipping to avoid duplicates")
+        return None
+
     try:
         result = client.create_ticket_definition(
             event_id=event_id,
