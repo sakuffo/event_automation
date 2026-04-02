@@ -6,108 +6,13 @@ Automate RSVP and ticket purchases for testing without using live site
 
 import sys
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from wix_client import WixClient
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
-
-
-def create_test_rsvp(client: WixClient, event_id: str, name: str = "Test User",
-                     email: str = "test@example.com", guests: int = 1) -> Optional[Dict[str, Any]]:
-    """
-    Create a test RSVP for an event
-
-    ⚠️ DEPRECATED: The Wix RSVP v3 API endpoint appears to be unavailable.
-    RSVP creation may not work. Use the Wix Dashboard to manage RSVPs.
-    """
-    print(f"⚠️  WARNING: RSVP API may be deprecated/unavailable")
-    print(f"Creating RSVP for event {event_id}...")
-
-    contact_info = {
-        'firstName': name.split()[0] if ' ' in name else name,
-        'lastName': name.split()[1] if ' ' in name else 'User',
-        'email': email
-    }
-
-    try:
-        result = client.create_rsvp(
-            event_id=event_id,
-            contact_info=contact_info,
-            guest_count=guests
-        )
-        print(f"✅ RSVP created successfully!")
-        print(f"   RSVP ID: {result.get('rsvp', {}).get('id')}")
-        print(f"   Name: {name}")
-        print(f"   Email: {email}")
-        print(f"   Guests: {guests}")
-        return result
-    except Exception as e:
-        print(f"❌ Failed to create RSVP: {e}")
-        return None
-
-
-def create_bulk_rsvps(client: WixClient, event_id: str, count: int = 10) -> List[Dict[str, Any]]:
-    """
-    Create multiple test RSVPs
-
-    ⚠️ DEPRECATED: The Wix RSVP v3 API endpoint appears to be unavailable.
-    """
-    print(f"⚠️  WARNING: RSVP API may be deprecated/unavailable")
-    print(f"\n📝 Creating {count} test RSVPs for event {event_id}...\n")
-
-    results = []
-    for i in range(1, count + 1):
-        name = f"Test User {i}"
-        email = f"testuser{i}@example.com"
-
-        result = create_test_rsvp(client, event_id, name, email, guests=1)
-        if result:
-            results.append(result)
-
-        # Don't spam the API
-        import time
-        time.sleep(0.5)
-
-    print(f"\n✅ Created {len(results)}/{count} RSVPs successfully")
-    return results
-
-
-def list_event_rsvps(client: WixClient, event_id: str):
-    """
-    List all RSVPs for an event
-
-    ⚠️ WARNING: The Wix RSVP v3 query API may be deprecated/unavailable.
-    """
-    print(f"⚠️  WARNING: RSVP query API may be deprecated/unavailable")
-    print(f"📋 Fetching RSVPs for event {event_id}...\n")
-
-    try:
-        rsvps = client.get_rsvps(event_id=event_id)
-
-        if not rsvps:
-            print("No RSVPs found for this event.")
-            return
-
-        print(f"Found {len(rsvps)} RSVPs:\n")
-        for i, rsvp in enumerate(rsvps, 1):
-            contact = rsvp.get('contact', {})
-            name = f"{contact.get('firstName', '')} {contact.get('lastName', '')}".strip()
-            email = contact.get('email', 'N/A')
-            guests = rsvp.get('guestCount', 1)
-            status = rsvp.get('status', 'UNKNOWN')
-
-            print(f"{i}. {name}")
-            print(f"   Email: {email}")
-            print(f"   Guests: {guests}")
-            print(f"   Status: {status}")
-            print(f"   RSVP ID: {rsvp.get('id')}")
-            print()
-
-    except Exception as e:
-        print(f"❌ Failed to fetch RSVPs: {e}")
 
 
 def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General Admission",
@@ -207,14 +112,8 @@ def main():
         print("""
 Development Ticket Automation Tool
 
-⚠️  NOTE: RSVP API endpoints appear to be deprecated/unavailable.
-    RSVP commands may not work. Use Wix Dashboard to manage RSVPs.
-
 Usage:
   python dev_tickets.py add-ticket <event_id> [name] [price] [currency]
-  python dev_tickets.py rsvp <event_id> [name] [email] [guests]          [DEPRECATED]
-  python dev_tickets.py bulk-rsvp <event_id> [count]                      [DEPRECATED]
-  python dev_tickets.py list-rsvps <event_id>                            [DEPRECATED]
   python dev_tickets.py list-orders <event_id>
   python dev_tickets.py search-event <title>
 
@@ -223,14 +122,8 @@ Examples:
   python dev_tickets.py add-ticket abc123 "General Admission" 25 CAD
   python dev_tickets.py add-ticket abc123 "VIP Pass" 50 CAD
 
-  # Create single RSVP
-  python dev_tickets.py rsvp abc123 "John Doe" "john@example.com" 2
-
-  # Create 20 test RSVPs
-  python dev_tickets.py bulk-rsvp abc123 20
-
-  # List all RSVPs for an event
-  python dev_tickets.py list-rsvps abc123
+  # List orders for an event
+  python dev_tickets.py list-orders abc123
 
   # Search for event by title
   python dev_tickets.py search-event "Workshop"
@@ -252,36 +145,6 @@ Examples:
             currency = sys.argv[5] if len(sys.argv) > 5 else "CAD"
 
             add_ticket_to_event(client, event_id, ticket_name, price, currency)
-
-        elif command == 'rsvp':
-            if len(sys.argv) < 3:
-                print("Error: event_id required")
-                sys.exit(1)
-
-            event_id = sys.argv[2]
-            name = sys.argv[3] if len(sys.argv) > 3 else "Test User"
-            email = sys.argv[4] if len(sys.argv) > 4 else "test@example.com"
-            guests = int(sys.argv[5]) if len(sys.argv) > 5 else 1
-
-            create_test_rsvp(client, event_id, name, email, guests)
-
-        elif command == 'bulk-rsvp':
-            if len(sys.argv) < 3:
-                print("Error: event_id required")
-                sys.exit(1)
-
-            event_id = sys.argv[2]
-            count = int(sys.argv[3]) if len(sys.argv) > 3 else 10
-
-            create_bulk_rsvps(client, event_id, count)
-
-        elif command == 'list-rsvps':
-            if len(sys.argv) < 3:
-                print("Error: event_id required")
-                sys.exit(1)
-
-            event_id = sys.argv[2]
-            list_event_rsvps(client, event_id)
 
         elif command == 'list-orders':
             if len(sys.argv) < 3:

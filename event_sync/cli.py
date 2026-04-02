@@ -7,6 +7,7 @@ import sys
 from typing import Iterable, Optional
 
 from .config import ConfigError, load_config
+from .generator import generate_events
 from .logging_utils import configure_logging, get_logger
 from .orchestrator import (
     list_wix_events,
@@ -18,6 +19,21 @@ from .runtime import SyncRuntime
 
 
 logger = get_logger(__name__)
+
+
+def _ensure_command_config(command: str, config) -> None:
+    """Validate only the settings required for a given command."""
+    if command in {"sync", "test", "list"}:
+        config.ensure_valid()
+        return
+
+    if command in {"generate", "prepare-sheet", "prepare"}:
+        if not config.google_sheet_id:
+            raise ConfigError("GOOGLE_SHEET_ID is missing")
+        if not config.google_credentials_raw or not config.google_credentials:
+            raise ConfigError(
+                "GOOGLE_CREDENTIALS is missing or invalid JSON (client_email required)"
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,6 +61,38 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable automatic ticket creation",
     )
+    sync_parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Automatically publish created events (default: leave as draft)",
+    )
+
+    generate_parser = subparsers.add_parser(
+        "generate",
+        help="Generate event data from rolling_schedule + class_info tabs",
+    )
+    generate_parser.add_argument(
+        "--output-sheet",
+        metavar="TAB_NAME",
+        help="Write output to a new sheet tab instead of stdout",
+    )
+    generate_parser.add_argument(
+        "-m",
+        "--month",
+        metavar="MONTH",
+        help="Filter prepared events by month (e.g., mar, MAR, March)",
+    )
+    prepare_parser = subparsers.add_parser(
+        "prepare-sheet",
+        aliases=["prepare"],
+        help="Step 1: Rebuild destination tab in GOOGLE_SHEET_ID from SOURCE_SHEET_ID",
+    )
+    prepare_parser.add_argument(
+        "-m",
+        "--month",
+        metavar="MONTH",
+        help="Filter prepared events by month (e.g., mar, MAR, March)",
+    )
 
     return parser
 
@@ -67,7 +115,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             return 0 if ok else 1
 
         try:
-            config.ensure_valid()
+            _ensure_command_config(args.command, config)
         except ConfigError as exc:
             logger.error("Configuration error: %s", exc)
             return 1
@@ -82,7 +130,23 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         if args.command == "sync":
             auto_tickets = not args.no_tickets
-            ok = sync_events(runtime, auto_create_tickets=auto_tickets)
+            ok = sync_events(runtime, auto_create_tickets=auto_tickets, auto_publish=args.publish)
+            return 0 if ok else 1
+
+        if args.command == "generate":
+            ok = generate_events(
+                runtime,
+                output_sheet=args.output_sheet,
+                month_filter=args.month,
+            )
+            return 0 if ok else 1
+
+        if args.command in {"prepare-sheet", "prepare"}:
+            ok = generate_events(
+                runtime,
+                output_sheet=config.generated_events_tab,
+                month_filter=args.month,
+            )
             return 0 if ok else 1
 
         parser.print_help()

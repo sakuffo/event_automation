@@ -4,7 +4,9 @@ Wix API Client
 Reusable client for interacting with Wix Events and related APIs
 """
 
+import logging
 import os
+import time
 from copy import deepcopy
 from itertools import islice
 from typing import Any, Dict, Iterator, List, Optional
@@ -13,6 +15,12 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+class WixApiError(Exception):
+    """Raised when a Wix API operation fails."""
 
 
 class WixClient:
@@ -49,7 +57,7 @@ class WixClient:
         if not all([self.api_key, self.site_id]):
             raise ValueError("WIX_API_KEY and WIX_SITE_ID are required")
 
-        print(f"[*] Wix Client initialized in {self.mode.upper()} mode")
+        logger.info("Wix Client initialized in %s mode", self.mode.upper())
 
     def _headers(self, content_type: str = 'application/json') -> Dict[str, str]:
         """Get standard headers for Wix API requests"""
@@ -67,8 +75,6 @@ class WixClient:
 
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make a request to Wix API with retry logic and error handling"""
-        import time
-
         url = f"{self.base_url}{endpoint}"
         max_retries = 3
         timeout = kwargs.pop('timeout', 30)  # Default 30 second timeout
@@ -90,35 +96,35 @@ class WixClient:
                 if e.response is not None and e.response.status_code == 429:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                        print(f"[!] Rate limited. Retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                        logger.warning("Rate limited. Retrying in %ds... (attempt %d/%d)", wait_time, attempt + 1, max_retries)
                         time.sleep(wait_time)
                         continue
-                # Print detailed error for debugging
+                # Log detailed error for debugging
                 if e.response is not None:
                     try:
                         error_body = e.response.json()
-                        print(f"[!] API Error: {error_body}")
-                    except:
-                        print(f"[!] API Error: {e.response.text}")
+                        logger.error("API Error: %s", error_body)
+                    except (ValueError, KeyError):
+                        logger.error("API Error: %s", e.response.text)
                 # Re-raise other HTTP errors or final retry
                 raise
 
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
-                    print(f"[!] Request timeout. Retrying... (attempt {attempt + 1}/{max_retries})")
+                    logger.warning("Request timeout. Retrying... (attempt %d/%d)", attempt + 1, max_retries)
                     continue
                 raise
 
             except requests.exceptions.ConnectionError:
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
-                    print(f"[!] Connection error. Retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    logger.warning("Connection error. Retrying in %ds... (attempt %d/%d)", wait_time, attempt + 1, max_retries)
                     time.sleep(wait_time)
                     continue
                 raise
 
         # Should not reach here, but just in case
-        raise Exception(f"Failed to complete request after {max_retries} attempts")
+        raise WixApiError(f"Failed to complete request after {max_retries} attempts")
 
     # Event Operations
 
@@ -236,7 +242,7 @@ class WixClient:
     def update_event(self, event_id: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Update an existing event"""
         response = self._request(
-            'PATCH',
+            'POST',
             f'/events/v3/events/{event_id}',
             json={'event': event_data}
         )
@@ -247,7 +253,8 @@ class WixClient:
         try:
             self._request('DELETE', f'/events/v3/events/{event_id}')
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error("Failed to delete event %s: %s", event_id, exc)
             return False
 
     def publish_event(self, event_id: str) -> Dict[str, Any]:
@@ -256,55 +263,6 @@ class WixClient:
         return response.json().get('event', {})
 
     # Ticket/Registration Operations
-
-    def create_rsvp(self, event_id: str, contact_info: Dict[str, Any],
-                    guest_count: int = 1, form_response: Dict[str, Any] = None) -> Dict[str, Any]:
-        """
-        Create an RSVP for an event
-
-        ⚠️ DEPRECATED: This endpoint (/events/v3/rsvps) returns 404.
-        The RSVP API appears to be deprecated. Use Wix Dashboard instead.
-        """
-        payload = {
-            'eventId': event_id,
-            'contact': contact_info,
-            'guestCount': guest_count
-        }
-
-        if form_response:
-            payload['formResponse'] = form_response
-
-        response = self._request(
-            'POST',
-            '/events/v3/rsvps',
-            json=payload
-        )
-        return response.json()
-
-    def get_rsvps(self, event_id: str = None, limit: int = 50) -> List[Dict[str, Any]]:
-        """Return up to ``limit`` RSVP records."""
-
-        iterator = self.iter_rsvps(event_id=event_id, page_size=max(limit, 1))
-        return list(islice(iterator, limit))
-
-    def iter_rsvps(
-        self,
-        event_id: Optional[str] = None,
-        *,
-        page_size: int = 100,
-    ) -> Iterator[Dict[str, Any]]:
-        """Yield RSVP records across all pages."""
-
-        base_query: Dict[str, Any] = {}
-        if event_id:
-            base_query['filter'] = {'eventId': event_id}
-
-        yield from self._paged_post(
-            '/events/v3/rsvps/query',
-            'rsvps',
-            base_query,
-            page_size,
-        )
 
     def create_ticket_order(self, event_id: str, tickets: List[Dict[str, Any]],
                            checkout_info: Dict[str, Any]) -> Dict[str, Any]:
@@ -378,7 +336,7 @@ class WixClient:
             return upload_result['file']
 
         # Fallback (shouldn't happen)
-        raise Exception("Upload succeeded but no file descriptor returned")
+        raise WixApiError("Upload succeeded but no file descriptor returned")
 
     def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
                                  capacity: Optional[int] = None, currency: str = "CAD") -> Dict[str, Any]:

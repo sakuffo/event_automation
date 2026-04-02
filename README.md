@@ -33,7 +33,11 @@ python sync_events.py sync      # Run the sync
 python sync_events.py validate  # Validate credentials
 python sync_events.py test      # Test Wix API connection
 python sync_events.py list      # List existing Wix events
+python sync_events.py prepare-sheet  # Step 1: Rebuild generated_events tab
+python sync_events.py prepare-sheet -m mar  # Step 1 for March only
 python sync_events.py sync      # Sync events from Google Sheets
+python sync_events.py generate --output-sheet my_tab  # Custom generation target
+python sync_events.py generate --output-sheet my_tab -m March  # Custom tab + month filter
 
 # Using Make shortcuts
 make setup          # Complete setup
@@ -47,6 +51,25 @@ make clean         # Clean up files
 ```
 
 All CLI subcommands accept `--log-level` (e.g., `python sync_events.py sync --log-level DEBUG`).
+
+## Two-Step Workflow (Manual Step 2)
+
+```bash
+# Step 1: Rebuild destination tab in GOOGLE_SHEET_ID from SOURCE_SHEET_ID
+python sync_events.py prepare-sheet
+# Optional month filter: mar, MAR, March, etc.
+python sync_events.py prepare-sheet -m March
+
+# Step 2 (manual): Push events from GOOGLE_SHEET_ID into Wix
+python sync_events.py sync
+```
+
+Notes:
+
+- `prepare-sheet` fully clears and rewrites the destination tab each run.
+- Destination tab defaults to `generated_events` and can be changed via `GENERATED_EVENTS_TAB`.
+- Source tabs default to `rolling_schedule` and `class_info` and can be changed via `ROLLING_SCHEDULE_TAB` and `CLASS_INFO_TAB`.
+- `defaults.default_img` is used as the fallback `image_url` when `class_info.image_link` is empty.
 
 ## Google Sheet Format
 
@@ -139,6 +162,9 @@ WIX_API_KEY=your_wix_api_key
 WIX_ACCOUNT_ID=your_account_id
 WIX_SITE_ID=your_site_id
 GOOGLE_SHEET_ID=your_spreadsheet_id
+SOURCE_SHEET_ID=your_source_spreadsheet_id  # optional; falls back to GOOGLE_SHEET_ID
+DEFAULTS_TAB=defaults
+GENERATED_EVENTS_TAB=generated_events
 GOOGLE_CREDENTIALS={"type":"service_account"...}  # Full JSON on one line
 ```
 

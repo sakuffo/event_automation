@@ -44,3 +44,16 @@ temp/
 .env
 .env_*
 *.env
+
+*.csv
+*.xlsx
+*.json
+*.yaml
+*.yml
+*.xml
+*.html
+*.css
+*.js
+*.php
+*.sql
+*.txt

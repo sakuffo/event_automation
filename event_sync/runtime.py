@@ -19,8 +19,8 @@ CacheEntry = Tuple[Optional[bytes], Optional[str], Optional[str]]
 class SyncRuntime:
     """Lazily instantiates Google + Wix clients and tracks cross-cutting caches."""
 
-    SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
-    DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+    SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+    DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
     def __init__(self, config: AppConfig):
         self.config = config

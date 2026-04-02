@@ -28,9 +28,20 @@ class AppConfig:
     google_credentials_raw: Optional[str]
     sheet_range: str = "Sheet1!A1:Z100"
     timezone: str = "America/Toronto"
+    rolling_schedule_tab: str = "rolling_schedule"
+    class_info_tab: str = "class_info"
+    defaults_tab: str = "defaults"
+    generated_events_tab: str = "generated_events"
+    # Separate source sheet for generate command (defaults to google_sheet_id if not set)
+    source_sheet_id: Optional[str] = None
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
         default=None, init=False, repr=False
     )
+
+    @property
+    def generator_sheet_id(self) -> Optional[str]:
+        """Sheet ID for generate command (source data)."""
+        return self.source_sheet_id or self.google_sheet_id
 
     def validation_errors(self) -> List[str]:
         errors: List[str] = []
@@ -78,6 +89,11 @@ def load_config() -> AppConfig:
         wix_site_id=os.getenv("WIX_SITE_ID"),
         google_sheet_id=os.getenv("GOOGLE_SHEET_ID"),
         google_credentials_raw=os.getenv("GOOGLE_CREDENTIALS"),
+        rolling_schedule_tab=os.getenv("ROLLING_SCHEDULE_TAB", "rolling_schedule"),
+        class_info_tab=os.getenv("CLASS_INFO_TAB", "class_info"),
+        defaults_tab=os.getenv("DEFAULTS_TAB", "defaults"),
+        generated_events_tab=os.getenv("GENERATED_EVENTS_TAB", "generated_events"),
+        source_sheet_id=os.getenv("SOURCE_SHEET_ID"),
     )
 
 
