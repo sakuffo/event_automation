@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from html import escape
@@ -22,9 +23,9 @@ except ImportError:  # pragma: no cover - optional dependency
 from .config import AppConfig
 from .logging_utils import get_logger
 from .images import upload_image_to_wix
-from .models import EventRecord
+from .models import EventRecord, parse_tickets
 from .runtime import SyncRuntime
-from .sheets import fetch_events
+from .sheets import fetch_config_events, fetch_events
 from .utils import convert_date_to_iso
 
 
@@ -148,9 +149,31 @@ def _extract_bullet_text(line: str) -> Optional[str]:
     return None
 
 
-def format_description_as_html(raw: str) -> str:
-    """Convert plain text from Sheets into minimal HTML for Wix."""
+def _inline_markdown(text: str) -> str:
+    """Apply inline markdown formatting to already-escaped HTML text.
 
+    Supported: **bold**, *italic*, [text](url)
+    """
+    text = re.sub(
+        r'\[([^\]]+)\]\(([^)]+)\)',
+        r'<a href="\2" target="_blank">\1</a>',
+        text,
+    )
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+    return text
+
+
+def _format_line(text: str) -> str:
+    """Escape HTML then apply inline markdown."""
+    return _inline_markdown(escape(text.strip()))
+
+
+def format_description_as_html(raw: str) -> str:
+    """Convert text from Sheets into HTML for Wix.
+
+    Supports paragraphs, bullet lists, **bold**, *italic*, and [links](url).
+    """
     if not raw:
         return ""
 
@@ -184,14 +207,14 @@ def format_description_as_html(raw: str) -> str:
             if bullet is None:
                 all_bullets = False
                 break
-            bullet_items.append(escape(bullet))
+            bullet_items.append(_format_line(bullet))
 
         if all_bullets and bullet_items:
             items_html = "".join(f"<li>{item}</li>" for item in bullet_items)
             html_blocks.append(f"<ul>{items_html}</ul>")
             continue
 
-        joined = "<br/>".join(escape(item.strip()) for item in para)
+        joined = "<br/>".join(_format_line(item) for item in para)
         html_blocks.append(f"<p>{joined}</p>")
 
     return "".join(html_blocks)
@@ -269,14 +292,80 @@ def list_wix_events(runtime: SyncRuntime) -> List[Dict[str, object]]:
         return []
 
 
-def get_existing_event_keys(runtime: SyncRuntime) -> Dict[str, Dict[str, Any]]:
+def publish_all_drafts(runtime: SyncRuntime) -> bool:
+    """Publish DRAFT events matching the generated sheet, then create their tickets."""
+    logger.info("📢 Publishing draft events from generated sheet...\n")
+    try:
+        sheet_events = fetch_events(runtime)
+        if not sheet_events:
+            logger.warning("No events found in generated sheet.")
+            return False
+
+        sheet_lookup: Dict[str, EventRecord] = {}
+        for event in sheet_events:
+            start_date_iso = convert_date_to_iso(event.start_date)
+            key = f"{event.name.strip()}|{start_date_iso}|{event.start_time}"
+            sheet_lookup[key] = event
+
+        logger.info("Found %d events in sheet, looking for matching drafts...\n", len(sheet_lookup))
+
+        existing = get_existing_event_keys(runtime)
+        client = runtime.get_wix_client()
+
+        published = 0
+        skipped = 0
+        failed = 0
+        for key, entry in existing.items():
+            if key not in sheet_lookup:
+                continue
+            wix_event = entry.get("event") or {}
+            event_id = entry.get("id")
+            title = wix_event.get("title", "Untitled")
+            sheet_event = sheet_lookup[key]
+
+            if wix_event.get("status") != "DRAFT":
+                logger.info("  ⏭️  Already published: %s", title)
+                skipped += 1
+                continue
+
+            try:
+                client.publish_event(event_id)
+                logger.info("  ✅ Published: %s", title)
+                published += 1
+            except Exception as exc:
+                logger.warning("  ⚠️  Failed to publish %s: %s", title, exc)
+                failed += 1
+                continue
+
+            if (
+                sheet_event.registration_type == "TICKETING"
+                and sheet_event.ticket_price > 0
+            ):
+                _ensure_ticket_definition(client, event_id, sheet_event)
+
+            time.sleep(0.3)
+
+        if published == 0 and failed == 0:
+            logger.info("No matching drafts to publish.")
+
+        logger.info("\n📊 Results: %d published, %d already live, %d failed", published, skipped, failed)
+        return failed == 0
+    except Exception as exc:
+        logger.error("❌ Failed to publish drafts: %s", exc)
+        return False
+
+
+def get_existing_event_keys(
+    runtime: SyncRuntime,
+    fieldsets: Optional[List[str]] = None,
+) -> Dict[str, Dict[str, Any]]:
     logger.info("🔍 Checking for existing events in Wix...")
     try:
         client = runtime.get_wix_client()
         existing_events: Dict[str, Dict[str, Any]] = {}
         total_events = 0
 
-        for event in client.iter_events(page_size=100):
+        for event in client.iter_events(page_size=100, fieldsets=fieldsets):
             total_events += 1
             title = (event.get("title") or "").strip()
             start_settings = event.get("dateAndTimeSettings", {}) or {}
@@ -354,7 +443,11 @@ def _build_wix_event_payload(
     elif existing_event and existing_event.get("shortDescription"):
         event_data["shortDescription"] = ""
 
-    formatted_description = format_description_as_html(event.description or "")
+    raw_desc = event.description or ""
+    if raw_desc.lstrip().startswith("<"):
+        formatted_description = raw_desc
+    else:
+        formatted_description = format_description_as_html(raw_desc)
     if formatted_description:
         event_data["detailedDescription"] = formatted_description
     elif existing_event and existing_event.get("detailedDescription"):
@@ -423,7 +516,11 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
     if expected_teaser != (existing_event.get("shortDescription") or ""):
         return True
 
-    expected_description = format_description_as_html(event.description or "")
+    raw_desc = event.description or ""
+    if raw_desc.lstrip().startswith("<"):
+        expected_description = raw_desc
+    else:
+        expected_description = format_description_as_html(raw_desc)
     if expected_description != (existing_event.get("detailedDescription") or ""):
         return True
 
@@ -431,10 +528,13 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
 
 
 _category_cache: Dict[str, str] = {}
+_category_cache_loaded = False
 
 
 def _resolve_category_id(client, category_name: str) -> Optional[str]:
     """Get or create a Wix category by name. Returns the category ID."""
+    global _category_cache_loaded
+
     if not category_name:
         return None
 
@@ -442,7 +542,8 @@ def _resolve_category_id(client, category_name: str) -> Optional[str]:
     if name_lower in _category_cache:
         return _category_cache[name_lower]
 
-    if not _category_cache:
+    if not _category_cache_loaded:
+        _category_cache_loaded = True
         existing = client.query_categories()
         for cat in existing:
             _category_cache[cat.get("name", "").strip().lower()] = cat["id"]
@@ -521,7 +622,7 @@ def create_wix_event(
     event: EventRecord,
     runtime: SyncRuntime,
     auto_create_tickets: bool = True,
-    auto_publish: bool = False,
+    draft: bool = False,
 ) -> bool:
     file_descriptor = None
     if event.image_url:
@@ -541,38 +642,27 @@ def create_wix_event(
         logger.debug("Event payload for %s: %s", event.name, json.dumps(event_data))
 
         client = runtime.get_wix_client()
-        created_event = client.create_event(event_data)
+        created_event = client.create_event(event_data, draft=draft)
         event_id = created_event.get("id")
+        status = created_event.get("status", "UNKNOWN")
 
-        logger.info("✅ Created event: %s", event.name)
+        logger.info("✅ Created event: %s (%s)", event.name, status)
 
-        should_create_ticket = (
-            auto_create_tickets
-            and event.registration_type == "TICKETING"
-            and event.ticket_price > 0
-        )
+        if draft:
+            logger.info("   ℹ️  Tickets deferred — run publish-drafts to publish and add tickets")
+        else:
+            should_create_ticket = (
+                auto_create_tickets
+                and event.registration_type == "TICKETING"
+                and event.ticket_price > 0
+            )
 
-        ticket_ok = True
-        if should_create_ticket:
-            ticket_ok = _ensure_ticket_definition(client, event_id, event)
-        elif event.registration_type == "TICKETING" and not auto_create_tickets:
-            logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
-            logger.info("   💡 Re-run without --no-tickets to enable automatic tickets or add them manually via Wix Dashboard")
+            if should_create_ticket:
+                _ensure_ticket_definition(client, event_id, event)
+            elif event.registration_type == "TICKETING" and not auto_create_tickets:
+                logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
 
         _assign_categories(client, event_id, event)
-
-        if auto_publish and event_id:
-            if should_create_ticket and not ticket_ok:
-                logger.warning(
-                    "   ⏸️  Skipping publish for %s — ticket creation failed",
-                    event.name,
-                )
-            else:
-                try:
-                    client.publish_event(event_id)
-                    logger.info("   📢 Published event: %s", event.name)
-                except Exception as pub_error:
-                    logger.warning("   ⚠️  Failed to publish event: %s", pub_error)
 
         return True
     except Exception as exc:
@@ -635,16 +725,15 @@ def update_wix_event(
         return False
 
 
-def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, auto_publish: bool = False) -> bool:
+def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, draft: bool = False) -> bool:
     logger.info("🚀 Starting Google Sheets → Wix Events sync...\n")
-    if auto_create_tickets:
+    if draft:
+        logger.info("📋 Mode: DRAFT (events created as drafts, no tickets)")
+        logger.info("   Run publish-drafts when ready to go live")
+    elif auto_create_tickets:
         logger.info("🎫 Auto-ticket creation: ENABLED")
     else:
         logger.info("🎫 Auto-ticket creation: DISABLED")
-    if auto_publish:
-        logger.info("📢 Auto-publish: ENABLED")
-    else:
-        logger.info("📢 Auto-publish: DISABLED (events created as drafts)")
     logger.info("")
 
     try:
@@ -702,7 +791,7 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, auto_pub
                     results["skipped"].append(event.name)
                 continue
 
-            if create_wix_event(event, runtime=runtime, auto_create_tickets=auto_create_tickets, auto_publish=auto_publish):
+            if create_wix_event(event, runtime=runtime, auto_create_tickets=auto_create_tickets, draft=draft):
                 results["success"].append(event.name)
             else:
                 results["failed"].append(event.name)
@@ -750,6 +839,171 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, auto_pub
         return len(results["failed"]) == 0
     except Exception as exc:
         logger.error("Fatal error during sync: %s", exc)
+        return False
+
+
+def _create_tickets_from_config(client, event_id: str, event: EventRecord) -> bool:
+    """Create ticket definitions from the config tickets column."""
+    from .constants import DEFAULT_FEE_TYPE, DEFAULT_TAX_NAME, DEFAULT_TAX_RATE, DEFAULT_TAX_TYPE
+
+    specs = parse_tickets(event.tickets)
+    if not specs:
+        return True
+
+    fee = event.fee_type or DEFAULT_FEE_TYPE
+    ok = True
+    for spec in specs:
+        try:
+            result = client.create_ticket_definition(
+                event_id=event_id,
+                ticket_name=spec.name,
+                price=spec.price,
+                capacity=spec.capacity,
+                limit_per_checkout=spec.limit_per_checkout,
+                fee_type=fee,
+                sale_start=event.sale_start,
+                sale_end=event.sale_end,
+            )
+            actual = result.get("initialLimit") or result.get("actualLimit")
+            logger.info(
+                "   🎫 Ticket '%s': $%.2f (capacity: %s)",
+                spec.name, spec.price, actual if actual else "unlimited",
+            )
+        except Exception as exc:
+            logger.warning("   ⚠️  Failed to create ticket '%s': %s", spec.name, exc)
+            ok = False
+    return ok
+
+
+def push_config_events(
+    runtime: SyncRuntime,
+    dry_run: bool = False,
+) -> bool:
+    """Push config updates to existing Wix events. Does not create new events."""
+    logger.info("🚀 Push config updates to Wix...\n")
+    if dry_run:
+        logger.info("🔍 DRY RUN — no changes will be made\n")
+
+    try:
+        events = fetch_config_events(runtime)
+        if not events:
+            logger.warning("No events in config_events sheet.")
+            return False
+
+        existing_events = get_existing_event_keys(
+            runtime, fieldsets=["CATEGORIES"],
+        )
+        results = {"updated": [], "skipped": [], "not_found": [], "failed": []}
+
+        for event in events:
+            start_date_iso = convert_date_to_iso(event.start_date)
+            event_name = event.name.strip()
+            event_key = f"{event_name}|{start_date_iso}|{event.start_time}"
+
+            existing_entry = existing_events.get(event_key)
+
+            if not existing_entry:
+                logger.warning("  ⚠️  Not found in Wix: %s on %s — use sync to create it first", event_name, event.start_date)
+                results["not_found"].append(event_name)
+                continue
+
+            wix_event = existing_entry.get("event") or {}
+            event_id = existing_entry.get("id")
+
+            if not event_id or not wix_event:
+                results["skipped"].append(event_name)
+                continue
+
+            event_changed = needs_update(event, wix_event, runtime)
+
+            # Check if categories changed
+            wix_cats = wix_event.get("categories", {})
+            wix_cat_list = wix_cats.get("categories", []) if isinstance(wix_cats, dict) else []
+            wix_cat_names = sorted(c.get("name", "") for c in wix_cat_list)
+            sheet_cat_names = sorted(t.strip() for t in (event.category or "").split(";") if t.strip())
+            cats_changed = wix_cat_names != sheet_cat_names
+
+            if not event_changed and not cats_changed:
+                if dry_run:
+                    logger.info("  SKIP: %s (no changes)", event_name)
+                else:
+                    logger.info("⏭️  Skipped: %s (no changes)", event_name)
+                results["skipped"].append(event_name)
+                continue
+
+            changes = []
+            if event_changed:
+                changes.append("event data")
+            if cats_changed:
+                changes.append("categories")
+            change_desc = " + ".join(changes)
+
+            if dry_run:
+                logger.info("  UPDATE: %s on %s [%s]", event_name, event.start_date, change_desc)
+                results["updated"].append(event_name)
+                continue
+
+            logger.info("♻️  Updating: %s on %s [%s]", event_name, event.start_date, change_desc)
+            ok = True
+            if event_changed:
+                if not update_wix_event(event, runtime=runtime, existing_event_id=event_id, existing_event=wix_event):
+                    ok = False
+            if cats_changed:
+                client = runtime.get_wix_client()
+                wix_cat_set = set(wix_cat_names)
+                sheet_cat_set = set(sheet_cat_names)
+                to_add = sheet_cat_set - wix_cat_set
+                to_remove = wix_cat_set - sheet_cat_set
+
+                for tag in to_add:
+                    cat_id = _resolve_category_id(client, tag)
+                    if cat_id:
+                        try:
+                            client.assign_event_to_category(cat_id, event_id)
+                            logger.info("   🏷️  Added category: %s", tag)
+                        except Exception as exc:
+                            logger.warning("   ⚠️  Failed to add category '%s': %s", tag, exc)
+
+                wix_cat_id_map = {c.get("name", ""): c.get("id", "") for c in wix_cat_list}
+                for tag in to_remove:
+                    cat_id = wix_cat_id_map.get(tag)
+                    if cat_id:
+                        try:
+                            client.unassign_event_from_category(cat_id, event_id)
+                            logger.info("   🗑️  Removed category: %s", tag)
+                        except Exception as exc:
+                            logger.warning("   ⚠️  Failed to remove category '%s': %s", tag, exc)
+
+            if ok:
+                results["updated"].append(event_name)
+            else:
+                results["failed"].append(event_name)
+            time.sleep(1)
+
+        logger.info("\n📈 Push Complete!\n")
+
+        if results["updated"]:
+            label = "Would update" if dry_run else "Updated"
+            logger.info("♻️  %s: %d events", label, len(results["updated"]))
+            for n in results["updated"]:
+                logger.info("  • %s", n)
+
+        if results["skipped"]:
+            logger.info("\n⏭️  Skipped (no changes): %d events", len(results["skipped"]))
+
+        if results["not_found"]:
+            logger.warning("\n⚠️  Not found in Wix (create with sync first): %d events", len(results["not_found"]))
+            for n in results["not_found"]:
+                logger.warning("  • %s", n)
+
+        if results["failed"]:
+            logger.error("\n❌ Failed: %d events", len(results["failed"]))
+            for n in results["failed"]:
+                logger.error("  • %s", n)
+
+        return len(results["failed"]) == 0
+    except Exception as exc:
+        logger.error("Fatal error during push: %s", exc)
         return False
 
 

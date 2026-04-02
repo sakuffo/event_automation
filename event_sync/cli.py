@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 def _ensure_command_config(command: str, config) -> None:
     """Validate only the settings required for a given command."""
-    if command in {"sync", "test", "list"}:
+    if command in {"sync", "test", "list", "pull-config"}:
         config.ensure_valid()
         return
 
@@ -34,6 +34,9 @@ def _ensure_command_config(command: str, config) -> None:
             raise ConfigError(
                 "GOOGLE_CREDENTIALS is missing or invalid JSON (client_email required)"
             )
+
+    if command == "push-config":
+        config.ensure_valid()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate", help="Validate credentials and configuration")
     subparsers.add_parser("test", help="Test Wix API connectivity")
     subparsers.add_parser("list", help="List existing events in Wix")
+    subparsers.add_parser("publish-drafts", help="Publish all draft events in Wix")
 
     sync_parser = subparsers.add_parser("sync", help="Sync events from Google Sheets")
     sync_parser.add_argument(
@@ -62,9 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable automatic ticket creation",
     )
     sync_parser.add_argument(
-        "--publish",
+        "--draft",
         action="store_true",
-        help="Automatically publish created events (default: leave as draft)",
+        help="Create events as drafts (no tickets until publish-drafts)",
     )
 
     generate_parser = subparsers.add_parser(
@@ -94,6 +98,21 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MONTH",
         nargs="+",
         help="Filter by month(s) (e.g., -m apr may). Defaults to current + next month.",
+    )
+
+    subparsers.add_parser(
+        "pull-config",
+        help="Pull all published Wix events into config_events master tab",
+    )
+
+    push_config_parser = subparsers.add_parser(
+        "push-config",
+        help="Push config_events updates to existing Wix events",
+    )
+    push_config_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without making any API calls",
     )
 
     return parser
@@ -130,9 +149,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             list_wix_events(runtime)
             return 0
 
+        if args.command == "publish-drafts":
+            from .orchestrator import publish_all_drafts
+            ok = publish_all_drafts(runtime)
+            return 0 if ok else 1
+
         if args.command == "sync":
             auto_tickets = not args.no_tickets
-            ok = sync_events(runtime, auto_create_tickets=auto_tickets, auto_publish=args.publish)
+            ok = sync_events(runtime, auto_create_tickets=auto_tickets, draft=args.draft)
             return 0 if ok else 1
 
         if args.command == "generate":
@@ -153,6 +177,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 output_sheet=config.generated_events_tab,
                 month_filters=months,
             )
+            return 0 if ok else 1
+
+        if args.command == "pull-config":
+            from .generator import pull_config_events
+            ok = pull_config_events(runtime)
+            return 0 if ok else 1
+
+        if args.command == "push-config":
+            from .orchestrator import push_config_events
+            ok = push_config_events(runtime, dry_run=args.dry_run)
             return 0 if ok else 1
 
         parser.print_help()

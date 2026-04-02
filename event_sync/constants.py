@@ -62,9 +62,40 @@ COLUMN_MAPPING = {
     "image_url": ["image_url", "image url", "image", "photo", "picture"],
     "teaser": ["short_description", "short description", "teaser", "summary"],
     "description": ["detailed_description", "detailed description", "desc", "details"],
+    "tickets": ["tickets"],
+    "fee_type": ["fee_type"],
+    "sale_start": ["sale_start"],
+    "sale_end": ["sale_end"],
+    "tax_name": ["tax_name"],
+    "tax_rate": ["tax_rate"],
+    "tax_type": ["tax_type"],
 }
 
 REQUIRED_FIELDS = ["event_name", "start_date", "start_time", "location"]
+
+DEFAULT_FEE_TYPE = "FEE_ADDED_AT_CHECKOUT"
+
+# Column order for the config_events master configurator tab
+CONFIG_COLUMNS = [
+    "event_name",
+    "categories",
+    "start_date",
+    "start_time",
+    "end_date",
+    "end_time",
+    "location",
+    "registration_type",
+    "short_description",
+    "detailed_description",
+    "image_url",
+    "tickets",
+    "fee_type",
+    "sale_start",
+    "sale_end",
+    "tax_name",
+    "tax_rate",
+    "tax_type",
+]
 
 MAX_WIX_IMAGE_BYTES = 25 * 1024 * 1024
 

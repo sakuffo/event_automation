@@ -11,9 +11,14 @@ from googleapiclient.errors import HttpError
 
 from .constants import (
     CATEGORY_PRICING,
+    CONFIG_COLUMNS,
     DEFAULT_CAPACITY,
+    DEFAULT_FEE_TYPE,
     DEFAULT_LOCATION,
     DEFAULT_REGISTRATION_TYPE,
+    DEFAULT_TAX_NAME,
+    DEFAULT_TAX_RATE,
+    DEFAULT_TAX_TYPE,
 )
 from .logging_utils import get_logger
 from .runtime import SyncRuntime
@@ -545,6 +550,234 @@ def write_to_sheet(
         return True
     except Exception as exc:
         logger.error("Failed to write to sheet: %s", exc)
+        return False
+
+
+def _wix_event_to_config_row(
+    wix_event: Dict[str, Any],
+    ticket_defs: List[Dict[str, Any]],
+    tz_name: str = "America/Toronto",
+) -> Dict[str, Any]:
+    """Convert a Wix event + its ticket definitions into a config_events row."""
+    from .orchestrator import _localize_wix_start
+
+    date_settings = wix_event.get("dateAndTimeSettings", {})
+    location = wix_event.get("location", {})
+    address = (location.get("address") or {}).get("formattedAddress", "")
+    registration = wix_event.get("registration", {})
+    reg_type = registration.get("initialType") or registration.get("type", "")
+    tax = (registration.get("tickets") or {}).get("taxSettings", {})
+
+    # Extract category names from the CATEGORIES fieldset
+    cat_data = wix_event.get("categories", {})
+    cat_list = cat_data.get("categories", []) if isinstance(cat_data, dict) else []
+    category_names = [c.get("name", "") for c in cat_list if c.get("name")]
+    categories_str = "; ".join(category_names)
+
+    start_raw = date_settings.get("startDate", "")
+    end_raw = date_settings.get("endDate", "")
+
+    def _localize(iso_str):
+        if not iso_str:
+            return "", ""
+        result = _localize_wix_start(iso_str, tz_name)
+        if result:
+            date_part, time_part = result
+            try:
+                from datetime import datetime as dt
+                d = dt.strptime(date_part, "%Y-%m-%d")
+                return d.strftime("%m/%d/%Y"), time_part
+            except Exception:
+                return date_part, time_part
+        return "", ""
+
+    start_date, start_time = _localize(start_raw)
+    end_date, end_time = _localize(end_raw)
+
+    # Build image URL from Wix media
+    image_url = ""
+    main_image = wix_event.get("mainImage") or {}
+    if main_image.get("url"):
+        image_url = main_image["url"]
+
+    # Build ticket spec string: Name:Price:Capacity
+    ticket_parts = []
+    fee_type = DEFAULT_FEE_TYPE
+    sale_start = ""
+    sale_end = ""
+    for td in ticket_defs:
+        name = td.get("name", "Ticket")
+        pricing = td.get("pricingMethod", {})
+        fixed = pricing.get("fixedPrice", {})
+        price = fixed.get("value", "0")
+        capacity = td.get("initialLimit") or td.get("actualLimit") or ""
+        parts = [name, str(price)]
+        if capacity:
+            parts.append(str(capacity))
+        ticket_parts.append(":".join(parts))
+        fee_type = td.get("feeType", fee_type)
+        sp = td.get("salePeriod") or {}
+        if sp.get("startDate"):
+            sale_start = sp["startDate"]
+        if sp.get("endDate"):
+            sale_end = sp["endDate"]
+
+    return {
+        "event_name": wix_event.get("title", ""),
+        "categories": categories_str,
+        "start_date": start_date,
+        "start_time": start_time,
+        "end_date": end_date,
+        "end_time": end_time,
+        "location": address,
+        "registration_type": reg_type,
+        "short_description": wix_event.get("shortDescription", ""),
+        "detailed_description": wix_event.get("detailedDescription", ""),
+        "image_url": image_url,
+        "tickets": "; ".join(ticket_parts) if ticket_parts else "",
+        "fee_type": fee_type,
+        "sale_start": sale_start,
+        "sale_end": sale_end,
+        "tax_name": tax.get("name", DEFAULT_TAX_NAME),
+        "tax_rate": tax.get("rate", DEFAULT_TAX_RATE),
+        "tax_type": tax.get("type", DEFAULT_TAX_TYPE),
+    }
+
+
+def write_config_to_sheet(
+    config_rows: List[Dict[str, Any]],
+    runtime: SyncRuntime,
+    tab_name: str,
+) -> bool:
+    """Write config rows to a sheet tab using CONFIG_COLUMNS."""
+    logger.info("Writing %d events to config tab '%s'...", len(config_rows), tab_name)
+
+    service = runtime.get_sheets_service()
+    sheet_id = runtime.config.google_sheet_id
+    if not sheet_id:
+        raise ValueError("GOOGLE_SHEET_ID is not configured")
+
+    rows: List[List[Any]] = [CONFIG_COLUMNS]
+    for row_data in config_rows:
+        rows.append([row_data.get(col, "") for col in CONFIG_COLUMNS])
+
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        sheets = spreadsheet.get("sheets", [])
+        tab_exists = any(
+            s.get("properties", {}).get("title") == tab_name for s in sheets
+        )
+        if not tab_exists:
+            logger.info("   Creating new tab '%s'...", tab_name)
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
+            ).execute()
+    except Exception as exc:
+        logger.error("Failed to check/create tab: %s", exc)
+        return False
+
+    try:
+        range_name = f"{tab_name}!A1:Z{len(rows) + 10}"
+        service.spreadsheets().values().clear(
+            spreadsheetId=sheet_id, range=range_name, body={},
+        ).execute()
+        service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"{tab_name}!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": rows},
+        ).execute()
+
+        # Right-align date, time, and number columns
+        right_align_cols = {"start_date", "start_time", "end_date", "end_time", "tax_rate"}
+        col_indices = [i for i, c in enumerate(CONFIG_COLUMNS) if c in right_align_cols]
+
+        # Get the sheet's internal gid for formatting requests
+        spreadsheet_meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        sheet_gid = None
+        for s in spreadsheet_meta.get("sheets", []):
+            if s.get("properties", {}).get("title") == tab_name:
+                sheet_gid = s["properties"]["sheetId"]
+                break
+
+        if sheet_gid is not None and col_indices:
+            format_requests = []
+            for col_idx in col_indices:
+                format_requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_gid,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(rows),
+                            "startColumnIndex": col_idx,
+                            "endColumnIndex": col_idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": "RIGHT",
+                            }
+                        },
+                        "fields": "userEnteredFormat.horizontalAlignment",
+                    }
+                })
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": format_requests},
+            ).execute()
+
+        logger.info("   Successfully wrote %d events to '%s'", len(config_rows), tab_name)
+        return True
+    except Exception as exc:
+        logger.error("Failed to write to config sheet: %s", exc)
+        return False
+
+
+def pull_config_events(runtime: SyncRuntime) -> bool:
+    """Pull all published events from Wix into config_events and config_events_last_pull."""
+    logger.info("Pulling all events from Wix...\n")
+
+    try:
+        client = runtime.get_wix_client()
+        tz_name = runtime.config.timezone
+
+        logger.info("Fetching events from Wix...")
+        all_events = list(client.iter_events(
+            page_size=100,
+            include_drafts=False,
+            fieldsets=["DETAILS", "REGISTRATION", "CATEGORIES"],
+        ))
+        upcoming = [e for e in all_events if e.get("status") in ("UPCOMING", "STARTED")]
+        logger.info("   Found %d published events (%d total)\n", len(upcoming), len(all_events))
+
+        if not upcoming:
+            logger.warning("No published events found on Wix.")
+            return False
+
+        config_rows: List[Dict[str, Any]] = []
+        for i, wix_event in enumerate(upcoming, 1):
+            title = wix_event.get("title", "Untitled")
+            event_id = wix_event.get("id", "")
+            logger.info("  %d/%d  %s", i, len(upcoming), title)
+
+            ticket_defs = client.get_ticket_definitions(event_id)
+            row = _wix_event_to_config_row(wix_event, ticket_defs, tz_name=tz_name)
+            config_rows.append(row)
+
+        logger.info("")
+
+        snapshot_tab = runtime.config.config_events_tab + "_last_pull"
+        logger.info("Writing snapshot to '%s'...", snapshot_tab)
+        write_config_to_sheet(config_rows, runtime, snapshot_tab)
+
+        config_tab = runtime.config.config_events_tab
+        logger.info("Writing editable config to '%s'...", config_tab)
+        ok = write_config_to_sheet(config_rows, runtime, config_tab)
+
+        return ok
+
+    except Exception as exc:
+        logger.error("Failed to pull config events: %s", exc)
         return False
 
 

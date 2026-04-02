@@ -136,6 +136,7 @@ class WixClient:
         page_size: int,
         *,
         initial_offset: int = 0,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield results across all pages for Wix POST query endpoints."""
 
@@ -158,10 +159,13 @@ class WixClient:
                 if offset:
                     paging['offset'] = offset
                 elif 'offset' in paging:
-                    # Normalise any user-provided offset when zero
                     paging['offset'] = 0
 
-            response = self._request('POST', endpoint, json={'query': query})
+            body: Dict[str, Any] = {'query': query}
+            if extra_body:
+                body.update(extra_body)
+
+            response = self._request('POST', endpoint, json=body)
             payload = response.json() or {}
             items = payload.get(array_key, []) or []
 
@@ -201,6 +205,7 @@ class WixClient:
         include_drafts: bool = True,
         status_filter: Optional[str] = None,
         offset: int = 0,
+        fieldsets: Optional[List[str]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield events across all pages with cursor/offset pagination."""
 
@@ -210,12 +215,17 @@ class WixClient:
         elif not include_drafts:
             base_query['filter'] = {'status': {'$ne': 'DRAFT'}}
 
+        extra: Optional[Dict[str, Any]] = None
+        if fieldsets:
+            extra = {'fieldsets': fieldsets}
+
         yield from self._paged_post(
             '/events/v3/events/query',
             'events',
             base_query,
             page_size,
             initial_offset=offset,
+            extra_body=extra,
         )
 
     def get_event(self, event_id: str, include_registration: bool = True) -> Dict[str, Any]:
@@ -227,22 +237,22 @@ class WixClient:
         response = self._request('GET', f'/events/v3/events/{event_id}', params=params)
         return response.json().get('event', {})
 
-    def create_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new event with V3 API
-
-        Supports registration types: RSVP, TICKETS, RSVP_AND_TICKETS
-        """
+    def create_event(self, event_data: Dict[str, Any], draft: bool = False) -> Dict[str, Any]:
+        """Create a new event. Pass ``draft=True`` to create as a draft."""
+        payload: Dict[str, Any] = {'event': event_data}
+        if draft:
+            payload['draft'] = True
         response = self._request(
             'POST',
             '/events/v3/events',
-            json={'event': event_data}
+            json=payload,
         )
         return response.json().get('event', {})
 
     def update_event(self, event_id: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Update an existing event"""
         response = self._request(
-            'POST',
+            'PATCH',
             f'/events/v3/events/{event_id}',
             json={'event': event_data}
         )
@@ -346,21 +356,11 @@ class WixClient:
         capacity: Optional[int] = None,
         limit_per_checkout: int = 4,
         currency: str = "CAD",
+        fee_type: str = "FEE_ADDED_AT_CHECKOUT",
+        sale_start: Optional[str] = None,
+        sale_end: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a ticket definition for a TICKETING event.
-
-        Args:
-            event_id: The event ID to create tickets for.
-            ticket_name: Name of the ticket (e.g., "General Admission").
-            price: Ticket price (e.g., 25.00).
-            capacity: Total tickets available for this event (``initialLimit``).
-                Omit or pass ``None`` for unlimited.
-            limit_per_checkout: Max tickets one buyer can add per checkout.
-            currency: Currency code (default: CAD).
-
-        Returns:
-            Dict containing the created ticket definition.
-        """
+        """Create a ticket definition for a TICKETING event."""
         definition: Dict[str, Any] = {
             "eventId": event_id,
             "name": ticket_name,
@@ -371,11 +371,19 @@ class WixClient:
                     "currency": currency,
                 }
             },
-            "feeType": "FEE_ADDED_AT_CHECKOUT",
+            "feeType": fee_type,
         }
 
         if capacity is not None and capacity > 0:
             definition["initialLimit"] = capacity
+
+        if sale_start or sale_end:
+            sale_period: Dict[str, Any] = {}
+            if sale_start:
+                sale_period["startDate"] = sale_start
+            if sale_end:
+                sale_period["endDate"] = sale_end
+            definition["salePeriod"] = sale_period
 
         response = self._request(
             'POST',
@@ -438,6 +446,14 @@ class WixClient:
             'POST',
             f'/events/v1/categories/{category_id}/events',
             json={'eventId': [event_id]},
+        )
+
+    def unassign_event_from_category(self, category_id: str, event_id: str) -> None:
+        """Remove an event from a category."""
+        self._request(
+            'DELETE',
+            f'/events/v1/categories/{category_id}/events',
+            params={'eventId': event_id},
         )
 
     # Utility Methods

@@ -32,6 +32,7 @@ class AppConfig:
     class_info_tab: str = "class_info"
     defaults_tab: str = "defaults"
     generated_events_tab: str = "generated_events"
+    config_events_tab: str = "config_events"
     # Separate source sheet for generate command (defaults to google_sheet_id if not set)
     source_sheet_id: Optional[str] = None
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
