@@ -1,4 +1,4 @@
-.PHONY: help setup install install-dev validate test list sync generate generate-sheet unit clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-rsvp dev-bulk-rsvp dev-search dev-clean-drafts dev-clean-test dev-clean-all
+.PHONY: help setup install install-dev validate test list sync generate generate-sheet unit clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-add-ticket dev-search dev-clean-drafts dev-clean-test dev-clean-all
 
 # Default target
 help:
@@ -24,8 +24,7 @@ help:
 	@echo "  make dev-create       - Create test RSVP event"
 	@echo "  make dev-create-ticket- Create test TICKETED event"
 	@echo "  make dev-samples      - Create 5 sample events (mix of types)"
-	@echo "  make dev-rsvp         - Create test RSVP (requires EVENT_ID=...)"
-	@echo "  make dev-bulk-rsvp    - Create 10 test RSVPs (requires EVENT_ID=...)"
+	@echo "  make dev-add-ticket   - Add ticket to event (requires EVENT_ID=...)"
 	@echo "  make dev-search       - Search events (requires QUERY=...)"
 	@echo ""
 	@echo "Cleanup Commands:"
@@ -117,9 +116,8 @@ dev-help:
 	@echo "  python dev_events.py delete <event_id> --confirm - Delete event"
 	@echo ""
 	@echo "Ticket Operations:"
-	@echo "  python dev_tickets.py rsvp <event_id>          - Create single RSVP"
-	@echo "  python dev_tickets.py bulk-rsvp <event_id> [n] - Create N RSVPs"
-	@echo "  python dev_tickets.py list-rsvps <event_id>    - List RSVPs"
+	@echo "  python dev_tickets.py add-ticket <event_id> [name] [price] [currency] - Add ticket definition"
+	@echo "  python dev_tickets.py list-orders <event_id>   - List orders for event"
 	@echo "  python dev_tickets.py search-event <title>     - Search for event"
 	@echo ""
 	@echo "See DEV_TOOLS.md for complete documentation"
@@ -141,19 +139,12 @@ dev-create-ticket:
 dev-samples:
 	@python dev_events.py create-samples 5
 
-dev-rsvp:
+dev-add-ticket:
 ifndef EVENT_ID
-	@echo "Error: EVENT_ID required. Usage: make dev-rsvp EVENT_ID=abc123"
+	@echo "Error: EVENT_ID required. Usage: make dev-add-ticket EVENT_ID=abc123"
 	@exit 1
 endif
-	@python dev_tickets.py rsvp $(EVENT_ID)
-
-dev-bulk-rsvp:
-ifndef EVENT_ID
-	@echo "Error: EVENT_ID required. Usage: make dev-bulk-rsvp EVENT_ID=abc123"
-	@exit 1
-endif
-	@python dev_tickets.py bulk-rsvp $(EVENT_ID) 10
+	@python dev_tickets.py add-ticket $(EVENT_ID)
 
 dev-search:
 ifndef QUERY

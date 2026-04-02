@@ -80,7 +80,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-m",
         "--month",
         metavar="MONTH",
-        help="Filter prepared events by month (e.g., mar, MAR, March)",
+        nargs="+",
+        help="Filter by month(s) (e.g., -m apr may). Defaults to current + next month.",
     )
     prepare_parser = subparsers.add_parser(
         "prepare-sheet",
@@ -91,7 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
         "-m",
         "--month",
         metavar="MONTH",
-        help="Filter prepared events by month (e.g., mar, MAR, March)",
+        nargs="+",
+        help="Filter by month(s) (e.g., -m apr may). Defaults to current + next month.",
     )
 
     return parser
@@ -134,18 +136,22 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             return 0 if ok else 1
 
         if args.command == "generate":
+            from .generator import _default_rolling_months
+            months = args.month or _default_rolling_months()
             ok = generate_events(
                 runtime,
                 output_sheet=args.output_sheet,
-                month_filter=args.month,
+                month_filters=months,
             )
             return 0 if ok else 1
 
         if args.command in {"prepare-sheet", "prepare"}:
+            from .generator import _default_rolling_months
+            months = args.month or _default_rolling_months()
             ok = generate_events(
                 runtime,
                 output_sheet=config.generated_events_tab,
-                month_filter=args.month,
+                month_filters=months,
             )
             return 0 if ok else 1
 

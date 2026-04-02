@@ -14,42 +14,12 @@ from .constants import (
     DEFAULT_CAPACITY,
     DEFAULT_LOCATION,
     DEFAULT_REGISTRATION_TYPE,
-    HST_MULTIPLIER,
 )
 from .logging_utils import get_logger
 from .runtime import SyncRuntime
 
 
 logger = get_logger(__name__)
-
-# Column indices for rolling_schedule tab
-ROLLING_SCHEDULE_COLUMNS = [
-    "month",
-    "date",
-    "full_date",
-    "time_start",
-    "time_end",
-    "catagories",
-    "class",
-    "instructor",
-    "model",
-    "notes",
-    "event",
-    "unavailability_notice",
-    "holiday",
-]
-
-# Column indices for class_info tab
-CLASS_INFO_COLUMNS = [
-    "class",
-    "catagories",
-    "image_link",
-    "image_notes",
-    "class_tagline",
-    "description",
-    "instructor_naive",
-    "instructor_specific",
-]
 
 # Output columns for generated events
 OUTPUT_COLUMNS = [
@@ -143,10 +113,32 @@ def _record_month_number(record: Dict[str, str]) -> Optional[int]:
     return None
 
 
+def _resolve_month_filters(
+    month_args: Optional[List[str]],
+) -> Optional[set]:
+    """Convert month name arguments into a set of month numbers.
+
+    Returns ``None`` when no filter should be applied (show all months).
+    """
+    if not month_args:
+        return None
+
+    month_numbers: set = set()
+    for arg in month_args:
+        month_numbers.add(_parse_month_value(arg))
+    return month_numbers
+
+
 def fetch_rolling_schedule(
-    runtime: SyncRuntime, month_filter: Optional[str] = None
+    runtime: SyncRuntime,
+    month_filter: Optional[str] = None,
+    month_filters: Optional[List[str]] = None,
 ) -> List[Dict[str, str]]:
-    """Fetch events from the rolling_schedule tab."""
+    """Fetch events from the rolling_schedule tab.
+
+    Accepts either a single ``month_filter`` (legacy) or a list of
+    ``month_filters`` (e.g. ``["apr", "may"]``).
+    """
     logger.info("Fetching rolling_schedule tab...")
 
     service = runtime.get_sheets_service()
@@ -169,9 +161,14 @@ def fetch_rolling_schedule(
 
     headers = [h.strip().lower() for h in rows[0]]
     data_rows = rows[1:]
-    month_number: Optional[int] = None
-    if month_filter:
-        month_number = _parse_month_value(month_filter)
+
+    # Build the set of allowed month numbers
+    if month_filters:
+        allowed_months = _resolve_month_filters(month_filters)
+    elif month_filter:
+        allowed_months = _resolve_month_filters([month_filter])
+    else:
+        allowed_months = None
 
     events: List[Dict[str, str]] = []
     skipped_count = 0
@@ -180,7 +177,6 @@ def fetch_rolling_schedule(
         if not row or not any(row):
             continue
 
-        # Pad row to match headers
         while len(row) < len(headers):
             row.append("")
 
@@ -188,33 +184,31 @@ def fetch_rolling_schedule(
         for i, header in enumerate(headers):
             record[header] = row[i].strip() if row[i] else ""
 
-        # Skip rows without a class name or full_date
         if not record.get("class") or not record.get("full_date"):
             continue
 
-        # Skip holidays
         if record.get("holiday"):
             continue
 
-        # Skip placeholder events like [No Class], [TBD], N/A
         if _should_skip_event(record.get("class", "")):
             skipped_count += 1
             continue
 
-        if month_number is not None:
+        if allowed_months is not None:
             row_month = _record_month_number(record)
-            if row_month != month_number:
+            if row_month not in allowed_months:
                 skipped_month += 1
                 continue
 
         events.append(record)
 
-    if month_number is not None:
+    if allowed_months is not None:
+        month_labels = month_filters or ([month_filter] if month_filter else [])
         logger.info(
-            "   Found %d scheduled events for month=%s "
+            "   Found %d scheduled events for months=%s "
             "(skipped %d placeholders, %d outside month filter)",
             len(events),
-            month_filter,
+            ", ".join(month_labels),
             skipped_count,
             skipped_month,
         )
@@ -380,22 +374,45 @@ def merge_event_data(
     """Merge rolling_schedule with class_info and apply pricing."""
     merged_events: List[Dict[str, Any]] = []
     missing_categories: set = set()
+    unmatched_classes: List[str] = []
     defaults = defaults or {}
     default_image = defaults.get("default_img", "").strip()
 
     for sched in schedule:
         class_name = sched.get("class", "")
-        category = sched.get("catagories", "")
-        normalized_category = _normalize_category_slug(category) if category else ""
+        primary_category = (
+            sched.get("categories", "") or sched.get("catagories", "")
+        ).strip()
 
-        # Look up class details
+        # Look up class details — skip if no match in class_info
         details = class_info.get(class_name, {})
+        if not details:
+            date_str = sched.get("full_date", "?")
+            unmatched_classes.append(f"{class_name} (scheduled {date_str})")
+            continue
 
-        # Look up base price from category (case-insensitive)
-        base_price, matched = _lookup_category_price(category)
-        if not matched and category:
-            missing_categories.add(category)
-        ticket_price = round(base_price * HST_MULTIPLIER, 2)
+        # Build merged category list: primary from rolling_schedule first,
+        # then additional from class_info (semicolon-separated).
+        # "rope" and "class" are always included as baseline tags.
+        # All values are lowercased, stripped, and deduplicated.
+        seen: set = set()
+        merged_categories: List[str] = []
+        for raw in [primary_category] + (details.get("categories", "") or "").split(";"):
+            tag = "-".join(raw.strip().lower().split())
+            if tag and tag not in seen:
+                seen.add(tag)
+                merged_categories.append(tag)
+        for default_tag in ["rope", "class"]:
+            if default_tag not in seen:
+                seen.add(default_tag)
+                merged_categories.append(default_tag)
+
+        # Look up base price from the primary category (case-insensitive).
+        # Tax (HST) is handled by Wix at checkout — ticket_price is the base price.
+        base_price, matched = _lookup_category_price(primary_category)
+        if not matched and primary_category:
+            missing_categories.add(primary_category)
+        ticket_price = base_price
 
         # Build instructor team from instructor + model columns
         instructor = sched.get("instructor", "").strip()
@@ -414,11 +431,11 @@ def merge_event_data(
 
         event = {
             "event_name": class_name,
-            "catagories": normalized_category,
-            "event_type": "TICKETS",
+            "catagories": "; ".join(merged_categories),
+            "event_type": "TICKETING",
             "start_date": sched.get("full_date", ""),
             "start_time": sched.get("time_start", ""),
-            "end_date": sched.get("full_date", ""),  # Same as start for single-day
+            "end_date": sched.get("full_date", ""),
             "end_time": sched.get("time_end", ""),
             "location": DEFAULT_LOCATION,
             "base_price": base_price,
@@ -432,7 +449,17 @@ def merge_event_data(
 
         merged_events.append(event)
 
-    # Log missing categories
+    if unmatched_classes:
+        logger.warning(
+            "⚠️  %d class(es) in rolling_schedule have no match in class_info (skipped):",
+            len(unmatched_classes),
+        )
+        for entry in unmatched_classes:
+            logger.warning("   - %s", entry)
+        logger.warning(
+            "   Fix these in the source sheet so they match a class_info title exactly."
+        )
+
     if missing_categories:
         logger.warning("⚠️  Categories not in pricing table (defaulting to $30):")
         for cat in sorted(missing_categories):
@@ -521,16 +548,27 @@ def write_to_sheet(
         return False
 
 
+def _default_rolling_months() -> List[str]:
+    """Return month names for this month and next month."""
+    today = datetime.today()
+    this_month = today.month
+    next_month = this_month % 12 + 1
+    month_names = [
+        "", "jan", "feb", "mar", "apr", "may", "jun",
+        "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    return [month_names[this_month], month_names[next_month]]
+
+
 def generate_events(
     runtime: SyncRuntime,
     output_sheet: Optional[str] = None,
     month_filter: Optional[str] = None,
+    month_filters: Optional[List[str]] = None,
 ) -> bool:
     """Main entry point for generating merged event data."""
-    # When outputting CSV to stdout, send all logs to stderr
     import sys
     if output_sheet is None:
-        # Temporarily redirect logger output to stderr for clean CSV piping
         import logging
         for handler in logging.getLogger().handlers:
             handler.stream = sys.stderr
@@ -538,7 +576,11 @@ def generate_events(
     logger.info("Generating event data from rolling_schedule + class_info...\n")
 
     try:
-        schedule = fetch_rolling_schedule(runtime, month_filter=month_filter)
+        schedule = fetch_rolling_schedule(
+            runtime,
+            month_filter=month_filter,
+            month_filters=month_filters,
+        )
         class_info = fetch_class_info(runtime)
         defaults = fetch_defaults(runtime)
 

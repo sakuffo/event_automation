@@ -26,7 +26,7 @@ class AppConfig:
     wix_site_id: Optional[str]
     google_sheet_id: Optional[str]
     google_credentials_raw: Optional[str]
-    sheet_range: str = "Sheet1!A1:Z100"
+    sheet_range: str = "generated_events!A1:Z500"
     timezone: str = "America/Toronto"
     rolling_schedule_tab: str = "rolling_schedule"
     class_info_tab: str = "class_info"

@@ -333,8 +333,20 @@ def _build_wix_event_payload(
             "type": "VENUE",
             "address": {"formattedAddress": event.location},
         },
-        "registration": {"initialType": event.registration_type},
+        "registration": {
+            "initialType": event.registration_type,
+        },
     }
+
+    if event.registration_type == "TICKETING":
+        from .constants import DEFAULT_TAX_NAME, DEFAULT_TAX_RATE, DEFAULT_TAX_TYPE
+        event_data["registration"]["tickets"] = {
+            "taxSettings": {
+                "type": DEFAULT_TAX_TYPE,
+                "name": DEFAULT_TAX_NAME,
+                "rate": DEFAULT_TAX_RATE,
+            }
+        }
 
     teaser = event.teaser.strip() if event.teaser else ""
     if teaser:
@@ -418,6 +430,93 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
     return False
 
 
+_category_cache: Dict[str, str] = {}
+
+
+def _resolve_category_id(client, category_name: str) -> Optional[str]:
+    """Get or create a Wix category by name. Returns the category ID."""
+    if not category_name:
+        return None
+
+    name_lower = category_name.strip().lower()
+    if name_lower in _category_cache:
+        return _category_cache[name_lower]
+
+    if not _category_cache:
+        existing = client.query_categories()
+        for cat in existing:
+            _category_cache[cat.get("name", "").strip().lower()] = cat["id"]
+        if name_lower in _category_cache:
+            return _category_cache[name_lower]
+
+    try:
+        created = client.create_category(category_name.strip())
+        cat_id = created.get("id")
+        if cat_id:
+            _category_cache[name_lower] = cat_id
+            logger.info("   🏷️  Created category: %s", category_name.strip())
+            return cat_id
+    except Exception as exc:
+        logger.warning("   ⚠️  Failed to create category '%s': %s", category_name, exc)
+
+    return None
+
+
+def _assign_categories(client, event_id: str, event: EventRecord) -> None:
+    """Assign the event to all its categories, creating any that don't exist."""
+    if not event.category:
+        return
+
+    tags = [t.strip() for t in event.category.split(";") if t.strip()]
+    if not tags:
+        return
+
+    assigned = []
+    for tag in tags:
+        cat_id = _resolve_category_id(client, tag)
+        if not cat_id:
+            continue
+        try:
+            client.assign_event_to_category(cat_id, event_id)
+            assigned.append(tag)
+        except Exception as exc:
+            logger.warning("   ⚠️  Failed to assign category '%s': %s", tag, exc)
+
+    if assigned:
+        logger.info("   🏷️  Categories: %s", ", ".join(assigned))
+
+
+def _ensure_ticket_definition(
+    client,
+    event_id: str,
+    event: EventRecord,
+) -> bool:
+    """Create a ticket definition if one doesn't already exist. Returns True on success."""
+    try:
+        logger.info("   🎫 Creating ticket definition...")
+        result = client.create_ticket_definition(
+            event_id=event_id,
+            ticket_name="Single Ticket",
+            price=event.ticket_price,
+            capacity=event.capacity,
+        )
+        actual = result.get("initialLimit") or result.get("actualLimit")
+        logger.info(
+            "   ✅ Ticket created: $%.2f (capacity: %s, limitPerCheckout: %s)",
+            event.ticket_price,
+            actual if actual else "unlimited",
+            result.get("limitPerCheckout", "?"),
+        )
+        return True
+    except Exception as ticket_error:
+        logger.warning(
+            "   ⚠️  Failed to create ticket (event still exists): %s",
+            ticket_error,
+        )
+        logger.info("   💡 You can add tickets manually via Wix Dashboard")
+        return False
+
+
 def create_wix_event(
     event: EventRecord,
     runtime: SyncRuntime,
@@ -453,36 +552,27 @@ def create_wix_event(
             and event.ticket_price > 0
         )
 
+        ticket_ok = True
         if should_create_ticket:
-            try:
-                logger.info("   🎫 Creating ticket definition...")
-                client.create_ticket_definition(
-                    event_id=event_id,
-                    ticket_name="General Admission",
-                    price=event.ticket_price,
-                    capacity=event.capacity,
-                )
-                logger.info(
-                    "   ✅ Ticket created: $%.2f (capacity: %d)",
-                    event.ticket_price,
-                    event.capacity,
-                )
-            except Exception as ticket_error:
-                logger.warning(
-                    "   ⚠️  Failed to create ticket (event still exists): %s",
-                    ticket_error,
-                )
-                logger.info("   💡 You can add tickets manually via Wix Dashboard")
+            ticket_ok = _ensure_ticket_definition(client, event_id, event)
         elif event.registration_type == "TICKETING" and not auto_create_tickets:
             logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
             logger.info("   💡 Re-run without --no-tickets to enable automatic tickets or add them manually via Wix Dashboard")
 
+        _assign_categories(client, event_id, event)
+
         if auto_publish and event_id:
-            try:
-                client.publish_event(event_id)
-                logger.info("   📢 Published event: %s", event.name)
-            except Exception as pub_error:
-                logger.warning("   ⚠️  Failed to publish event: %s", pub_error)
+            if should_create_ticket and not ticket_ok:
+                logger.warning(
+                    "   ⏸️  Skipping publish for %s — ticket creation failed",
+                    event.name,
+                )
+            else:
+                try:
+                    client.publish_event(event_id)
+                    logger.info("   📢 Published event: %s", event.name)
+                except Exception as pub_error:
+                    logger.warning("   ⚠️  Failed to publish event: %s", pub_error)
 
         return True
     except Exception as exc:
@@ -490,11 +580,29 @@ def create_wix_event(
         return False
 
 
+def _repair_missing_tickets(
+    client,
+    event_id: str,
+    event: EventRecord,
+) -> None:
+    """Check for missing ticket definitions and create one if needed."""
+    if event.registration_type != "TICKETING" or event.ticket_price <= 0:
+        return
+
+    existing_defs = client.get_ticket_definitions(event_id)
+    if existing_defs:
+        return
+
+    logger.info("   🔧 No ticket definitions found — repairing...")
+    _ensure_ticket_definition(client, event_id, event)
+
+
 def update_wix_event(
     event: EventRecord,
     runtime: SyncRuntime,
     existing_event_id: str,
     existing_event: Dict[str, Any],
+    auto_create_tickets: bool = True,
 ) -> bool:
     file_descriptor = None
     if event.image_url:
@@ -517,6 +625,9 @@ def update_wix_event(
         client = runtime.get_wix_client()
         client.update_event(existing_event_id, event_data)
         logger.info("♻️  Updated event: %s", event.name)
+
+        if auto_create_tickets:
+            _repair_missing_tickets(client, existing_event_id, event)
 
         return True
     except Exception as exc:
@@ -573,12 +684,16 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, auto_pub
                         runtime=runtime,
                         existing_event_id=event_id,
                         existing_event=wix_event,
+                        auto_create_tickets=auto_create_tickets,
                     ):
                         results["updated"].append(event.name)
                     else:
                         results["failed"].append(event.name)
                     time.sleep(1)
                 else:
+                    if auto_create_tickets:
+                        client = runtime.get_wix_client()
+                        _repair_missing_tickets(client, event_id, event)
                     logger.info(
                         "⏭️  Skipped: %s on %s (no changes)",
                         event.name,

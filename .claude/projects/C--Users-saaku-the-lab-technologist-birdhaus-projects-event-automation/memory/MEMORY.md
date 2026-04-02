@@ -1,0 +1,2 @@
+- [User profile](user_profile.md) -- Solution architect learning Python, small business developer, inheriting vibe-coded app
+- [Event automation context](project_context.md) -- App is a key operational process for Birdhaus, publishes classes to Wix from Google Sheets

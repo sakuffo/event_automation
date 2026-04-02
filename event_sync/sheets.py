@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from .constants import COLUMN_MAPPING, REQUIRED_FIELDS
+from .constants import COLUMN_MAPPING, DEFAULT_CAPACITY, REQUIRED_FIELDS
 from .logging_utils import get_logger
 from .models import EventRecord, ValidationError
 from .runtime import SyncRuntime
@@ -78,14 +78,15 @@ def fetch_events(runtime: SyncRuntime) -> List[EventRecord]:
         except ValueError:
             ticket_price = 0.0
 
-        capacity_str = get_col("capacity", "100")
+        capacity_str = get_col("capacity", str(DEFAULT_CAPACITY))
         try:
-            capacity = int(capacity_str) if capacity_str else 100
+            capacity = int(capacity_str) if capacity_str else DEFAULT_CAPACITY
         except ValueError:
-            capacity = 100
+            capacity = DEFAULT_CAPACITY
 
         event_kwargs = {
             "name": event_name,
+            "category": get_col("category"),
             "event_type": get_col("event_type"),
             "start_date": get_col("start_date"),
             "start_time": get_col("start_time"),

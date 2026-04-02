@@ -40,12 +40,17 @@ CATEGORY_PRICING = {
 # Default values for generated events
 DEFAULT_LOCATION = "1233R Queen St W, Toronto, ON M6K 1L5, Canada"
 DEFAULT_CAPACITY = 24
-DEFAULT_REGISTRATION_TYPE = "TICKETS"
-HST_MULTIPLIER = 1.13
+DEFAULT_REGISTRATION_TYPE = "TICKETING"
+
+# Tax applied at checkout (Ontario HST)
+DEFAULT_TAX_NAME = "HST"
+DEFAULT_TAX_RATE = "13"
+DEFAULT_TAX_TYPE = "ADDED_AT_CHECKOUT"
 
 COLUMN_MAPPING = {
     "event_name": ["event_name", "event name", "name", "title"],
-    "event_type": ["event_type", "event type", "type", "category"],
+    "category": ["catagories", "categories", "category"],
+    "event_type": ["event_type", "event type"],
     "start_date": ["start_date", "start date", "date", "event date"],
     "start_time": ["start_time", "start time", "time"],
     "end_date": ["end_date", "end date"],

@@ -20,7 +20,7 @@ class SyncRuntime:
     """Lazily instantiates Google + Wix clients and tracks cross-cutting caches."""
 
     SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-    DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+    DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
     def __init__(self, config: AppConfig):
         self.config = config

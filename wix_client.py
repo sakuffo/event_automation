@@ -338,52 +338,107 @@ class WixClient:
         # Fallback (shouldn't happen)
         raise WixApiError("Upload succeeded but no file descriptor returned")
 
-    def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
-                                 capacity: Optional[int] = None, currency: str = "CAD") -> Dict[str, Any]:
-        """
-        Create a ticket definition for a TICKETING event
+    def create_ticket_definition(
+        self,
+        event_id: str,
+        ticket_name: str,
+        price: float,
+        capacity: Optional[int] = None,
+        limit_per_checkout: int = 4,
+        currency: str = "CAD",
+    ) -> Dict[str, Any]:
+        """Create a ticket definition for a TICKETING event.
 
         Args:
-            event_id: The event ID to create tickets for
-            ticket_name: Name of the ticket (e.g., "General Admission")
-            price: Ticket price (e.g., 25.00)
-            capacity: Maximum number of tickets available (optional)
-            currency: Currency code (default: CAD)
+            event_id: The event ID to create tickets for.
+            ticket_name: Name of the ticket (e.g., "General Admission").
+            price: Ticket price (e.g., 25.00).
+            capacity: Total tickets available for this event (``initialLimit``).
+                Omit or pass ``None`` for unlimited.
+            limit_per_checkout: Max tickets one buyer can add per checkout.
+            currency: Currency code (default: CAD).
 
         Returns:
-            Dict containing the created ticket definition
-
-        Note:
-            - Only works for events with registration.initialType = "TICKETING"
-            - Uses simple defaults suitable for small business use
-            - Buyer pays fees (standard Wix configuration)
+            Dict containing the created ticket definition.
         """
-        ticket_data = {
-            "ticketDefinition": {
-                "eventId": event_id,  # Required in body
-                "name": ticket_name,
-                "limitPerCheckout": 10,  # Max tickets per order
-                "pricingMethod": {
-                    "fixedPrice": {
-                        "value": str(price),
-                        "currency": currency
-                    }
-                },
-                "feeType": "FEE_ADDED_AT_CHECKOUT"  # Required: Buyer pays fees
-            }
+        definition: Dict[str, Any] = {
+            "eventId": event_id,
+            "name": ticket_name,
+            "limitPerCheckout": limit_per_checkout,
+            "pricingMethod": {
+                "fixedPrice": {
+                    "value": str(price),
+                    "currency": currency,
+                }
+            },
+            "feeType": "FEE_ADDED_AT_CHECKOUT",
         }
 
-        # Add capacity limit if specified
-        if capacity:
-            ticket_data["ticketDefinition"]["limited"] = True
-            ticket_data["ticketDefinition"]["quantity"] = capacity
+        if capacity is not None and capacity > 0:
+            definition["initialLimit"] = capacity
 
         response = self._request(
             'POST',
             '/events-ticket-definitions/v3/ticket-definitions',
-            json=ticket_data
+            json={"ticketDefinition": definition},
         )
-        return response.json().get('ticketDefinition', {})
+        result = response.json().get('ticketDefinition', {})
+
+        actual_limit = result.get("initialLimit") or result.get("actualLimit")
+        is_limited = result.get("limited", False)
+        if capacity is not None and capacity > 0:
+            if not is_limited or actual_limit != capacity:
+                logger.warning(
+                    "Ticket capacity mismatch — requested %d, got limited=%s actualLimit=%s",
+                    capacity, is_limited, actual_limit,
+                )
+
+        return result
+
+    def get_ticket_definitions(self, event_id: str) -> List[Dict[str, Any]]:
+        """Return all ticket definitions for an event."""
+        try:
+            response = self._request(
+                'POST',
+                '/events-ticket-definitions/v3/ticket-definitions/query',
+                json={'query': {'filter': {'eventId': event_id}}},
+            )
+            return response.json().get('ticketDefinitions', [])
+        except Exception as exc:
+            logger.warning("Could not query ticket definitions for %s: %s", event_id, exc)
+            return []
+
+    # Category Operations
+
+    def query_categories(self) -> List[Dict[str, Any]]:
+        """Return all event categories on the site."""
+        try:
+            response = self._request(
+                'POST',
+                '/events/v1/categories/query',
+                json={'query': {}},
+            )
+            return response.json().get('categories', [])
+        except Exception as exc:
+            logger.warning("Could not query categories: %s", exc)
+            return []
+
+    def create_category(self, name: str) -> Dict[str, Any]:
+        """Create a single event category and return it."""
+        response = self._request(
+            'POST',
+            '/events/v1/categories',
+            json={'category': {'name': name, 'states': ['MANUAL']}},
+        )
+        return response.json().get('category', {})
+
+    def assign_event_to_category(self, category_id: str, event_id: str) -> None:
+        """Assign an event to a category."""
+        self._request(
+            'POST',
+            f'/events/v1/categories/{category_id}/events',
+            json={'eventId': [event_id]},
+        )
 
     # Utility Methods
 

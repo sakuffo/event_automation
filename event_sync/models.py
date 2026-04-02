@@ -15,6 +15,7 @@ VALID_REGISTRATION_TYPES = {"RSVP", "TICKETING", "EXTERNAL", "NO_REGISTRATION"}
 
 class EventRecord(BaseModel):
     name: str = Field(..., min_length=1)
+    category: Optional[str] = None
     event_type: Optional[str] = None
     start_date: str
     start_time: str
@@ -22,7 +23,7 @@ class EventRecord(BaseModel):
     end_time: str
     location: str = Field(..., min_length=1)
     ticket_price: float = 0.0
-    capacity: int = 100
+    capacity: int = 24
     registration_type: str = "RSVP"
     image_url: Optional[str] = None
     teaser: Optional[str] = None
@@ -74,7 +75,7 @@ class EventRecord(BaseModel):
             raise ValueError("capacity must be greater than zero")
         return value_int
 
-    @field_validator("image_url", "teaser", "description", "event_type", mode="before")
+    @field_validator("image_url", "teaser", "description", "event_type", "category", mode="before")
     @classmethod
     def empty_str_to_none(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
