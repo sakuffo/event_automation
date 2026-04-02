@@ -474,34 +474,6 @@ def search_events(client: WixClient, query: str):
         print(f"❌ Failed to search events: {e}")
 
 
-def check_ticket_support(client: WixClient, event_id: str):
-    """Check if an event can have tickets added"""
-    print(f"🔍 Checking ticket support for event {event_id}...\n")
-
-    try:
-        event = client.get_event(event_id)
-        can_add, reason = client.can_add_tickets(event_id)
-
-        print(f"Event: {event.get('title')}")
-        print(f"ID: {event_id}")
-        print(f"Status: {event.get('status', 'UNKNOWN')}")
-
-        reg = event.get('registration', {})
-        print(f"Registration Type: {reg.get('initialType', 'N/A')}")
-        print(f"Current Type: {reg.get('type', 'N/A')}")
-
-        print(f"\n{'✅' if can_add else '❌'} Can Add Tickets: {can_add}")
-        print(f"Reason: {reason}")
-
-        if not can_add and reg.get('initialType') == 'RSVP':
-            print(f"\n💡 To add tickets, you must:")
-            print(f"   1. Create a NEW event with registration type 'TICKETING'")
-            print(f"   2. You cannot convert RSVP events to ticketed events")
-
-    except Exception as e:
-        print(f"❌ Failed to check event: {e}")
-
-
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
@@ -521,7 +493,6 @@ Usage:
   python dev_events.py delete-after-date <YYYY-MM-DD> [--confirm]
   python dev_events.py create-samples [count]
   python dev_events.py search <query>
-  python dev_events.py check-tickets <event_id>
 
 Registration Types: RSVP, EXTERNAL, NO_REGISTRATION, TICKETS
 
@@ -584,9 +555,6 @@ Examples:
 
   # Search for events
   python dev_events.py search "Workshop"
-
-  # Check if an event supports tickets
-  python dev_events.py check-tickets abc123
 """)
         sys.exit(0)
 
@@ -688,14 +656,6 @@ Examples:
 
             query = sys.argv[2]
             search_events(client, query)
-
-        elif command == 'check-tickets':
-            if len(sys.argv) < 3:
-                print("Error: event_id required")
-                sys.exit(1)
-
-            event_id = sys.argv[2]
-            check_ticket_support(client, event_id)
 
         else:
             print(f"Unknown command: {command}")

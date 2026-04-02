@@ -61,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable automatic ticket creation",
     )
+    sync_parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Automatically publish created events (default: leave as draft)",
+    )
 
     generate_parser = subparsers.add_parser(
         "generate",
@@ -125,7 +130,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
         if args.command == "sync":
             auto_tickets = not args.no_tickets
-            ok = sync_events(runtime, auto_create_tickets=auto_tickets)
+            ok = sync_events(runtime, auto_create_tickets=auto_tickets, auto_publish=args.publish)
             return 0 if ok else 1
 
         if args.command == "generate":

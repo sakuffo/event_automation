@@ -276,7 +276,7 @@ def get_existing_event_keys(runtime: SyncRuntime) -> Dict[str, Dict[str, Any]]:
         existing_events: Dict[str, Dict[str, Any]] = {}
         total_events = 0
 
-        for event in client.iter_events(page_size=200):
+        for event in client.iter_events(page_size=100):
             total_events += 1
             title = (event.get("title") or "").strip()
             start_settings = event.get("dateAndTimeSettings", {}) or {}
@@ -422,6 +422,7 @@ def create_wix_event(
     event: EventRecord,
     runtime: SyncRuntime,
     auto_create_tickets: bool = True,
+    auto_publish: bool = False,
 ) -> bool:
     file_descriptor = None
     if event.image_url:
@@ -476,6 +477,13 @@ def create_wix_event(
             logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
             logger.info("   💡 Re-run without --no-tickets to enable automatic tickets or add them manually via Wix Dashboard")
 
+        if auto_publish and event_id:
+            try:
+                client.publish_event(event_id)
+                logger.info("   📢 Published event: %s", event.name)
+            except Exception as pub_error:
+                logger.warning("   ⚠️  Failed to publish event: %s", pub_error)
+
         return True
     except Exception as exc:
         logger.error("❌ Failed to create event %s: %s", event.name, exc)
@@ -516,12 +524,16 @@ def update_wix_event(
         return False
 
 
-def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True) -> bool:
+def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, auto_publish: bool = False) -> bool:
     logger.info("🚀 Starting Google Sheets → Wix Events sync...\n")
     if auto_create_tickets:
         logger.info("🎫 Auto-ticket creation: ENABLED")
     else:
         logger.info("🎫 Auto-ticket creation: DISABLED")
+    if auto_publish:
+        logger.info("📢 Auto-publish: ENABLED")
+    else:
+        logger.info("📢 Auto-publish: DISABLED (events created as drafts)")
     logger.info("")
 
     try:
@@ -575,7 +587,7 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True) -> bool:
                     results["skipped"].append(event.name)
                 continue
 
-            if create_wix_event(event, runtime=runtime, auto_create_tickets=auto_create_tickets):
+            if create_wix_event(event, runtime=runtime, auto_create_tickets=auto_create_tickets, auto_publish=auto_publish):
                 results["success"].append(event.name)
             else:
                 results["failed"].append(event.name)
