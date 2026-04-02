@@ -169,11 +169,14 @@ def fetch_config_events(runtime: SyncRuntime) -> List[EventRecord]:
         if reg_type.upper() == "TICKETS":
             reg_type = "TICKETING"
 
-        ticket_price_str = get_col("ticket_price", "0")
-        try:
-            ticket_price = float(ticket_price_str) if ticket_price_str else 0.0
-        except ValueError:
+        raw_price = get_col("ticket_price", "0")
+        if ";" in raw_price:
             ticket_price = 0.0
+        else:
+            try:
+                ticket_price = float(raw_price) if raw_price else 0.0
+            except ValueError:
+                ticket_price = 0.0
 
         capacity_str = get_col("capacity", str(DEFAULT_CAPACITY))
         try:
@@ -197,6 +200,7 @@ def fetch_config_events(runtime: SyncRuntime) -> List[EventRecord]:
             "teaser": get_col("teaser"),
             "description": get_col("description"),
             "ticket_name": get_col("ticket_name"),
+            "ticket_price_raw": raw_price,
             "ticket_capacity": get_col("ticket_capacity"),
             "fee_type": get_col("fee_type"),
             "sale_start": get_col("sale_start"),

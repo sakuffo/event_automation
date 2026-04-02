@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 def _ensure_command_config(command: str, config) -> None:
     """Validate only the settings required for a given command."""
-    if command in {"sync", "test", "list", "pull-config"}:
+    if command in {"sync", "test", "list", "pull-config", "clean-synced"}:
         config.ensure_valid()
         return
 
@@ -58,6 +58,16 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("test", help="Test Wix API connectivity")
     subparsers.add_parser("list", help="List existing events in Wix")
     subparsers.add_parser("publish-drafts", help="Publish all draft events in Wix")
+
+    clean_parser = subparsers.add_parser(
+        "clean-synced",
+        help="Delete only rope+class events matching the generated sheet",
+    )
+    clean_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without deleting",
+    )
 
     sync_parser = subparsers.add_parser("sync", help="Sync events from Google Sheets")
     sync_parser.add_argument(
@@ -152,6 +162,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if args.command == "publish-drafts":
             from .orchestrator import publish_all_drafts
             ok = publish_all_drafts(runtime)
+            return 0 if ok else 1
+
+        if args.command == "clean-synced":
+            from .orchestrator import clean_synced_events
+            ok = clean_synced_events(runtime, dry_run=args.dry_run)
             return 0 if ok else 1
 
         if args.command == "sync":

@@ -33,6 +33,7 @@ class EventRecord(BaseModel):
     # Extended fields for config_events (optional, used by push-config)
     # For multiple tickets, separate with ; (e.g. "Regular; Student")
     ticket_name: Optional[str] = None
+    ticket_price_raw: Optional[str] = None
     ticket_capacity: Optional[str] = None
     fee_type: Optional[str] = None
     sale_start: Optional[str] = None
@@ -89,7 +90,8 @@ class EventRecord(BaseModel):
 
     @field_validator(
         "image_url", "teaser", "description", "event_type", "category",
-        "ticket_name", "ticket_capacity", "fee_type", "sale_start", "sale_end",
+        "ticket_name", "ticket_price_raw", "ticket_capacity",
+        "fee_type", "sale_start", "sale_end",
         "tax_name", "tax_rate", "tax_type",
         mode="before",
     )
@@ -116,15 +118,14 @@ class TicketSpec:
 
 def parse_tickets(
     ticket_name: Optional[str] = None,
-    ticket_price: Optional[float] = None,
+    ticket_price=None,
     ticket_capacity: Optional[str] = None,
     default_capacity: int = 24,
 ) -> List[TicketSpec]:
     """Build ticket specs from separate name/price/capacity fields.
 
     Each field can hold multiple values separated by ``;`` for multi-ticket events.
-    Single-ticket example: name="Single Ticket", price=30, capacity="24"
-    Multi-ticket example: name="Regular; Student", price=30 (shared), capacity="24; 12"
+    ``ticket_price`` can be a float, int, or semicolon-separated string.
     """
     if not ticket_name or ticket_price is None:
         return []
@@ -133,7 +134,6 @@ def parse_tickets(
     if not names:
         return []
 
-    # Parse prices — can be a single value or semicolon-separated
     price_str = str(ticket_price)
     price_parts = [p.strip() for p in price_str.split(";")]
     prices: List[float] = []

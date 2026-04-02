@@ -845,6 +845,90 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, draft: b
         return False
 
 
+def clean_synced_events(runtime: SyncRuntime, dry_run: bool = False) -> bool:
+    """Delete only synced rope-class events in the current generated_events window."""
+    logger.info("🧹 Cleaning synced events...\n")
+    if dry_run:
+        logger.info("🔍 DRY RUN — no deletions will be made\n")
+
+    try:
+        sheet_events = fetch_events(runtime)
+        if not sheet_events:
+            logger.warning("No events in generated_events sheet.")
+            return False
+
+        sheet_keys: set = set()
+        for event in sheet_events:
+            start_date_iso = convert_date_to_iso(event.start_date)
+            key = f"{event.name.strip()}|{start_date_iso}|{event.start_time}"
+            sheet_keys.add(key)
+
+        logger.info("Found %d events in sheet to match against\n", len(sheet_keys))
+
+        client = runtime.get_wix_client()
+        all_events = list(client.iter_events(
+            page_size=100, fieldsets=["CATEGORIES"],
+        ))
+
+        to_delete = []
+        for wix_event in all_events:
+            event_id = wix_event.get("id")
+            title = (wix_event.get("title") or "").strip()
+            status = wix_event.get("status", "")
+
+            if status not in ("UPCOMING", "STARTED", "DRAFT"):
+                continue
+
+            cat_data = wix_event.get("categories", {})
+            cat_list = cat_data.get("categories", []) if isinstance(cat_data, dict) else []
+            cat_names = {c.get("name", "") for c in cat_list}
+
+            if "rope" not in cat_names or "class" not in cat_names:
+                continue
+
+            start_settings = wix_event.get("dateAndTimeSettings", {}) or {}
+            start_datetime = start_settings.get("startDate", "")
+            local_parts = _localize_wix_start(start_datetime, runtime.config.timezone)
+            if local_parts is None:
+                continue
+
+            date_part, time_part = local_parts
+            key = f"{title}|{date_part}|{time_part}"
+
+            if key in sheet_keys:
+                to_delete.append((event_id, title, start_datetime))
+
+        if not to_delete:
+            logger.info("No matching synced events found to clean.")
+            return True
+
+        logger.info("Found %d synced events to delete:\n", len(to_delete))
+        deleted = 0
+        failed = 0
+        for event_id, title, start in to_delete:
+            if dry_run:
+                logger.info("  DELETE: %s (%s)", title, start[:10])
+            else:
+                ok = client.delete_event(event_id, force=True)
+                if ok:
+                    logger.info("  ✅ Deleted: %s", title)
+                    deleted += 1
+                else:
+                    logger.warning("  ❌ Failed: %s", title)
+                    failed += 1
+                time.sleep(0.3)
+
+        if dry_run:
+            logger.info("\n📊 Would delete: %d events", len(to_delete))
+        else:
+            logger.info("\n📊 Results: %d deleted, %d failed", deleted, failed)
+
+        return failed == 0
+    except Exception as exc:
+        logger.error("Failed to clean synced events: %s", exc)
+        return False
+
+
 def _create_tickets_from_config(client, event_id: str, event: EventRecord) -> bool:
     """Create ticket definitions from the config ticket fields.
 
@@ -864,7 +948,7 @@ def _create_tickets_from_config(client, event_id: str, event: EventRecord) -> bo
 
     specs = parse_tickets(
         ticket_name=event.ticket_name,
-        ticket_price=event.ticket_price,
+        ticket_price=event.ticket_price_raw or event.ticket_price,
         ticket_capacity=event.ticket_capacity,
     )
     if not specs:
@@ -963,7 +1047,7 @@ def push_config_events(
             wix_ticket_defs = client.get_ticket_definitions(event_id, include_sales=True)
             sheet_specs = parse_tickets(
                 ticket_name=event.ticket_name,
-                ticket_price=event.ticket_price,
+                ticket_price=event.ticket_price_raw or event.ticket_price,
                 ticket_capacity=event.ticket_capacity,
             )
             tickets_changed = False
