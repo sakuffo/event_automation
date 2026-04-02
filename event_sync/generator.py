@@ -600,21 +600,19 @@ def _wix_event_to_config_row(
     if main_image.get("url"):
         image_url = main_image["url"]
 
-    # Build ticket spec string: Name:Price:Capacity
-    ticket_parts = []
+    ticket_names = []
+    ticket_prices = []
+    ticket_capacities = []
     fee_type = DEFAULT_FEE_TYPE
     sale_start = ""
     sale_end = ""
     for td in ticket_defs:
-        name = td.get("name", "Ticket")
+        ticket_names.append(td.get("name", "Ticket"))
         pricing = td.get("pricingMethod", {})
         fixed = pricing.get("fixedPrice", {})
-        price = fixed.get("value", "0")
-        capacity = td.get("initialLimit") or td.get("actualLimit") or ""
-        parts = [name, str(price)]
-        if capacity:
-            parts.append(str(capacity))
-        ticket_parts.append(":".join(parts))
+        ticket_prices.append(fixed.get("value", "0"))
+        cap = td.get("initialLimit") or td.get("actualLimit") or ""
+        ticket_capacities.append(str(cap) if cap else "")
         fee_type = td.get("feeType", fee_type)
         sp = td.get("salePeriod") or {}
         if sp.get("startDate"):
@@ -634,7 +632,9 @@ def _wix_event_to_config_row(
         "short_description": wix_event.get("shortDescription", ""),
         "detailed_description": wix_event.get("detailedDescription", ""),
         "image_url": image_url,
-        "tickets": "; ".join(ticket_parts) if ticket_parts else "",
+        "ticket_name": "; ".join(ticket_names),
+        "ticket_price": "; ".join(ticket_prices),
+        "ticket_capacity": "; ".join(ticket_capacities),
         "fee_type": fee_type,
         "sale_start": sale_start,
         "sale_end": sale_end,

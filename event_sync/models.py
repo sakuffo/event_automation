@@ -31,7 +31,9 @@ class EventRecord(BaseModel):
     description: Optional[str] = None
 
     # Extended fields for config_events (optional, used by push-config)
-    tickets: Optional[str] = None
+    # For multiple tickets, separate with ; (e.g. "Regular; Student")
+    ticket_name: Optional[str] = None
+    ticket_capacity: Optional[str] = None
     fee_type: Optional[str] = None
     sale_start: Optional[str] = None
     sale_end: Optional[str] = None
@@ -87,7 +89,7 @@ class EventRecord(BaseModel):
 
     @field_validator(
         "image_url", "teaser", "description", "event_type", "category",
-        "tickets", "fee_type", "sale_start", "sale_end",
+        "ticket_name", "ticket_capacity", "fee_type", "sale_start", "sale_end",
         "tax_name", "tax_rate", "tax_type",
         mode="before",
     )
@@ -112,41 +114,50 @@ class TicketSpec:
     limit_per_checkout: int = 4
 
 
-def parse_tickets(raw: Optional[str], default_capacity: int = 24) -> List[TicketSpec]:
-    """Parse a tickets column value into a list of TicketSpec objects.
+def parse_tickets(
+    ticket_name: Optional[str] = None,
+    ticket_price: Optional[float] = None,
+    ticket_capacity: Optional[str] = None,
+    default_capacity: int = 24,
+) -> List[TicketSpec]:
+    """Build ticket specs from separate name/price/capacity fields.
 
-    Format per ticket: ``Name:Price[:Capacity[:LimitPerCheckout]]``
-    Multiple tickets separated by ``;``.
+    Each field can hold multiple values separated by ``;`` for multi-ticket events.
+    Single-ticket example: name="Single Ticket", price=30, capacity="24"
+    Multi-ticket example: name="Regular; Student", price=30 (shared), capacity="24; 12"
     """
-    if not raw or not raw.strip():
+    if not ticket_name or ticket_price is None:
         return []
 
-    specs: List[TicketSpec] = []
-    for part in raw.split(";"):
-        part = part.strip()
-        if not part:
-            continue
-        pieces = [p.strip() for p in part.split(":")]
-        if len(pieces) < 2:
-            continue
-        name = pieces[0]
+    names = [n.strip() for n in ticket_name.split(";") if n.strip()]
+    if not names:
+        return []
+
+    # Parse prices — can be a single value or semicolon-separated
+    price_str = str(ticket_price)
+    price_parts = [p.strip() for p in price_str.split(";")]
+    prices: List[float] = []
+    for p in price_parts:
         try:
-            price = float(pieces[1])
+            prices.append(float(p))
         except ValueError:
-            continue
-        capacity = default_capacity
-        limit = 4
-        if len(pieces) >= 3 and pieces[2]:
-            try:
-                capacity = int(pieces[2])
-            except ValueError:
-                pass
-        if len(pieces) >= 4 and pieces[3]:
-            try:
-                limit = int(pieces[3])
-            except ValueError:
-                pass
-        specs.append(TicketSpec(name=name, price=price, capacity=capacity, limit_per_checkout=limit))
+            prices.append(0.0)
+
+    # Parse capacities
+    cap_parts = [c.strip() for c in (ticket_capacity or "").split(";")] if ticket_capacity else []
+    capacities: List[int] = []
+    for c in cap_parts:
+        try:
+            capacities.append(int(c)) if c else capacities.append(default_capacity)
+        except ValueError:
+            capacities.append(default_capacity)
+
+    specs: List[TicketSpec] = []
+    for i, name in enumerate(names):
+        price = prices[i] if i < len(prices) else prices[-1] if prices else 0.0
+        capacity = capacities[i] if i < len(capacities) else default_capacity
+        specs.append(TicketSpec(name=name, price=price, capacity=capacity))
+
     return specs
 
 

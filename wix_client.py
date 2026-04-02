@@ -258,9 +258,24 @@ class WixClient:
         )
         return response.json().get('event', {})
 
-    def delete_event(self, event_id: str) -> bool:
-        """Delete an event"""
+    def has_orders(self, event_id: str) -> bool:
+        """Check if an event has any ticket orders."""
         try:
+            orders = list(islice(self.iter_orders(event_id=event_id, page_size=1), 1))
+            return len(orders) > 0
+        except Exception:
+            return True
+
+    def delete_event(self, event_id: str, force: bool = False) -> bool:
+        """Delete an event. Refuses if the event has orders unless force=True."""
+        try:
+            if not force and self.has_orders(event_id):
+                logger.error(
+                    "Refusing to delete event %s — it has existing orders. "
+                    "Use force=True to override.",
+                    event_id,
+                )
+                return False
             self._request('DELETE', f'/events/v3/events/{event_id}')
             return True
         except Exception as exc:
@@ -402,6 +417,34 @@ class WixClient:
                 )
 
         return result
+
+    def update_ticket_definition(
+        self,
+        ticket_def_id: str,
+        revision: str,
+        *,
+        price: Optional[float] = None,
+        capacity: Optional[int] = None,
+        currency: str = "CAD",
+    ) -> Dict[str, Any]:
+        """Update an existing ticket definition's price and/or capacity."""
+        update: Dict[str, Any] = {
+            "id": ticket_def_id,
+            "revision": revision,
+        }
+        if price is not None:
+            update["pricingMethod"] = {
+                "fixedPrice": {"value": str(price), "currency": currency}
+            }
+        if capacity is not None and capacity > 0:
+            update["initialLimit"] = capacity
+
+        response = self._request(
+            'PATCH',
+            f'/events-ticket-definitions/v3/ticket-definitions/{ticket_def_id}',
+            json={"ticketDefinition": update},
+        )
+        return response.json().get('ticketDefinition', {})
 
     def get_ticket_definitions(self, event_id: str) -> List[Dict[str, Any]]:
         """Return all ticket definitions for an event."""
