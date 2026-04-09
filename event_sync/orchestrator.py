@@ -140,6 +140,39 @@ def _normalize_wix_timestamp(timestamp: str) -> Optional[str]:
 
 _BULLET_MARKERS = ("- ", "* ", "\u2022 ", "\u2013 ", "\u2014 ")
 
+# HTML tags that are preserved (not escaped) when found in description text.
+SAFE_HTML_TAGS = frozenset({
+    "b", "i", "u", "em", "strong", "a", "br", "p", "ul", "ol", "li",
+    "h1", "h2", "h3", "h4", "h5", "h6", "span", "div", "blockquote",
+})
+
+_TAG_RE = re.compile(r'(<[^>]+>)')
+_TAG_NAME_RE = re.compile(r'^</?([a-zA-Z][a-zA-Z0-9]*)')
+_BLOCK_TAG_RE = re.compile(r'<(?:p|div|ul|ol|h[1-6]|blockquote)[\s>/]', re.IGNORECASE)
+
+
+def _escape_preserving_html(text: str) -> str:
+    """Escape plain text but preserve whitelisted HTML tags."""
+    parts = _TAG_RE.split(text)
+    result: List[str] = []
+    for part in parts:
+        m = _TAG_NAME_RE.match(part)
+        if m and m.group(1).lower() in SAFE_HTML_TAGS:
+            result.append(part)
+        else:
+            result.append(escape(part))
+    return "".join(result)
+
+
+def _is_complete_html(text: str) -> bool:
+    """Return True if text is already fully-formed HTML with block tags."""
+    stripped = text.strip()
+    return (
+        stripped.startswith("<")
+        and stripped.endswith(">")
+        and _BLOCK_TAG_RE.search(stripped) is not None
+    )
+
 
 def _extract_bullet_text(line: str) -> Optional[str]:
     stripped = line.lstrip()
@@ -147,6 +180,10 @@ def _extract_bullet_text(line: str) -> Optional[str]:
         if stripped.startswith(marker):
             return stripped[len(marker) :].strip()
     return None
+
+
+def _is_bullet(line: str) -> bool:
+    return _extract_bullet_text(line) is not None
 
 
 def _inline_markdown(text: str) -> str:
@@ -165,14 +202,18 @@ def _inline_markdown(text: str) -> str:
 
 
 def _format_line(text: str) -> str:
-    """Escape HTML then apply inline markdown."""
-    return _inline_markdown(escape(text.strip()))
+    """Escape non-tag text, preserve safe HTML tags, apply inline markdown."""
+    return _inline_markdown(_escape_preserving_html(text.strip()))
 
 
 def format_description_as_html(raw: str) -> str:
     """Convert text from Sheets into HTML for Wix.
 
-    Supports paragraphs, bullet lists, **bold**, *italic*, and [links](url).
+    Supports paragraphs, bullet lists, **bold**, *italic*, [links](url),
+    and inline HTML tags (<b>, <i>, <a>, etc.).
+
+    Paragraph breaks occur on blank lines AND at transitions between
+    regular text and bullet-list lines.
     """
     if not raw:
         return ""
@@ -181,41 +222,50 @@ def format_description_as_html(raw: str) -> str:
     if not normalized:
         return ""
 
+    # Already fully-formed HTML — sanitize unsafe tags and return as-is.
+    if _is_complete_html(normalized):
+        return _escape_preserving_html(normalized)
+
     lines = normalized.split("\n")
-    paragraphs: List[List[str]] = []
+
+    # Split lines into blocks, breaking on blank lines AND on transitions
+    # between bullet and non-bullet lines.
+    blocks: List[List[str]] = []
     current: List[str] = []
+    current_is_bullet: Optional[bool] = None
 
     for line in lines:
         if line.strip() == "":
             if current:
-                paragraphs.append(current)
+                blocks.append(current)
                 current = []
+                current_is_bullet = None
             continue
+
+        line_is_bullet = _is_bullet(line)
+
+        # Transition between text and bullets (or vice versa) → new block
+        if current and current_is_bullet is not None and line_is_bullet != current_is_bullet:
+            blocks.append(current)
+            current = []
+
         current.append(line.rstrip())
+        current_is_bullet = line_is_bullet
 
     if current:
-        paragraphs.append(current)
+        blocks.append(current)
 
     html_blocks: List[str] = []
 
-    for para in paragraphs:
-        bullet_items: List[str] = []
-        all_bullets = True
-
-        for entry in para:
-            bullet = _extract_bullet_text(entry)
-            if bullet is None:
-                all_bullets = False
-                break
-            bullet_items.append(_format_line(bullet))
-
-        if all_bullets and bullet_items:
-            items_html = "".join(f"<li>{item}</li>" for item in bullet_items)
+    for block in blocks:
+        # Check if all lines in this block are bullets
+        if all(_is_bullet(entry) for entry in block):
+            items = [_format_line(_extract_bullet_text(entry)) for entry in block]
+            items_html = "".join(f"<li>{item}</li>" for item in items)
             html_blocks.append(f"<ul>{items_html}</ul>")
-            continue
-
-        joined = "<br/>".join(_format_line(item) for item in para)
-        html_blocks.append(f"<p>{joined}</p>")
+        else:
+            joined = "<br/>".join(_format_line(item) for item in block)
+            html_blocks.append(f"<p>{joined}</p>")
 
     return "".join(html_blocks)
 
@@ -444,11 +494,7 @@ def _build_wix_event_payload(
     elif existing_event and existing_event.get("shortDescription"):
         event_data["shortDescription"] = ""
 
-    raw_desc = event.description or ""
-    if raw_desc.lstrip().startswith("<"):
-        formatted_description = raw_desc
-    else:
-        formatted_description = format_description_as_html(raw_desc)
+    formatted_description = format_description_as_html(event.description or "")
     if formatted_description:
         event_data["detailedDescription"] = formatted_description
     elif existing_event and existing_event.get("detailedDescription"):
@@ -513,11 +559,7 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
     if expected_teaser != (existing_event.get("shortDescription") or ""):
         return True
 
-    raw_desc = event.description or ""
-    if raw_desc.lstrip().startswith("<"):
-        expected_description = raw_desc
-    else:
-        expected_description = format_description_as_html(raw_desc)
+    expected_description = format_description_as_html(event.description or "")
     if expected_description != (existing_event.get("detailedDescription") or ""):
         return True
 

@@ -297,6 +297,7 @@ def fetch_defaults(runtime: SyncRuntime) -> Dict[str, str]:
         candidate_sheet_ids.append(destination_sheet_id)
 
     result = None
+    skipped_ids: list = []
     for candidate_sheet_id in candidate_sheet_ids:
         try:
             result = (
@@ -311,15 +312,19 @@ def fetch_defaults(runtime: SyncRuntime) -> Dict[str, str]:
             )
             break
         except HttpError as exc:
-            logger.warning(
-                "Could not read defaults tab '%s' from spreadsheet %s (%s)",
+            logger.debug(
+                "defaults tab '%s' not found in spreadsheet %s, trying next",
                 tab_name,
                 candidate_sheet_id,
-                exc,
             )
+            skipped_ids.append(candidate_sheet_id)
 
     if result is None:
-        logger.warning("Continuing without defaults.")
+        logger.warning(
+            "Could not find defaults tab '%s' in any spreadsheet (%s). Continuing without defaults.",
+            tab_name,
+            ", ".join(skipped_ids),
+        )
         return {}
 
     rows = result.get("values", [])

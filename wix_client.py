@@ -67,6 +67,7 @@ class WixClient:
             'Content-Type': content_type
         }
 
+
         # Add account ID if available (required for some APIs like Site Media)
         if self.account_id:
             headers['wix-account-id'] = self.account_id
