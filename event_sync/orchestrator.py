@@ -566,6 +566,24 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
     return False
 
 
+_UPCOMING_STATUSES = frozenset({"UPCOMING", "STARTED"})
+
+CATEGORY_CONFIG_COLUMNS = [
+    "event_name",
+    "categories",
+    "short_description",
+    "detailed_description",
+    "start_date",
+    "start_time",
+    "status",
+    "event_id",
+]
+
+_CATEGORY_READONLY_COLUMNS = frozenset(
+    c for c in CATEGORY_CONFIG_COLUMNS if c != "categories"
+)
+
+
 _category_cache: Dict[str, str] = {}
 _category_cache_loaded = False
 
@@ -1259,6 +1277,370 @@ def push_config_events(
         return len(results["failed"]) == 0
     except Exception as exc:
         logger.error("Fatal error during push: %s", exc)
+        return False
+
+
+def _wix_event_to_category_row(
+    wix_event: Dict[str, Any],
+    tz_name: str,
+) -> Dict[str, Any]:
+    """Build a thin category-config row from a Wix event payload."""
+    title = wix_event.get("title", "")
+    event_id = wix_event.get("id", "")
+    status = wix_event.get("status", "") or ""
+
+    cat_data = wix_event.get("categories", {}) or {}
+    cat_list = cat_data.get("categories", []) if isinstance(cat_data, dict) else []
+    category_names = [c.get("name", "") for c in cat_list if c.get("name")]
+    categories_str = "; ".join(category_names)
+
+    date_settings = wix_event.get("dateAndTimeSettings", {}) or {}
+    start_raw = date_settings.get("startDate", "")
+    start_date = ""
+    start_time = ""
+    if start_raw:
+        localized = _localize_wix_start(start_raw, tz_name)
+        if localized:
+            iso_date, time_part = localized
+            try:
+                d = datetime.strptime(iso_date, "%Y-%m-%d")
+                start_date = d.strftime("%m/%d/%Y")
+            except ValueError:
+                start_date = iso_date
+            start_time = time_part
+
+    return {
+        "event_name": title,
+        "categories": categories_str,
+        "short_description": wix_event.get("shortDescription", "") or "",
+        "detailed_description": wix_event.get("detailedDescription", "") or "",
+        "start_date": start_date,
+        "start_time": start_time,
+        "status": status,
+        "event_id": event_id,
+    }
+
+
+def _category_row_sort_key(row: Dict[str, Any]) -> str:
+    """Sort key that orders rows by ``start_date`` descending.
+
+    Returns an ISO-style ``YYYY-MM-DD`` string so that natural string sort
+    matches chronological order. Rows missing a parsable date sort last.
+    """
+    raw = (row.get("start_date") or "").strip()
+    if not raw:
+        return ""
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return ""
+
+
+def pull_category_config(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
+    """Pull events into the ``category_config`` tab + ``_last_pull`` snapshot.
+
+    ``scope='upcoming'`` (default) keeps only ``UPCOMING``/``STARTED`` events
+    (matching ``pull_config_events``). ``scope='all'`` keeps every non-draft
+    event ever published. Drafts are excluded by the underlying iterator.
+    """
+    from .generator import write_category_config_to_sheet
+
+    if scope not in {"upcoming", "all"}:
+        logger.error("Invalid scope '%s' (expected 'upcoming' or 'all')", scope)
+        return False
+
+    logger.info("Pulling category config from Wix (scope=%s)...\n", scope)
+
+    try:
+        client = runtime.get_wix_client()
+        tz_name = runtime.config.timezone
+
+        all_events = list(client.iter_events(
+            page_size=100,
+            include_drafts=False,
+            fieldsets=["DETAILS", "CATEGORIES"],
+        ))
+
+        upcoming_count = sum(
+            1 for e in all_events if (e.get("status") or "") in _UPCOMING_STATUSES
+        )
+        past_count = len(all_events) - upcoming_count
+
+        if scope == "upcoming":
+            filtered = [
+                e for e in all_events
+                if (e.get("status") or "") in _UPCOMING_STATUSES
+            ]
+        else:
+            filtered = list(all_events)
+
+        if not filtered:
+            logger.warning(
+                "No events found for scope=%s (Wix returned %d non-draft events).",
+                scope, len(all_events),
+            )
+            return False
+
+        rows: List[Dict[str, Any]] = [
+            _wix_event_to_category_row(e, tz_name) for e in filtered
+        ]
+        rows.sort(key=_category_row_sort_key, reverse=True)
+
+        logger.info(
+            "Pulled %d events (scope=%s: %d upcoming, %d past)",
+            len(filtered), scope, upcoming_count, past_count,
+        )
+
+        snapshot_tab = runtime.config.category_config_tab + "_last_pull"
+        logger.info("Writing snapshot to '%s'...", snapshot_tab)
+        write_category_config_to_sheet(rows, runtime, snapshot_tab)
+
+        config_tab = runtime.config.category_config_tab
+        logger.info("Writing editable config to '%s'...", config_tab)
+        ok = write_category_config_to_sheet(rows, runtime, config_tab)
+
+        return ok
+    except Exception as exc:
+        logger.error("Failed to pull category config: %s", exc)
+        return False
+
+
+def _split_categories_cell(value: str) -> List[str]:
+    """Split a ``a; b; c`` cell into stripped, non-empty tokens."""
+    if not value:
+        return []
+    return [tok.strip() for tok in value.split(";") if tok.strip()]
+
+
+def _index_events_by_id_and_key(
+    runtime: SyncRuntime,
+) -> tuple:
+    """Return ``(by_id, by_key)`` dicts of live Wix events.
+
+    ``by_id`` maps Wix event id → event payload (with categories).
+    ``by_key`` maps ``"title|YYYY-MM-DD|HH:MM"`` → event payload, mirroring the
+    matching logic used by ``get_existing_event_keys``.
+    """
+    client = runtime.get_wix_client()
+    tz_name = runtime.config.timezone
+
+    by_id: Dict[str, Dict[str, Any]] = {}
+    by_key: Dict[str, Dict[str, Any]] = {}
+
+    for event in client.iter_events(page_size=100, fieldsets=["CATEGORIES"]):
+        event_id = event.get("id")
+        if not event_id:
+            continue
+        by_id[event_id] = event
+
+        title = (event.get("title") or "").strip()
+        start_settings = event.get("dateAndTimeSettings", {}) or {}
+        start_raw = start_settings.get("startDate", "")
+        if not title or not start_raw:
+            continue
+        localized = _localize_wix_start(start_raw, tz_name)
+        if localized is None:
+            continue
+        date_part, time_part = localized
+        by_key[f"{title}|{date_part}|{time_part}"] = event
+
+    return by_id, by_key
+
+
+def push_category_config(
+    runtime: SyncRuntime,
+    scope: str = "upcoming",
+    dry_run: bool = False,
+) -> bool:
+    """Push category-only edits from the sheet back to Wix.
+
+    The only Wix endpoints touched are ``iter_events``, ``query_categories``,
+    ``create_category``, ``assign_event_to_category``, and
+    ``unassign_event_from_category``. Description columns in the sheet are
+    deliberately ignored — this push path never calls ``update_event``.
+    """
+    from .sheets import fetch_category_config_rows
+
+    if scope not in {"upcoming", "all"}:
+        logger.error("Invalid scope '%s' (expected 'upcoming' or 'all')", scope)
+        return False
+
+    logger.info("🚀 Push category config to Wix (scope=%s)...\n", scope)
+    if dry_run:
+        logger.info("🔍 DRY RUN — no changes will be made\n")
+
+    try:
+        rows = fetch_category_config_rows(runtime)
+        if not rows:
+            logger.warning(
+                "No rows in category config tab '%s'.",
+                runtime.config.category_config_tab,
+            )
+            return False
+
+        client = runtime.get_wix_client()
+        by_id, by_key = _index_events_by_id_and_key(runtime)
+
+        results: Dict[str, List[str]] = {
+            "updated": [],
+            "skipped": [],
+            "out_of_scope": [],
+            "not_found": [],
+            "failed": [],
+        }
+
+        for row in rows:
+            event_name = (row.get("event_name") or "").strip() or "(unnamed)"
+            row_status = (row.get("status") or "").strip().upper()
+
+            if scope == "upcoming" and row_status not in _UPCOMING_STATUSES:
+                logger.info(
+                    "  ⏭️  Out of scope: %s (status=%s)", event_name, row_status or "?",
+                )
+                results["out_of_scope"].append(event_name)
+                continue
+
+            event_id = (row.get("event_id") or "").strip()
+            wix_event: Optional[Dict[str, Any]] = None
+            if event_id:
+                wix_event = by_id.get(event_id)
+
+            if wix_event is None:
+                row_date_iso = ""
+                if row.get("start_date"):
+                    try:
+                        row_date_iso = convert_date_to_iso(row["start_date"])
+                    except Exception:
+                        row_date_iso = ""
+                fallback_key = f"{event_name}|{row_date_iso}|{row.get('start_time', '')}"
+                wix_event = by_key.get(fallback_key)
+                if wix_event is not None:
+                    event_id = wix_event.get("id") or ""
+
+            if wix_event is None or not event_id:
+                logger.warning(
+                    "  ⚠️  Not found in Wix: %s (event_id='%s')",
+                    event_name, row.get("event_id", ""),
+                )
+                results["not_found"].append(event_name)
+                continue
+
+            wix_cats = wix_event.get("categories", {}) or {}
+            wix_cat_list = (
+                wix_cats.get("categories", []) if isinstance(wix_cats, dict) else []
+            )
+            wix_cat_names = {
+                (c.get("name") or "").strip() for c in wix_cat_list if c.get("name")
+            }
+            wix_cat_id_map = {
+                (c.get("name") or "").strip(): c.get("id", "")
+                for c in wix_cat_list
+                if c.get("name") and c.get("id")
+            }
+
+            sheet_cat_names = set(_split_categories_cell(row.get("categories", "")))
+
+            to_add = sheet_cat_names - wix_cat_names
+            to_remove = wix_cat_names - sheet_cat_names
+
+            if not to_add and not to_remove:
+                if dry_run:
+                    logger.info("  SKIP: %s (no category changes)", event_name)
+                else:
+                    logger.info("⏭️  Skipped: %s (no category changes)", event_name)
+                results["skipped"].append(event_name)
+                continue
+
+            change_parts: List[str] = []
+            if to_add:
+                change_parts.append(f"add: {', '.join(sorted(to_add))}")
+            if to_remove:
+                change_parts.append(f"remove: {', '.join(sorted(to_remove))}")
+            change_desc = " | ".join(change_parts)
+
+            if dry_run:
+                logger.info("  UPDATE: %s [%s]", event_name, change_desc)
+                results["updated"].append(event_name)
+                continue
+
+            logger.info("♻️  Updating: %s [%s]", event_name, change_desc)
+            row_ok = True
+
+            for tag in sorted(to_add):
+                cat_id = _resolve_category_id(client, tag)
+                if not cat_id:
+                    row_ok = False
+                    continue
+                try:
+                    client.assign_event_to_category(cat_id, event_id)
+                    logger.info("   🏷️  Added category: %s", tag)
+                except Exception as exc:
+                    logger.warning(
+                        "   ⚠️  Failed to add category '%s': %s", tag, exc,
+                    )
+                    row_ok = False
+
+            for tag in sorted(to_remove):
+                cat_id = wix_cat_id_map.get(tag)
+                if not cat_id:
+                    logger.warning(
+                        "   ⚠️  No live category id for '%s' — skipping unassign",
+                        tag,
+                    )
+                    continue
+                try:
+                    client.unassign_event_from_category(cat_id, event_id)
+                    logger.info("   🗑️  Removed category: %s", tag)
+                except Exception as exc:
+                    logger.warning(
+                        "   ⚠️  Failed to remove category '%s': %s", tag, exc,
+                    )
+                    row_ok = False
+
+            if row_ok:
+                results["updated"].append(event_name)
+            else:
+                results["failed"].append(event_name)
+            time.sleep(0.3)
+
+        logger.info("\n📈 Push Complete!\n")
+
+        if results["updated"]:
+            label = "Would update" if dry_run else "Updated"
+            logger.info("♻️  %s: %d events", label, len(results["updated"]))
+            for n in results["updated"]:
+                logger.info("  • %s", n)
+
+        if results["skipped"]:
+            logger.info(
+                "\n⏭️  Skipped (no category changes): %d events",
+                len(results["skipped"]),
+            )
+
+        if results["out_of_scope"]:
+            logger.info(
+                "\n🚫 Out of scope (status not in {UPCOMING, STARTED}): %d events",
+                len(results["out_of_scope"]),
+            )
+
+        if results["not_found"]:
+            logger.warning(
+                "\n⚠️  Not found in Wix: %d events",
+                len(results["not_found"]),
+            )
+            for n in results["not_found"]:
+                logger.warning("  • %s", n)
+
+        if results["failed"]:
+            logger.error("\n❌ Failed: %d events", len(results["failed"]))
+            for n in results["failed"]:
+                logger.error("  • %s", n)
+
+        return len(results["failed"]) == 0
+    except Exception as exc:
+        logger.error("Fatal error during category push: %s", exc)
         return False
 
 

@@ -39,6 +39,18 @@ python sync_events.py sync      # Sync events from Google Sheets
 python sync_events.py generate --output-sheet my_tab  # Custom generation target
 python sync_events.py generate --output-sheet my_tab -m March  # Custom tab + month filter
 
+# Config round-trip (pull from Wix → edit in sheet → push back)
+python sync_events.py pull-config              # Snapshot live Wix events into config_events tab
+python sync_events.py push-config --dry-run    # Preview pending edits
+python sync_events.py push-config              # Push edits back to Wix
+
+# Categories-only round-trip (only the `categories` column is editable)
+python sync_events.py pull-categories                       # default --scope upcoming
+python sync_events.py pull-categories --scope all           # past + present + future
+python sync_events.py push-categories                       # default --scope upcoming
+python sync_events.py push-categories --scope all
+python sync_events.py push-categories --scope all --dry-run # preview only
+
 # Using Make shortcuts
 make setup          # Complete setup
 make validate       # Validate credentials
@@ -70,6 +82,38 @@ Notes:
 - Destination tab defaults to `generated_events` and can be changed via `GENERATED_EVENTS_TAB`.
 - Source tabs default to `rolling_schedule` and `class_info` and can be changed via `ROLLING_SCHEDULE_TAB` and `CLASS_INFO_TAB`.
 - `defaults.default_img` is used as the fallback `image_url` when `class_info.image_link` is empty.
+
+## Config Round-Trips
+
+Two pull/push pairs let you edit live Wix events from a Google Sheet and push the edits back. They share `GOOGLE_SHEET_ID` but use separate tabs so the workflows never collide.
+
+### Full config (`config_events`)
+
+```bash
+python sync_events.py pull-config              # Snapshot Wix → config_events + config_events_last_pull
+python sync_events.py push-config --dry-run    # Preview every change
+python sync_events.py push-config              # Push edits to Wix
+```
+
+`pull-config` writes every published Wix event (status `UPCOMING`/`STARTED`) into the `config_events` tab plus a `config_events_last_pull` snapshot for diffing. `push-config` reads the editable tab and patches matching Wix events — covers descriptions, dates, location, registration type, ticket prices, and tax. Match key: `(title, start_date, start_time)`.
+
+### Categories only (`category_config`)
+
+```bash
+python sync_events.py pull-categories                       # default --scope upcoming
+python sync_events.py pull-categories --scope all           # past + present + future
+python sync_events.py push-categories                       # default --scope upcoming
+python sync_events.py push-categories --scope all
+python sync_events.py push-categories --scope all --dry-run # preview only
+```
+
+A slim 8-column round-trip whose only editable field is `categories`. Useful when you want to retag a backlog of events without risking accidental edits to descriptions, prices, or dates.
+
+- **Scope flag**: `--scope upcoming` (default) keeps only `UPCOMING`/`STARTED` events on pull and silently skips out-of-scope rows on push (counted as `out_of_scope`). `--scope all` includes every non-draft event ever published, sorted future-first on pull.
+- **Tab layout**: columns are exactly `event_name`, `categories`, `short_description`, `detailed_description`, `start_date`, `start_time`, `status`, `event_id`. Read-only headers are prefixed with `(ro) ` and the header row is frozen. The descriptions are pulled for context but are silently ignored on push.
+- **Matching**: rows match by `event_id` first; rows with a blank `event_id` fall back to `(title, start_date, start_time)`, so you can hand-add rows in a pinch.
+- **Wix call surface on push**: only `iter_events`, `query_categories`, `create_category`, `assign_event_to_category`, and `unassign_event_from_category`. No `update_event`, no ticket calls, no media calls.
+- **Tab names**: `category_config` (editable) plus `category_config_last_pull` (snapshot). Override the live tab name via `CATEGORY_CONFIG_TAB`.
 
 ## Google Sheet Format
 
@@ -165,6 +209,7 @@ GOOGLE_SHEET_ID=your_spreadsheet_id
 SOURCE_SHEET_ID=your_source_spreadsheet_id  # optional; falls back to GOOGLE_SHEET_ID
 DEFAULTS_TAB=defaults
 GENERATED_EVENTS_TAB=generated_events
+CATEGORY_CONFIG_TAB=category_config         # optional; tab name for pull/push-categories
 GOOGLE_CREDENTIALS={"type":"service_account"...}  # Full JSON on one line
 ```
 

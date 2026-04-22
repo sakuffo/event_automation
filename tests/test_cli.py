@@ -36,3 +36,19 @@ def test_cli_sync_exits_when_config_invalid(clear_env):
     exit_code = cli.main(["--log-level", "ERROR", "sync", "--no-tickets"])
     assert exit_code == 1
 
+
+def test_cli_pull_categories_exits_when_config_invalid(clear_env):
+    exit_code = cli.main(["--log-level", "ERROR", "pull-categories"])
+    assert exit_code == 1
+
+
+def test_cli_push_categories_exits_when_config_invalid(clear_env):
+    exit_code = cli.main(["--log-level", "ERROR", "push-categories"])
+    assert exit_code == 1
+
+
+def test_cli_pull_categories_rejects_invalid_scope(clear_env):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--log-level", "ERROR", "pull-categories", "--scope", "bogus"])
+    assert excinfo.value.code != 0
+

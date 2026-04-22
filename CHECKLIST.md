@@ -69,6 +69,14 @@ Track your progress setting up the Wix Events + Google Sheets sync.
 - [ ] Daily schedule is active (9 AM EST)
 - [ ] Manual trigger works
 
+## Optional: Config Round-Trips
+
+- [ ] `python sync_events.py pull-config` populated the `config_events` tab
+- [ ] `python sync_events.py push-config --dry-run` previewed edits cleanly
+- [ ] `python sync_events.py pull-categories` populated the `category_config` tab (defaults to `--scope upcoming`)
+- [ ] `python sync_events.py pull-categories --scope all` snapshot every non-draft event, future-first
+- [ ] `python sync_events.py push-categories --dry-run` listed only `assign`/`unassign` calls (no `update_event`)
+
 ## Notes
 
 **Your Credentials:**

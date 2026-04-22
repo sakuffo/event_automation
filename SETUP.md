@@ -157,6 +157,13 @@ WIX_SITE_ID=your_site_id_from_step_2.2
 
 # Google Sheets
 GOOGLE_SHEET_ID=your_spreadsheet_id_from_step_1.5
+
+# Optional tab name overrides (defaults shown)
+# DEFAULTS_TAB=defaults
+# GENERATED_EVENTS_TAB=generated_events
+# ROLLING_SCHEDULE_TAB=rolling_schedule
+# CLASS_INFO_TAB=class_info
+# CATEGORY_CONFIG_TAB=category_config   # used by pull-categories / push-categories
 ```
 
 3. For `GOOGLE_CREDENTIALS`:
@@ -190,6 +197,25 @@ python sync_events.py list
 # Run your first sync
 python sync_events.py sync
 ```
+
+### 3.5 Optional: Config Round-Trip Workflows
+
+Once the basic sync works, two pull/push pairs let you edit existing Wix events from Google Sheets:
+
+```bash
+# Full config (descriptions, dates, prices, tax, categories, ...)
+python sync_events.py pull-config              # Snapshot Wix → config_events tab
+python sync_events.py push-config --dry-run    # Preview before pushing
+python sync_events.py push-config              # Push edits back to Wix
+
+# Categories only — safe to run on past events
+python sync_events.py pull-categories                       # default --scope upcoming
+python sync_events.py pull-categories --scope all           # past + present + future
+python sync_events.py push-categories --dry-run             # preview
+python sync_events.py push-categories --scope all           # push for every non-draft event
+```
+
+The categories round-trip writes to a separate `category_config` tab (override with `CATEGORY_CONFIG_TAB`) and only ever changes category assignments — descriptions and identifiers in that tab are read-only on push. See [README.md](README.md#config-round-trips) for the full sheet contract.
 
 ## Part 4: GitHub Actions Setup (10 minutes)
 

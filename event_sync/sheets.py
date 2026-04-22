@@ -11,6 +11,18 @@ from .runtime import SyncRuntime
 from .utils import build_column_map
 
 
+_RO_HEADER_PREFIX = "(ro) "
+
+
+def _normalize_category_header(header: str) -> str:
+    """Lowercase and strip an optional ``(ro) `` marker from a header label."""
+    cleaned = (header or "").strip()
+    lowered = cleaned.lower()
+    if lowered.startswith(_RO_HEADER_PREFIX):
+        lowered = lowered[len(_RO_HEADER_PREFIX):].strip()
+    return lowered
+
+
 logger = get_logger(__name__)
 
 
@@ -221,5 +233,63 @@ def fetch_config_events(runtime: SyncRuntime) -> List[EventRecord]:
     logger.info("Found %d config events", len(events))
     logger.info("")
     return events
+
+
+def fetch_category_config_rows(runtime: SyncRuntime) -> List[Dict[str, str]]:
+    """Read raw rows from the ``category_config`` tab as plain dicts.
+
+    Headers are lowercased and any ``(ro) `` marker prefix is stripped so callers
+    can index by canonical column names (e.g. ``categories``, ``event_id``). The
+    function deliberately does not parse rows into :class:`EventRecord` because
+    the tab only carries 8 thin columns and most ``EventRecord`` fields would
+    fail validation; the returned dicts always include every column from
+    ``CATEGORY_CONFIG_COLUMNS`` (missing values default to an empty string).
+    """
+    from .orchestrator import CATEGORY_CONFIG_COLUMNS
+
+    tab_name = runtime.config.category_config_tab
+    logger.info("📊 Fetching category config from '%s'...", tab_name)
+
+    service = runtime.get_sheets_service()
+    sheet_id = runtime.config.google_sheet_id
+    if not sheet_id:
+        raise ValueError("GOOGLE_SHEET_ID is not configured")
+
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=sheet_id, range=f"{tab_name}!A1:Z500")
+        .execute()
+    )
+
+    rows = result.get("values", [])
+    if not rows:
+        logger.warning("No data found in '%s' tab.", tab_name)
+        return []
+
+    header_keys = [_normalize_category_header(h) for h in rows[0]]
+    data_rows = rows[1:]
+
+    out: List[Dict[str, str]] = []
+    for row in data_rows:
+        if not row or not any(row):
+            continue
+        while len(row) < len(header_keys):
+            row.append("")
+
+        record: Dict[str, str] = {col: "" for col in CATEGORY_CONFIG_COLUMNS}
+        for i, key in enumerate(header_keys):
+            if not key or key not in record:
+                continue
+            value = row[i]
+            record[key] = value.strip() if isinstance(value, str) else (str(value) if value is not None else "")
+
+        if not record.get("event_name") and not record.get("event_id"):
+            continue
+
+        out.append(record)
+
+    logger.info("Found %d category config rows", len(out))
+    return out
 
 

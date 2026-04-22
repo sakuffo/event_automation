@@ -31,9 +31,10 @@ This folder contains technical documentation for the Event Automation project.
 
 ### Project Status
 
-✅ **Production Ready** (snapshot: 2025-11-01)
+✅ **Production Ready** (snapshot: 2026-04-18)
 - All core functionality working
 - Code refactored and optimized
+- Categories-only round-trip (`pull-categories` / `push-categories`) added with `--scope upcoming|all`
 - Zero known bugs or regressions
 - Documentation complete and current
 

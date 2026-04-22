@@ -23,7 +23,15 @@ logger = get_logger(__name__)
 
 def _ensure_command_config(command: str, config) -> None:
     """Validate only the settings required for a given command."""
-    if command in {"sync", "test", "list", "pull-config", "clean-synced"}:
+    if command in {
+        "sync",
+        "test",
+        "list",
+        "pull-config",
+        "clean-synced",
+        "pull-categories",
+        "push-categories",
+    }:
         config.ensure_valid()
         return
 
@@ -125,6 +133,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show what would change without making any API calls",
     )
 
+    pull_cats_parser = subparsers.add_parser(
+        "pull-categories",
+        help="Pull category assignments into the category_config tab",
+    )
+    pull_cats_parser.add_argument(
+        "--scope",
+        choices=["upcoming", "all"],
+        default="upcoming",
+        help="upcoming (default) keeps UPCOMING/STARTED; all keeps every non-draft event",
+    )
+
+    push_cats_parser = subparsers.add_parser(
+        "push-categories",
+        help="Push category edits from category_config back to Wix",
+    )
+    push_cats_parser.add_argument(
+        "--scope",
+        choices=["upcoming", "all"],
+        default="upcoming",
+        help="upcoming (default) only acts on UPCOMING/STARTED rows; all acts on every row",
+    )
+    push_cats_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without making any API calls",
+    )
+
     return parser
 
 
@@ -202,6 +237,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if args.command == "push-config":
             from .orchestrator import push_config_events
             ok = push_config_events(runtime, dry_run=args.dry_run)
+            return 0 if ok else 1
+
+        if args.command == "pull-categories":
+            from .orchestrator import pull_category_config
+            ok = pull_category_config(runtime, scope=args.scope)
+            return 0 if ok else 1
+
+        if args.command == "push-categories":
+            from .orchestrator import push_category_config
+            ok = push_category_config(runtime, scope=args.scope, dry_run=args.dry_run)
             return 0 if ok else 1
 
         parser.print_help()

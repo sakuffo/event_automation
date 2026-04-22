@@ -25,6 +25,13 @@ python sync_events.py pull-config             # Pull Wix events → config_event
 python sync_events.py push-config --dry-run   # Preview changes
 python sync_events.py push-config             # Push edits back to Wix
 
+# Categories-only round-trip (only the `categories` column is editable)
+python sync_events.py pull-categories                       # default --scope upcoming
+python sync_events.py pull-categories --scope all           # past + present + future
+python sync_events.py push-categories                       # default --scope upcoming
+python sync_events.py push-categories --scope all
+python sync_events.py push-categories --scope all --dry-run # preview only
+
 # Other
 python sync_events.py validate                # Check credentials
 python sync_events.py test                    # Test Wix API connection
@@ -65,8 +72,9 @@ pytest tests/test_models.py -v                # Run a single test file
 - **Registration type normalization**: `TICKETS` in sheets maps to `TICKETING` in the Wix API.
 - **Category-based pricing**: `CATEGORY_PRICING` in constants maps class categories to ticket prices. Unknown categories default to $30.
 - **Config round-trip**: `pull-config` snapshots live Wix events into a `config_events` sheet tab; `push-config` diffs that tab against Wix and patches changes (ticket prices, descriptions, etc.).
+- **Categories-only round-trip**: `pull-categories` / `push-categories` write/read only the `categories` column on a separate `category_config` tab (env: `CATEGORY_CONFIG_TAB`, default `category_config`). Descriptions, dates, status, and event id are pulled for context but never pushed — the only Wix calls on the push path are `iter_events`, `query_categories`, `create_category`, `assign_event_to_category`, and `unassign_event_from_category`. `--scope` (default `upcoming`) controls whether past events are included on pull and whether non-`UPCOMING`/`STARTED` rows are acted on at push time (out-of-scope rows are bucketed and skipped).
 - **Env-var driven config**: All credentials and tab names come from `.env`. `SOURCE_SHEET_ID` can differ from `GOOGLE_SHEET_ID` to separate source data from sync target.
 
 ## Environment Variables
 
-Required in `.env`: `WIX_API_KEY`, `WIX_SITE_ID`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS` (full service account JSON on one line). Optional: `WIX_ACCOUNT_ID`, `SOURCE_SHEET_ID`, `DEFAULTS_TAB`, `GENERATED_EVENTS_TAB`, `ROLLING_SCHEDULE_TAB`, `CLASS_INFO_TAB`, `ENV_MODE=development` + `DEV_WIX_*` for sandbox.
+Required in `.env`: `WIX_API_KEY`, `WIX_SITE_ID`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS` (full service account JSON on one line). Optional: `WIX_ACCOUNT_ID`, `SOURCE_SHEET_ID`, `DEFAULTS_TAB`, `GENERATED_EVENTS_TAB`, `ROLLING_SCHEDULE_TAB`, `CLASS_INFO_TAB`, `CATEGORY_CONFIG_TAB`, `ENV_MODE=development` + `DEV_WIX_*` for sandbox.
