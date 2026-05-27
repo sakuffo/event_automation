@@ -48,7 +48,8 @@ pytest tests/test_models.py -v                # Run a single test file
 
 **Entrypoint**: `sync_events.py` → thin wrapper that delegates to `event_sync.cli.main()`.
 
-**`event_sync/` package** (core logic):
+`**event_sync/` package** (core logic):
+
 - `cli.py` — argparse CLI with subcommands; routes to orchestrator/generator functions
 - `config.py` — `AppConfig` dataclass populated from `.env` via `python-dotenv`; all settings are env-var driven
 - `runtime.py` — `SyncRuntime` holds lazily-initialized Google Sheets/Drive services and `WixClient`; also manages download/upload caches
@@ -59,9 +60,10 @@ pytest tests/test_models.py -v                # Run a single test file
 - `images.py` — downloads images from Google Drive, resizes with Pillow, uploads to Wix Media Manager
 - `constants.py` — pricing table (`CATEGORY_PRICING`), column mappings, default values (location, capacity, tax)
 
-**`wix_client.py`** (standalone, not in the package): Reusable Wix API client with retry/backoff. Covers events CRUD, ticket definitions, orders, categories, and media upload. Uses cursor/offset pagination via `_paged_post()`.
+`**wix_client.py`** (standalone, not in the package): Reusable Wix API client with retry/backoff. Covers events CRUD, ticket definitions, orders, categories, and media upload. Uses cursor/offset pagination via `_paged_post()`.
 
 **Dev tools** (not part of the sync pipeline):
+
 - `dev_events.py` — create/list/delete test events
 - `dev_tickets.py` — ticket and RSVP operations for testing
 
@@ -77,4 +79,4 @@ pytest tests/test_models.py -v                # Run a single test file
 
 ## Environment Variables
 
-Required in `.env`: `WIX_API_KEY`, `WIX_SITE_ID`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS` (full service account JSON on one line). Optional: `WIX_ACCOUNT_ID`, `SOURCE_SHEET_ID`, `DEFAULTS_TAB`, `GENERATED_EVENTS_TAB`, `ROLLING_SCHEDULE_TAB`, `CLASS_INFO_TAB`, `CATEGORY_CONFIG_TAB`, `ENV_MODE=development` + `DEV_WIX_*` for sandbox.
+Required in `.env`: `WIX_API_KEY`, `WIX_SITE_ID`, `GOOGLE_SHEET_ID`, `GOOGLE_CREDENTIALS` (full service account JSON on one line). Optional: `WIX_ACCOUNT_ID`, `SOURCE_SHEET_ID`, `DEFAULTS_TAB`, `GENERATED_EVENTS_TAB`, `ROLLING_SCHEDULE_TAB`, `CLASS_INFO_TAB`, `CATEGORY_CONFIG_TAB`, `ENV_MODE=development` + `DEV_WIX_`* for sandbox.
