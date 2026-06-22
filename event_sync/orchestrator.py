@@ -522,10 +522,24 @@ def _build_wix_event_payload(
     return event_data
 
 
-def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: SyncRuntime) -> bool:
+EventDiff = Tuple[str, Any, Any]
+
+
+def _diff_event_fields(
+    event: EventRecord,
+    existing_event: Dict[str, Any],
+    runtime: SyncRuntime,
+) -> List[EventDiff]:
+    """Return ``(field, expected_from_sheet, actual_in_wix)`` for each field that differs.
+
+    An empty list means the sheet and Wix agree on every field we sync.
+    """
+    diffs: List[EventDiff] = []
+
     expected_title = event.name.strip()
-    if expected_title != existing_event.get("title"):
-        return True
+    actual_title = existing_event.get("title") or ""
+    if expected_title != actual_title:
+        diffs.append(("title", expected_title, actual_title))
 
     expected_start = _wix_timestamp(
         convert_date_to_iso(event.start_date),
@@ -540,30 +554,53 @@ def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: Sy
 
     date_settings = existing_event.get("dateAndTimeSettings") or {}
     actual_start = _normalize_wix_timestamp(date_settings.get("startDate") or "")
-    if actual_start is None or actual_start != expected_start:
-        return True
+    if actual_start != expected_start:
+        diffs.append(("startDate", expected_start, actual_start))
+
     actual_end = _normalize_wix_timestamp(date_settings.get("endDate") or "")
-    if actual_end is None or actual_end != expected_end:
-        return True
-    if runtime.config.timezone != date_settings.get("timeZoneId"):
-        return True
+    if actual_end != expected_end:
+        diffs.append(("endDate", expected_end, actual_end))
+
+    expected_tz = runtime.config.timezone
+    actual_tz = date_settings.get("timeZoneId") or ""
+    if expected_tz != actual_tz:
+        diffs.append(("timezone", expected_tz, actual_tz))
 
     location_settings = existing_event.get("location") or {}
-    formatted_address = (
+    actual_location = (
         (location_settings.get("address") or {}).get("formattedAddress") or ""
     )
-    if event.location != formatted_address:
-        return True
+    if event.location != actual_location:
+        diffs.append(("location", event.location, actual_location))
 
     expected_teaser = event.teaser.strip() if event.teaser else ""
-    if expected_teaser != (existing_event.get("shortDescription") or ""):
-        return True
+    actual_teaser = existing_event.get("shortDescription") or ""
+    if expected_teaser != actual_teaser:
+        diffs.append(("shortDescription", expected_teaser, actual_teaser))
 
     expected_description = format_description_as_html(event.description or "")
-    if expected_description != (existing_event.get("detailedDescription") or ""):
-        return True
+    actual_description = existing_event.get("detailedDescription") or ""
+    if expected_description != actual_description:
+        diffs.append(("detailedDescription", expected_description, actual_description))
 
-    return False
+    return diffs
+
+
+def _log_event_diff(event_name: str, diffs: List[EventDiff]) -> None:
+    """Log a per-field diff. Field names at INFO, full values at DEBUG."""
+    if not diffs:
+        return
+    changed = ", ".join(name for name, _, _ in diffs)
+    logger.info("   📝 Changed fields: %s", changed)
+    for name, expected, actual in diffs:
+        logger.debug(
+            "      %s\n        sheet : %r\n        wix   : %r",
+            name, expected, actual,
+        )
+
+
+def needs_update(event: EventRecord, existing_event: Dict[str, Any], runtime: SyncRuntime) -> bool:
+    return bool(_diff_event_fields(event, existing_event, runtime))
 
 
 _UPCOMING_STATUSES = frozenset({"UPCOMING", "STARTED"})
@@ -825,12 +862,14 @@ def sync_events(runtime: SyncRuntime, auto_create_tickets: bool = True, draft: b
                     results["skipped"].append(event.name)
                     continue
 
-                if needs_update(event, wix_event, runtime):
+                diffs = _diff_event_fields(event, wix_event, runtime)
+                if diffs:
                     logger.info(
                         "♻️  Updating: %s on %s",
                         event.name,
                         event.start_date,
                     )
+                    _log_event_diff(event.name, diffs)
                     if update_wix_event(
                         event,
                         runtime=runtime,
@@ -1079,7 +1118,8 @@ def push_config_events(
                 results["skipped"].append(event_name)
                 continue
 
-            event_changed = needs_update(event, wix_event, runtime)
+            event_diffs = _diff_event_fields(event, wix_event, runtime)
+            event_changed = bool(event_diffs)
 
             # Check categories
             wix_cats = wix_event.get("categories", {})
@@ -1164,6 +1204,8 @@ def push_config_events(
 
             if dry_run:
                 logger.info("  UPDATE: %s on %s [%s]", event_name, event.start_date, change_desc)
+                if event_changed:
+                    _log_event_diff(event_name, event_diffs)
                 for tu in ticket_updates:
                     parts = []
                     if tu["new_price"] is not None:
@@ -1175,6 +1217,8 @@ def push_config_events(
                 continue
 
             logger.info("♻️  Updating: %s on %s [%s]", event_name, event.start_date, change_desc)
+            if event_changed:
+                _log_event_diff(event_name, event_diffs)
             ok = True
 
             if event_changed:
@@ -1641,6 +1685,381 @@ def push_category_config(
         return len(results["failed"]) == 0
     except Exception as exc:
         logger.error("Fatal error during category push: %s", exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Site config (eCommerce tax-by-location) round-trip
+# ---------------------------------------------------------------------------
+
+
+def _tax_region_label(region: Dict[str, Any]) -> str:
+    """Human-friendly label for a tax region, e.g. ``CA / ON`` or ``US``."""
+    country = (region.get("country") or "").strip()
+    subdivision = (region.get("subdivision") or "").strip()
+    if country and subdivision:
+        return f"{country} / {subdivision}"
+    return country or subdivision
+
+
+def _rates_equal(a: Any, b: Any) -> bool:
+    """Compare two tax rates numerically, tolerating scale differences."""
+    try:
+        return abs(float(a) - float(b)) < 1e-9
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
+def _tax_mapping_to_site_row(
+    mapping: Dict[str, Any],
+    regions_by_id: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build a site_config row from an existing manual tax mapping."""
+    from .constants import TAX_LOCATION_SETTING, tax_rate_decimal_to_percent
+
+    region = regions_by_id.get(mapping.get("taxRegionId", ""), {})
+    region_label = _tax_region_label(region)
+    return {
+        "setting_type": TAX_LOCATION_SETTING,
+        "jurisdiction": (mapping.get("jurisdiction") or "") or region_label,
+        "region": region_label,
+        "tax_name": mapping.get("taxName", "") or "",
+        "tax_type": mapping.get("taxType", "") or "",
+        "tax_rate": tax_rate_decimal_to_percent(mapping.get("taxRate", "")),
+        "region_id": mapping.get("taxRegionId", "") or "",
+        "group_id": mapping.get("taxGroupId", "") or "",
+        "mapping_id": mapping.get("id", "") or "",
+        "revision": str(mapping.get("revision", "") or ""),
+    }
+
+
+def _blank_region_site_row(
+    region: Dict[str, Any],
+    group_id: str,
+) -> Dict[str, Any]:
+    """Build a site_config row for a region that has no tax mapping yet.
+
+    ``tax_rate`` is left blank so the operator can fill it in; pushing a blank
+    rate is a no-op, while filling in (e.g.) ``13`` makes push create the
+    mapping at that rate.
+    """
+    from .constants import DEFAULT_TAX_NAME, TAX_LOCATION_SETTING
+
+    region_label = _tax_region_label(region)
+    return {
+        "setting_type": TAX_LOCATION_SETTING,
+        "jurisdiction": region_label,
+        "region": region_label,
+        "tax_name": DEFAULT_TAX_NAME,
+        "tax_type": "",
+        "tax_rate": "",
+        "region_id": region.get("id", "") or "",
+        "group_id": group_id,
+        "mapping_id": "",
+        "revision": "",
+    }
+
+
+def _select_default_tax_group_id(groups: List[Dict[str, Any]]) -> str:
+    """Pick a sensible default tax group id for regions with no mapping.
+
+    Prefers a group named ``standard``/``default`` (case-insensitive), otherwise
+    falls back to the first group. Returns ``""`` if there are no groups.
+    """
+    if not groups:
+        return ""
+    for preferred in ("standard", "default"):
+        for group in groups:
+            if (group.get("name") or "").strip().lower() == preferred:
+                return group.get("id", "") or ""
+    return groups[0].get("id", "") or ""
+
+
+def _site_config_row_sort_key(row: Dict[str, Any]) -> Tuple[str, int]:
+    """Sort site_config rows by region label, mapped rows before blank ones."""
+    return (row.get("region", "") or "", 0 if row.get("mapping_id") else 1)
+
+
+def pull_site_config(runtime: SyncRuntime) -> bool:
+    """Pull eCommerce tax-by-location settings into the ``site_config`` tab.
+
+    Joins tax regions, tax groups, and manual tax mappings into one row per
+    mapping, plus a blank-rate row for any region that has no mapping yet, then
+    writes both an editable tab and a ``_last_pull`` snapshot.
+    """
+    from .generator import write_site_config_to_sheet
+
+    logger.info("Pulling site config (tax locations) from Wix...\n")
+
+    try:
+        client = runtime.get_wix_client()
+
+        regions = client.query_tax_regions()
+        groups = client.query_tax_groups()
+        mappings = client.query_manual_tax_mappings()
+
+        logger.info(
+            "Found %d tax region(s), %d tax group(s), %d tax mapping(s)",
+            len(regions), len(groups), len(mappings),
+        )
+
+        if not regions and not mappings:
+            logger.warning(
+                "No tax regions or mappings found. Your Wix site may have no "
+                "tax regions configured yet, or the API key is missing the "
+                "eCommerce 'Manage Orders' permission scope."
+            )
+            return False
+
+        regions_by_id = {r.get("id", ""): r for r in regions if r.get("id")}
+        default_group_id = _select_default_tax_group_id(groups)
+
+        rows: List[Dict[str, Any]] = [
+            _tax_mapping_to_site_row(m, regions_by_id) for m in mappings
+        ]
+
+        mapped_region_ids = {m.get("taxRegionId", "") for m in mappings}
+        for region in regions:
+            if region.get("id", "") in mapped_region_ids:
+                continue
+            rows.append(_blank_region_site_row(region, default_group_id))
+
+        rows.sort(key=_site_config_row_sort_key)
+
+        snapshot_tab = runtime.config.site_config_tab + "_last_pull"
+        logger.info("Writing snapshot to '%s'...", snapshot_tab)
+        write_site_config_to_sheet(rows, runtime, snapshot_tab)
+
+        config_tab = runtime.config.site_config_tab
+        logger.info("Writing editable config to '%s'...", config_tab)
+        ok = write_site_config_to_sheet(rows, runtime, config_tab)
+
+        return ok
+    except Exception as exc:
+        logger.error("Failed to pull site config: %s", exc)
+        return False
+
+
+def push_site_config(runtime: SyncRuntime, dry_run: bool = False) -> bool:
+    """Push tax-location edits from ``site_config`` back to Wix.
+
+    For each ``tax_location`` row with a non-blank ``tax_rate``: updates the
+    matching manual tax mapping if its rate/name/type differ, or creates a new
+    mapping (batched via bulk create) when the region+group has none. Blank
+    rates are skipped and mappings are never deleted. The only Wix endpoints
+    touched are ``query_manual_tax_mappings``, ``update_manual_tax_mapping``,
+    and ``bulk_create_manual_tax_mappings``.
+    """
+    from .constants import TAX_LOCATION_SETTING, tax_rate_percent_to_decimal
+    from .sheets import fetch_site_config_rows
+
+    logger.info("🚀 Push site config (tax locations) to Wix...\n")
+    if dry_run:
+        logger.info("🔍 DRY RUN — no changes will be made\n")
+
+    try:
+        rows = fetch_site_config_rows(runtime)
+        if not rows:
+            logger.warning(
+                "No rows in site config tab '%s'.",
+                runtime.config.site_config_tab,
+            )
+            return False
+
+        client = runtime.get_wix_client()
+        live_mappings = client.query_manual_tax_mappings()
+        live_by_id = {m.get("id", ""): m for m in live_mappings if m.get("id")}
+        live_by_region_group: Dict[Tuple[str, str], Dict[str, Any]] = {
+            (m.get("taxRegionId", ""), m.get("taxGroupId", "")): m
+            for m in live_mappings
+        }
+
+        results: Dict[str, List[str]] = {
+            "updated": [],
+            "created": [],
+            "skipped": [],
+            "invalid": [],
+            "failed": [],
+        }
+        to_create: List[Dict[str, Any]] = []
+        create_labels: List[str] = []
+
+        for row in rows:
+            label = (
+                row.get("jurisdiction")
+                or row.get("region")
+                or row.get("region_id")
+                or "(unknown region)"
+            )
+
+            if (row.get("setting_type") or "").strip().lower() != TAX_LOCATION_SETTING:
+                logger.info("  ⏭️  Skipped: %s (setting_type not tax_location)", label)
+                results["skipped"].append(label)
+                continue
+
+            desired_decimal = tax_rate_percent_to_decimal(row.get("tax_rate", ""))
+            if not desired_decimal:
+                logger.info("  ⏭️  Skipped: %s (no tax rate set)", label)
+                results["skipped"].append(label)
+                continue
+
+            mapping_id = (row.get("mapping_id") or "").strip()
+            region_id = (row.get("region_id") or "").strip()
+            group_id = (row.get("group_id") or "").strip()
+            sheet_name = (row.get("tax_name") or "").strip()
+            sheet_type = (row.get("tax_type") or "").strip()
+
+            live: Optional[Dict[str, Any]] = None
+            if mapping_id and mapping_id in live_by_id:
+                live = live_by_id[mapping_id]
+            elif region_id and group_id and (region_id, group_id) in live_by_region_group:
+                live = live_by_region_group[(region_id, group_id)]
+
+            if live is not None:
+                rate_changed = not _rates_equal(live.get("taxRate", ""), desired_decimal)
+                name_changed = bool(sheet_name) and sheet_name != (live.get("taxName") or "")
+                type_changed = bool(sheet_type) and sheet_type != (live.get("taxType") or "")
+
+                if not (rate_changed or name_changed or type_changed):
+                    logger.info("  ⏭️  Skipped: %s (no changes)", label)
+                    results["skipped"].append(label)
+                    continue
+
+                change_parts: List[str] = []
+                if rate_changed:
+                    from .constants import tax_rate_decimal_to_percent
+                    change_parts.append(
+                        "rate %s%% -> %s%%" % (
+                            tax_rate_decimal_to_percent(live.get("taxRate", "")) or "?",
+                            row.get("tax_rate", ""),
+                        )
+                    )
+                if name_changed:
+                    change_parts.append(f"name -> {sheet_name}")
+                if type_changed:
+                    change_parts.append(f"type -> {sheet_type}")
+                change_desc = ", ".join(change_parts)
+
+                if dry_run:
+                    logger.info("  UPDATE: %s [%s]", label, change_desc)
+                    results["updated"].append(label)
+                    continue
+
+                try:
+                    client.update_manual_tax_mapping(
+                        live.get("id", ""),
+                        str(live.get("revision", "")),
+                        tax_rate=desired_decimal if rate_changed else None,
+                        tax_name=sheet_name if name_changed else None,
+                        tax_type=sheet_type if type_changed else None,
+                    )
+                    logger.info("♻️  Updated: %s [%s]", label, change_desc)
+                    results["updated"].append(label)
+                except Exception as exc:
+                    logger.warning("   ⚠️  Failed to update mapping for %s: %s", label, exc)
+                    results["failed"].append(label)
+                time.sleep(0.3)
+                continue
+
+            # No live mapping — create one if we have both ids.
+            if not region_id or not group_id:
+                logger.warning(
+                    "  ⚠️  Cannot create mapping for %s — missing region_id/group_id "
+                    "(run pull-site-config to populate them)", label,
+                )
+                results["invalid"].append(label)
+                continue
+
+            mapping: Dict[str, Any] = {
+                "taxGroupId": group_id,
+                "taxRegionId": region_id,
+                "taxRate": desired_decimal,
+            }
+            if sheet_name:
+                mapping["taxName"] = sheet_name
+            if sheet_type:
+                mapping["taxType"] = sheet_type
+            jurisdiction = (row.get("jurisdiction") or "").strip()
+            if jurisdiction:
+                mapping["jurisdiction"] = jurisdiction
+
+            if dry_run:
+                logger.info(
+                    "  CREATE: %s [rate %s%%]", label, row.get("tax_rate", ""),
+                )
+                results["created"].append(label)
+                continue
+
+            to_create.append(mapping)
+            create_labels.append(label)
+
+        # Bulk-create any new mappings (max 100 per request).
+        if to_create and not dry_run:
+            for start in range(0, len(to_create), 100):
+                batch = to_create[start:start + 100]
+                batch_labels = create_labels[start:start + 100]
+                try:
+                    resp = client.bulk_create_manual_tax_mappings(batch)
+                    meta = resp.get("bulkActionMetadata", {}) if isinstance(resp, dict) else {}
+                    item_results = resp.get("results", []) if isinstance(resp, dict) else []
+                    failed_idx = {
+                        r.get("itemMetadata", {}).get("originalIndex")
+                        for r in item_results
+                        if not r.get("itemMetadata", {}).get("success", True)
+                    }
+                    for i, lbl in enumerate(batch_labels):
+                        if i in failed_idx:
+                            logger.warning("   ⚠️  Failed to create mapping for %s", lbl)
+                            results["failed"].append(lbl)
+                        else:
+                            logger.info("   ➕ Created mapping: %s", lbl)
+                            results["created"].append(lbl)
+                    logger.debug(
+                        "   Bulk create: %s succeeded, %s failed",
+                        meta.get("totalSuccesses", "?"),
+                        meta.get("totalFailures", "?"),
+                    )
+                except Exception as exc:
+                    logger.warning("   ⚠️  Bulk create failed: %s", exc)
+                    results["failed"].extend(batch_labels)
+                time.sleep(0.3)
+        elif to_create and dry_run:
+            # Dry-run creates were already recorded per-row above.
+            pass
+
+        logger.info("\n📈 Push Complete!\n")
+
+        if results["updated"]:
+            label = "Would update" if dry_run else "Updated"
+            logger.info("♻️  %s: %d location(s)", label, len(results["updated"]))
+            for n in results["updated"]:
+                logger.info("  • %s", n)
+
+        if results["created"]:
+            label = "Would create" if dry_run else "Created"
+            logger.info("\n➕ %s: %d mapping(s)", label, len(results["created"]))
+            for n in results["created"]:
+                logger.info("  • %s", n)
+
+        if results["skipped"]:
+            logger.info("\n⏭️  Skipped (no rate / no change): %d", len(results["skipped"]))
+
+        if results["invalid"]:
+            logger.warning(
+                "\n⚠️  Could not act (missing region_id/group_id): %d",
+                len(results["invalid"]),
+            )
+            for n in results["invalid"]:
+                logger.warning("  • %s", n)
+
+        if results["failed"]:
+            logger.error("\n❌ Failed: %d", len(results["failed"]))
+            for n in results["failed"]:
+                logger.error("  • %s", n)
+
+        return len(results["failed"]) == 0
+    except Exception as exc:
+        logger.error("Fatal error during site config push: %s", exc)
         return False
 
 

@@ -34,6 +34,7 @@ class AppConfig:
     generated_events_tab: str = "generated_events"
     config_events_tab: str = "config_events"
     category_config_tab: str = "category_config"
+    site_config_tab: str = "site_config"
     # Separate source sheet for generate command (defaults to google_sheet_id if not set)
     source_sheet_id: Optional[str] = None
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
@@ -96,6 +97,7 @@ def load_config() -> AppConfig:
         defaults_tab=os.getenv("DEFAULTS_TAB", "defaults"),
         generated_events_tab=os.getenv("GENERATED_EVENTS_TAB", "generated_events"),
         category_config_tab=os.getenv("CATEGORY_CONFIG_TAB", "category_config"),
+        site_config_tab=os.getenv("SITE_CONFIG_TAB", "site_config"),
         source_sheet_id=os.getenv("SOURCE_SHEET_ID"),
     )
 

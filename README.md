@@ -26,6 +26,65 @@ python sync_events.py test      # Test Wix connection
 python sync_events.py sync      # Run the sync
 ```
 
+## Non-Techie Walkthrough
+
+Once setup is done (above), this is the routine for actually getting events onto Wix. Open a terminal in this project folder and run each command in order — wait for one to finish before starting the next. If anything errors out, stop and ask before re-running.
+
+### Part 1 — Push new events to Wix (the main upload)
+
+This takes your planning spreadsheet and publishes everything to Wix.
+
+```bash
+# 1. Rebuild the "generated_events" tab from your source spreadsheet
+#    (merges rolling_schedule + class_info, applies pricing).
+python sync_events.py prepare-sheet
+
+# 2. Open your Google Sheet and review the "generated_events" tab in your browser.
+#    Fix any typos, descriptions, or image links directly in that tab.
+
+# 3. Push everything from "generated_events" up to Wix.
+python sync_events.py sync
+```
+
+Tips:
+
+- To work on just one month, add `-m march` (or `mar`, `MAR`, etc.) to step 1: `python sync_events.py prepare-sheet -m march`.
+- To upload as drafts first so you can review on Wix before going live, use `python sync_events.py sync --draft` for step 3.
+- Re-running `sync` is safe — events that already exist on Wix are updated if they changed, and skipped if they didn't.
+
+### Part 2 — Edit events that are already live on Wix
+
+After events are uploaded, you can keep editing them from a spreadsheet instead of clicking around the Wix dashboard. Pick **one** of the two options below depending on what you need to change.
+
+**Option A — change anything (descriptions, prices, dates, location, etc.)**
+
+```bash
+# 1. Pull the current live events from Wix into the "config_events" tab.
+python sync_events.py pull-config
+
+# 2. Edit values in the "config_events" tab in Google Sheets.
+
+# 3. Preview what will change (recommended — nothing is sent to Wix yet).
+python sync_events.py push-config --dry-run
+
+# 4. If the preview looks right, push your edits to Wix for real.
+python sync_events.py push-config
+```
+
+**Option B — only change categories (safer; nothing else can be touched)**
+
+```bash
+# 1. Pull events into the "category_config" tab.
+python sync_events.py pull-categories
+
+# 2. Edit only the "categories" column in that tab. Other columns are read-only.
+
+# 3. Push the category changes back to Wix.
+python sync_events.py push-categories
+```
+
+Add `--scope all` to either `pull-categories` or `push-categories` if you also need to retag past events (default is upcoming/in-progress only). Use `--dry-run` with `push-categories` to preview first.
+
 ## Commands
 
 ```bash
@@ -50,6 +109,11 @@ python sync_events.py pull-categories --scope all           # past + present + f
 python sync_events.py push-categories                       # default --scope upcoming
 python sync_events.py push-categories --scope all
 python sync_events.py push-categories --scope all --dry-run # preview only
+
+# Site config: bulk eCommerce tax-by-location (pay-link checkout tax)
+python sync_events.py pull-site-config            # Snapshot tax regions/mappings into site_config tab
+python sync_events.py push-site-config --dry-run  # Preview rate changes
+python sync_events.py push-site-config            # Apply rates (e.g. 13% HST) to every location
 
 # Using Make shortcuts
 make setup          # Complete setup
@@ -114,6 +178,26 @@ A slim 8-column round-trip whose only editable field is `categories`. Useful whe
 - **Matching**: rows match by `event_id` first; rows with a blank `event_id` fall back to `(title, start_date, start_time)`, so you can hand-add rows in a pinch.
 - **Wix call surface on push**: only `iter_events`, `query_categories`, `create_category`, `assign_event_to_category`, and `unassign_event_from_category`. No `update_event`, no ticket calls, no media calls.
 - **Tab names**: `category_config` (editable) plus `category_config_last_pull` (snapshot). Override the live tab name via `CATEGORY_CONFIG_TAB`.
+
+### Site config — tax by location (`site_config`)
+
+```bash
+python sync_events.py pull-site-config            # Snapshot Wix tax regions/mappings → site_config + site_config_last_pull
+python sync_events.py push-site-config --dry-run  # Preview rate changes
+python sync_events.py push-site-config            # Apply rates (e.g. 13% HST) to every location
+```
+
+A site-wide settings tab, starting with eCommerce **tax by location**. This is the tax that applies at checkout for **pay links** and other eCommerce purchases — it is completely separate from the per-event **ticket tax** handled by `config_events`/`push-config`.
+
+Under the hood these are Wix [manual tax mappings](https://dev.wix.com/docs/api-reference/business-solutions/e-commerce/extensions/tax/manual-tax-mappings/create-manual-tax-mapping): a tax rate attached to a (tax region + tax group) pair. Setting them by hand in the dashboard is one-at-a-time; this round-trip lets you set them all at once from a sheet.
+
+- **Tab layout**: columns are `setting_type`, `jurisdiction`, `region`, `tax_name`, `tax_type`, `tax_rate`, `region_id`, `group_id`, `mapping_id`, `revision`. Only `tax_name`, `tax_type`, and `tax_rate` are editable; read-only headers are prefixed with `(ro) ` and the header row is frozen. `setting_type` is `tax_location` for these rows (the column leaves room for other site settings later).
+- **Rates are percentages**: enter `13` for 13% HST. The tool converts to/from the Wix decimal form (`0.13`) automatically.
+- **Pull** lists one row per existing tax mapping, plus a blank-rate row for any tax region that has no mapping yet (so you can fill in a rate and create it on push).
+- **Push** updates a mapping when its rate/name/type differ, and bulk-creates a mapping for any region+group that has none. Blank `tax_rate` rows are skipped, and mappings are **never deleted**.
+- **Wix call surface on push**: only `query_manual_tax_mappings`, `update_manual_tax_mapping`, and `bulk_create_manual_tax_mappings` (all under `billing/v1`). No event, ticket, category, or media calls.
+- **Tab names**: `site_config` (editable) plus `site_config_last_pull` (snapshot). Override the live tab name via `SITE_CONFIG_TAB`.
+- **API permission**: the Wix API key must include the eCommerce **Manage Orders** scope for the tax endpoints to work. If `pull-site-config` reports no regions/mappings, that scope (or having any tax regions configured) is the usual cause.
 
 ## Google Sheet Format
 
@@ -210,6 +294,7 @@ SOURCE_SHEET_ID=your_source_spreadsheet_id  # optional; falls back to GOOGLE_SHE
 DEFAULTS_TAB=defaults
 GENERATED_EVENTS_TAB=generated_events
 CATEGORY_CONFIG_TAB=category_config         # optional; tab name for pull/push-categories
+SITE_CONFIG_TAB=site_config                 # optional; tab name for pull/push-site-config (tax by location)
 GOOGLE_CREDENTIALS={"type":"service_account"...}  # Full JSON on one line
 ```
 

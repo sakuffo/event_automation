@@ -164,6 +164,7 @@ GOOGLE_SHEET_ID=your_spreadsheet_id_from_step_1.5
 # ROLLING_SCHEDULE_TAB=rolling_schedule
 # CLASS_INFO_TAB=class_info
 # CATEGORY_CONFIG_TAB=category_config   # used by pull-categories / push-categories
+# SITE_CONFIG_TAB=site_config           # used by pull-site-config / push-site-config (tax by location)
 ```
 
 3. For `GOOGLE_CREDENTIALS`:
@@ -213,9 +214,16 @@ python sync_events.py pull-categories                       # default --scope up
 python sync_events.py pull-categories --scope all           # past + present + future
 python sync_events.py push-categories --dry-run             # preview
 python sync_events.py push-categories --scope all           # push for every non-draft event
+
+# Site config — bulk eCommerce tax-by-location (pay-link checkout tax)
+python sync_events.py pull-site-config            # Snapshot tax regions/mappings → site_config tab
+python sync_events.py push-site-config --dry-run  # Preview rate changes
+python sync_events.py push-site-config            # Apply rates (e.g. 13% HST) everywhere
 ```
 
 The categories round-trip writes to a separate `category_config` tab (override with `CATEGORY_CONFIG_TAB`) and only ever changes category assignments — descriptions and identifiers in that tab are read-only on push. See [README.md](README.md#config-round-trips) for the full sheet contract.
+
+The site-config round-trip writes to a separate `site_config` tab (override with `SITE_CONFIG_TAB`) and manages eCommerce **tax by location** (the tax pay links charge at checkout) — distinct from per-event ticket tax. Enter rates as percentages (e.g. `13`). It requires the Wix API key to have the eCommerce **Manage Orders** scope. See [README.md](README.md#config-round-trips) for the full sheet contract.
 
 ## Part 4: GitHub Actions Setup (10 minutes)
 

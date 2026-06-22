@@ -23,6 +23,11 @@ def _normalize_category_header(header: str) -> str:
     return lowered
 
 
+# Site config headers share the same ``(ro) `` marker convention as category
+# config, so the same normalizer applies.
+_normalize_site_config_header = _normalize_category_header
+
+
 logger = get_logger(__name__)
 
 
@@ -290,6 +295,64 @@ def fetch_category_config_rows(runtime: SyncRuntime) -> List[Dict[str, str]]:
         out.append(record)
 
     logger.info("Found %d category config rows", len(out))
+    return out
+
+
+def fetch_site_config_rows(runtime: SyncRuntime) -> List[Dict[str, str]]:
+    """Read raw rows from the ``site_config`` tab as plain dicts.
+
+    Headers are lowercased and any ``(ro) `` marker prefix is stripped so callers
+    can index by canonical column names (e.g. ``tax_rate``, ``region_id``). The
+    returned dicts always include every column from ``SITE_CONFIG_COLUMNS``
+    (missing values default to an empty string). Rows that carry neither a
+    ``region_id`` nor a ``mapping_id`` are skipped because they cannot be matched
+    back to a Wix tax region/mapping.
+    """
+    from .constants import SITE_CONFIG_COLUMNS
+
+    tab_name = runtime.config.site_config_tab
+    logger.info("📊 Fetching site config from '%s'...", tab_name)
+
+    service = runtime.get_sheets_service()
+    sheet_id = runtime.config.google_sheet_id
+    if not sheet_id:
+        raise ValueError("GOOGLE_SHEET_ID is not configured")
+
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=sheet_id, range=f"{tab_name}!A1:Z500")
+        .execute()
+    )
+
+    rows = result.get("values", [])
+    if not rows:
+        logger.warning("No data found in '%s' tab.", tab_name)
+        return []
+
+    header_keys = [_normalize_site_config_header(h) for h in rows[0]]
+    data_rows = rows[1:]
+
+    out: List[Dict[str, str]] = []
+    for row in data_rows:
+        if not row or not any(row):
+            continue
+        while len(row) < len(header_keys):
+            row.append("")
+
+        record: Dict[str, str] = {col: "" for col in SITE_CONFIG_COLUMNS}
+        for i, key in enumerate(header_keys):
+            if not key or key not in record:
+                continue
+            value = row[i]
+            record[key] = value.strip() if isinstance(value, str) else (str(value) if value is not None else "")
+
+        if not record.get("region_id") and not record.get("mapping_id"):
+            continue
+
+        out.append(record)
+
+    logger.info("Found %d site config rows", len(out))
     return out
 
 

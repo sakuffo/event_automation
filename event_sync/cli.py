@@ -31,6 +31,8 @@ def _ensure_command_config(command: str, config) -> None:
         "clean-synced",
         "pull-categories",
         "push-categories",
+        "pull-site-config",
+        "push-site-config",
     }:
         config.ensure_valid()
         return
@@ -53,22 +55,44 @@ def build_parser() -> argparse.ArgumentParser:
         description="Wix Events + Google Sheets integration",
     )
 
+    # Shared parent so --log-level works both before and after the subcommand.
+    # SUPPRESS ensures the subparser only sets log_level when explicitly given,
+    # so the top-level default ("INFO") survives if neither side provides it.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--log-level",
+        default=argparse.SUPPRESS,
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set log verbosity (default: INFO). Accepted before or after the subcommand.",
+    )
+
     parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set log verbosity (default: INFO)",
+        help="Set log verbosity (default: INFO). Accepted before or after the subcommand.",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("validate", help="Validate credentials and configuration")
-    subparsers.add_parser("test", help="Test Wix API connectivity")
-    subparsers.add_parser("list", help="List existing events in Wix")
-    subparsers.add_parser("publish-drafts", help="Publish all draft events in Wix")
+    subparsers.add_parser(
+        "validate",
+        parents=[common],
+        help="Validate credentials and configuration",
+    )
+    subparsers.add_parser(
+        "test", parents=[common], help="Test Wix API connectivity"
+    )
+    subparsers.add_parser(
+        "list", parents=[common], help="List existing events in Wix"
+    )
+    subparsers.add_parser(
+        "publish-drafts", parents=[common], help="Publish all draft events in Wix"
+    )
 
     clean_parser = subparsers.add_parser(
         "clean-synced",
+        parents=[common],
         help="Delete only rope+class events matching the generated sheet",
     )
     clean_parser.add_argument(
@@ -77,7 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show what would be deleted without deleting",
     )
 
-    sync_parser = subparsers.add_parser("sync", help="Sync events from Google Sheets")
+    sync_parser = subparsers.add_parser(
+        "sync", parents=[common], help="Sync events from Google Sheets"
+    )
     sync_parser.add_argument(
         "--no-tickets",
         action="store_true",
@@ -91,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate_parser = subparsers.add_parser(
         "generate",
+        parents=[common],
         help="Generate event data from rolling_schedule + class_info tabs",
     )
     generate_parser.add_argument(
@@ -107,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prepare_parser = subparsers.add_parser(
         "prepare-sheet",
+        parents=[common],
         aliases=["prepare"],
         help="Step 1: Rebuild destination tab in GOOGLE_SHEET_ID from SOURCE_SHEET_ID",
     )
@@ -120,11 +148,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "pull-config",
+        parents=[common],
         help="Pull all published Wix events into config_events master tab",
     )
 
     push_config_parser = subparsers.add_parser(
         "push-config",
+        parents=[common],
         help="Push config_events updates to existing Wix events",
     )
     push_config_parser.add_argument(
@@ -135,6 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pull_cats_parser = subparsers.add_parser(
         "pull-categories",
+        parents=[common],
         help="Pull category assignments into the category_config tab",
     )
     pull_cats_parser.add_argument(
@@ -146,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     push_cats_parser = subparsers.add_parser(
         "push-categories",
+        parents=[common],
         help="Push category edits from category_config back to Wix",
     )
     push_cats_parser.add_argument(
@@ -155,6 +187,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="upcoming (default) only acts on UPCOMING/STARTED rows; all acts on every row",
     )
     push_cats_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without making any API calls",
+    )
+
+    subparsers.add_parser(
+        "pull-site-config",
+        parents=[common],
+        help="Pull eCommerce tax-by-location settings into the site_config tab",
+    )
+
+    push_site_parser = subparsers.add_parser(
+        "push-site-config",
+        parents=[common],
+        help="Push site_config tax-location edits (rates) back to Wix",
+    )
+    push_site_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would change without making any API calls",
@@ -247,6 +296,16 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         if args.command == "push-categories":
             from .orchestrator import push_category_config
             ok = push_category_config(runtime, scope=args.scope, dry_run=args.dry_run)
+            return 0 if ok else 1
+
+        if args.command == "pull-site-config":
+            from .orchestrator import pull_site_config
+            ok = pull_site_config(runtime)
+            return 0 if ok else 1
+
+        if args.command == "push-site-config":
+            from .orchestrator import push_site_config
+            ok = push_site_config(runtime, dry_run=args.dry_run)
             return 0 if ok else 1
 
         parser.print_help()

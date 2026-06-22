@@ -505,6 +505,153 @@ class WixClient:
             params={'eventId': event_id},
         )
 
+    # Tax Operations (eCommerce manual tax mappings)
+
+    def _paged_query(
+        self,
+        endpoint: str,
+        array_key: str,
+        base_query: Optional[Dict[str, Any]] = None,
+        page_size: int = 100,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield results across all pages for Wix cursor-paged query endpoints.
+
+        These ``billing/v1`` tax endpoints use ``cursorPaging`` (next/prev cursor
+        tokens) rather than the offset paging used by :meth:`_paged_post`.
+        """
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+
+        cursor: Optional[str] = None
+        while True:
+            query: Dict[str, Any] = deepcopy(base_query) if base_query else {}
+            paging = query.setdefault('cursorPaging', {})
+            paging['limit'] = page_size
+            if cursor:
+                paging['cursor'] = cursor
+            else:
+                paging.pop('cursor', None)
+
+            response = self._request('POST', endpoint, json={'query': query})
+            payload = response.json() or {}
+            items = payload.get(array_key, []) or []
+
+            for item in items:
+                yield item
+
+            metadata = payload.get('pagingMetadata') or {}
+            cursors = metadata.get('cursors') or {}
+            cursor = cursors.get('next')
+            if not cursor or not metadata.get('hasNext'):
+                break
+
+    def query_tax_regions(self) -> List[Dict[str, Any]]:
+        """Return all eCommerce tax regions on the site."""
+        try:
+            return list(self._paged_query('/billing/v1/tax-regions/query', 'taxRegions'))
+        except Exception as exc:
+            logger.warning("Could not query tax regions: %s", exc)
+            return []
+
+    def query_tax_groups(self) -> List[Dict[str, Any]]:
+        """Return all eCommerce tax groups on the site."""
+        try:
+            return list(self._paged_query('/billing/v1/tax-groups/query', 'taxGroups'))
+        except Exception as exc:
+            logger.warning("Could not query tax groups: %s", exc)
+            return []
+
+    def query_manual_tax_mappings(self) -> List[Dict[str, Any]]:
+        """Return all manual tax mappings (tax rate per region/group combo)."""
+        try:
+            return list(
+                self._paged_query(
+                    '/billing/v1/manual-tax-mappings/query', 'manualTaxMappings'
+                )
+            )
+        except Exception as exc:
+            logger.warning("Could not query manual tax mappings: %s", exc)
+            return []
+
+    def create_manual_tax_mapping(
+        self,
+        *,
+        tax_group_id: str,
+        tax_region_id: str,
+        tax_rate: str,
+        tax_name: Optional[str] = None,
+        tax_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+        jurisdiction_type: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a single manual tax mapping. ``tax_rate`` is decimal (``0.13``)."""
+        mapping: Dict[str, Any] = {
+            'taxGroupId': tax_group_id,
+            'taxRegionId': tax_region_id,
+            'taxRate': tax_rate,
+        }
+        if tax_name:
+            mapping['taxName'] = tax_name
+        if tax_type:
+            mapping['taxType'] = tax_type
+        if jurisdiction:
+            mapping['jurisdiction'] = jurisdiction
+        if jurisdiction_type:
+            mapping['jurisdictionType'] = jurisdiction_type
+        if description:
+            mapping['description'] = description
+
+        response = self._request(
+            'POST',
+            '/billing/v1/manual-tax-mappings',
+            json={'manualTaxMapping': mapping},
+        )
+        return response.json().get('manualTaxMapping', {})
+
+    def update_manual_tax_mapping(
+        self,
+        mapping_id: str,
+        revision: str,
+        *,
+        tax_rate: Optional[str] = None,
+        tax_name: Optional[str] = None,
+        tax_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update an existing manual tax mapping. ``tax_rate`` is decimal (``0.13``)."""
+        mapping: Dict[str, Any] = {
+            'id': mapping_id,
+            'revision': revision,
+        }
+        if tax_rate is not None:
+            mapping['taxRate'] = tax_rate
+        if tax_name is not None:
+            mapping['taxName'] = tax_name
+        if tax_type is not None:
+            mapping['taxType'] = tax_type
+
+        response = self._request(
+            'PATCH',
+            f'/billing/v1/manual-tax-mappings/{mapping_id}',
+            json={'manualTaxMapping': mapping},
+        )
+        return response.json().get('manualTaxMapping', {})
+
+    def bulk_create_manual_tax_mappings(
+        self,
+        mappings: List[Dict[str, Any]],
+        return_entity: bool = False,
+    ) -> Dict[str, Any]:
+        """Create up to 100 manual tax mappings in a single request."""
+        if not mappings:
+            return {}
+        response = self._request(
+            'POST',
+            '/billing/v1/bulk/manual-tax-mappings/create',
+            json={'manualTaxMappings': mappings, 'returnEntity': return_entity},
+        )
+        return response.json()
+
     # Utility Methods
 
     def search_events_by_title(self, title: str) -> List[Dict[str, Any]]:

@@ -101,6 +101,66 @@ CONFIG_COLUMNS = [
     "tax_type",
 ]
 
+# Column order for the site_config tab (bulk site-wide settings).
+# Currently holds one row per eCommerce tax location ("tax_location" setting
+# type). Only tax_name / tax_type / tax_rate are editable; the rest are
+# read-only context + matching keys for the Wix manual-tax-mapping API.
+SITE_CONFIG_COLUMNS = [
+    "setting_type",
+    "jurisdiction",
+    "region",
+    "tax_name",
+    "tax_type",
+    "tax_rate",
+    "region_id",
+    "group_id",
+    "mapping_id",
+    "revision",
+]
+
+SITE_CONFIG_EDITABLE_COLUMNS = frozenset({"tax_name", "tax_type", "tax_rate"})
+
+SITE_CONFIG_READONLY_COLUMNS = frozenset(
+    c for c in SITE_CONFIG_COLUMNS if c not in SITE_CONFIG_EDITABLE_COLUMNS
+)
+
+# Value of the setting_type column for tax-location rows in site_config.
+TAX_LOCATION_SETTING = "tax_location"
+
+
+def tax_rate_percent_to_decimal(value: str) -> str:
+    """Convert a human percent (``"13"`` or ``"13%"``) to a Wix decimal string.
+
+    ``"13"`` -> ``"0.13"``. Returns ``""`` for blank/invalid input so callers
+    can treat it as "no rate specified".
+    """
+    text = str(value or "").strip().rstrip("%").strip()
+    if not text:
+        return ""
+    try:
+        return str(float(text) / 100)
+    except ValueError:
+        return ""
+
+
+def tax_rate_decimal_to_percent(value: str) -> str:
+    """Convert a Wix decimal rate (``"0.130000"``) to a human percent (``"13"``).
+
+    Returns ``""`` for blank/invalid input. Whole percents drop the trailing
+    ``.0`` so ``"0.13"`` displays as ``"13"`` rather than ``"13.0"``.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        pct = float(text) * 100
+    except ValueError:
+        return ""
+    if pct == int(pct):
+        return str(int(pct))
+    return str(round(pct, 6))
+
+
 MAX_WIX_IMAGE_BYTES = 25 * 1024 * 1024
 
 

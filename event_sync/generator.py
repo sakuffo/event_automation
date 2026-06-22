@@ -858,6 +858,123 @@ def write_category_config_to_sheet(
         return False
 
 
+def write_site_config_to_sheet(
+    rows: List[Dict[str, Any]],
+    runtime: SyncRuntime,
+    tab_name: str,
+) -> bool:
+    """Write site-config rows into a tab.
+
+    Read-only columns are prefixed with ``(ro) `` in the header row so editors
+    can see at a glance that only ``tax_name`` / ``tax_type`` / ``tax_rate`` get
+    pushed back to Wix. The header row is frozen and ``tax_rate`` is
+    right-aligned, matching the look of the other config tabs.
+    """
+    from .constants import SITE_CONFIG_COLUMNS, SITE_CONFIG_READONLY_COLUMNS
+
+    logger.info(
+        "Writing %d rows to site config tab '%s'...",
+        len(rows),
+        tab_name,
+    )
+
+    service = runtime.get_sheets_service()
+    sheet_id = runtime.config.google_sheet_id
+    if not sheet_id:
+        raise ValueError("GOOGLE_SHEET_ID is not configured")
+
+    header_row = [
+        f"(ro) {col}" if col in SITE_CONFIG_READONLY_COLUMNS else col
+        for col in SITE_CONFIG_COLUMNS
+    ]
+    sheet_rows: List[List[Any]] = [header_row]
+    for row_data in rows:
+        sheet_rows.append([row_data.get(col, "") for col in SITE_CONFIG_COLUMNS])
+
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        sheets = spreadsheet.get("sheets", [])
+        tab_exists = any(
+            s.get("properties", {}).get("title") == tab_name for s in sheets
+        )
+        if not tab_exists:
+            logger.info("   Creating new tab '%s'...", tab_name)
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=sheet_id,
+                body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]},
+            ).execute()
+    except Exception as exc:
+        logger.error("Failed to check/create tab: %s", exc)
+        return False
+
+    try:
+        range_name = f"{tab_name}!A1:Z{len(sheet_rows) + 10}"
+        service.spreadsheets().values().clear(
+            spreadsheetId=sheet_id, range=range_name, body={},
+        ).execute()
+        service.spreadsheets().values().update(
+            spreadsheetId=sheet_id,
+            range=f"{tab_name}!A1",
+            valueInputOption="USER_ENTERED",
+            body={"values": sheet_rows},
+        ).execute()
+
+        spreadsheet_meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+        sheet_gid = None
+        for s in spreadsheet_meta.get("sheets", []):
+            if s.get("properties", {}).get("title") == tab_name:
+                sheet_gid = s["properties"]["sheetId"]
+                break
+
+        if sheet_gid is not None:
+            requests: List[Dict[str, Any]] = []
+            requests.append({
+                "updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_gid,
+                        "gridProperties": {"frozenRowCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount",
+                }
+            })
+            right_align_cols = {"tax_rate"}
+            col_indices = [
+                i for i, c in enumerate(SITE_CONFIG_COLUMNS)
+                if c in right_align_cols
+            ]
+            for col_idx in col_indices:
+                requests.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_gid,
+                            "startRowIndex": 1,
+                            "endRowIndex": len(sheet_rows),
+                            "startColumnIndex": col_idx,
+                            "endColumnIndex": col_idx + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "horizontalAlignment": "RIGHT",
+                            }
+                        },
+                        "fields": "userEnteredFormat.horizontalAlignment",
+                    }
+                })
+            if requests:
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=sheet_id,
+                    body={"requests": requests},
+                ).execute()
+
+        logger.info(
+            "   Successfully wrote %d rows to '%s'", len(rows), tab_name,
+        )
+        return True
+    except Exception as exc:
+        logger.error("Failed to write site config sheet: %s", exc)
+        return False
+
+
 def pull_config_events(runtime: SyncRuntime) -> bool:
     """Pull all published events from Wix into config_events and config_events_last_pull."""
     logger.info("Pulling all events from Wix...\n")
