@@ -90,6 +90,7 @@ Replaces the `defaults` tab, and holds the pipeline defaults (seeded by
 | `default_tax_rate` | 13 | Percent (13 = 13%) |
 | `default_tax_type` | ADDED_AT_CHECKOUT | Or INCLUDED_IN_PRICE |
 | `default_fee_type` | FEE_ADDED_AT_CHECKOUT | Wix service fee handling on tickets |
+| `default_duration_hours` | 2 | End time = start + this many hours when a row has no end time (template Default End Time wins when set) |
 
 ### Site Config — tax by location
 

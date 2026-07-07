@@ -77,6 +77,7 @@ DEFAULT_SETTINGS_SEED: List[tuple] = [
     ("default_tax_rate", DEFAULT_TAX_RATE, "Ticket tax rate as a percent (13 = 13%)"),
     ("default_tax_type", DEFAULT_TAX_TYPE, "ADDED_AT_CHECKOUT or INCLUDED_IN_PRICE"),
     ("default_fee_type", DEFAULT_FEE_TYPE, "Wix service fee handling for tickets (FEE_ADDED_AT_CHECKOUT or NO_FEE)"),
+    ("default_duration_hours", "2", "End time = start + this many hours when a row has no end time"),
 ]
 
 
@@ -655,6 +656,15 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
 _BASELINE_TAGS = ["rope", "class"]
 
 
+def _default_duration_hours(settings: Dict[str, str]) -> float:
+    """Event length assumed when a row has a start but no usable end."""
+    try:
+        hours = float((settings.get("default_duration_hours") or "").strip())
+        return hours if 0 < hours <= 24 else 2.0
+    except (TypeError, ValueError):
+        return 2.0
+
+
 def _normalize_hhmm(text: str) -> str:
     """Normalize a time string to zero-padded HH:MM (``"2:30"`` -> ``"02:30"``).
 
@@ -736,50 +746,73 @@ def _apply_row_defaults(
     if not (row.get("event_name") or "").strip():
         return props, changes
 
-    # Schedule: a template can carry default start/end times (HH:MM) so a
-    # date-only Date property becomes a full schedule. Only blank time parts
-    # are filled; a time someone picked in Notion stays as-is. Without a
-    # start time (typed or defaulted) the Date is left alone — enrich will
-    # flag the missing time as before.
-    if klass and (row.get("start_date") or "").strip():
-        tpl_start = _normalize_hhmm(klass.get("default_start_time") or "")
-        tpl_end = _normalize_hhmm(klass.get("default_end_time") or "")
-        if (row.get("start_time") or "").strip() or tpl_start:
-            filled: List[str] = []
-            if not (row.get("start_time") or "").strip():
-                row["start_time"] = tpl_start
-                filled.append(f"start time {tpl_start}")
-            if not (row.get("end_time") or "").strip() and tpl_end:
-                row["end_time"] = tpl_end
-                filled.append(f"end time {tpl_end}")
-            if filled:
-                if not (row.get("end_date") or "").strip():
-                    row["end_date"] = row["start_date"]
-                end_time = (row.get("end_time") or "").strip()
-                # Overnight events (Voyeur 21:00 -> 03:00): an end at or
-                # before the start on the same day rolls to the next day.
-                if (
-                    end_time
-                    and row["end_date"] == row["start_date"]
-                    and end_time <= (row.get("start_time") or "")
-                ):
+    # Schedule: template default times (HH:MM) fill blank time parts; a start
+    # without a usable end gets a default duration (Settings
+    # ``default_duration_hours``); an end at/before the start on the same day
+    # is read as overnight and rolls to the next day. Everything is written
+    # back so Notion shows the schedule that will be pushed. Times someone
+    # picked stay as-is (a zero-duration end counts as unset — Wix rejects
+    # those outright).
+    start_date_iso = (row.get("start_date") or "").strip()
+    if start_date_iso:
+        tpl_start = _normalize_hhmm((klass or {}).get("default_start_time") or "")
+        tpl_end = _normalize_hhmm((klass or {}).get("default_end_time") or "")
+        schedule_changes: List[str] = []
+
+        if not (row.get("start_time") or "").strip() and tpl_start:
+            row["start_time"] = tpl_start
+            schedule_changes.append(f"start time {tpl_start}")
+
+        start_time = (row.get("start_time") or "").strip()
+        end_time = (row.get("end_time") or "").strip()
+        end_date_iso = (row.get("end_date") or "").strip() or start_date_iso
+
+        if start_time:
+            zero_duration = end_time == start_time and end_date_iso == start_date_iso
+            if not end_time or zero_duration:
+                new_end = tpl_end if tpl_end and tpl_end != start_time else ""
+                if new_end:
+                    schedule_changes.append(f"end time {new_end}")
+                else:
+                    hours = _default_duration_hours(settings)
                     try:
-                        start_day = datetime.strptime(
-                            row["start_date"], "%Y-%m-%d"
+                        end_dt = datetime.strptime(
+                            start_time, "%H:%M"
+                        ) + timedelta(hours=hours)
+                        new_end = end_dt.strftime("%H:%M")
+                        schedule_changes.append(
+                            f"end time {new_end} (start + {hours:g}h)"
                         )
-                        row["end_date"] = (
-                            start_day + timedelta(days=1)
-                        ).strftime("%Y-%m-%d")
                     except ValueError:
-                        pass
-                props[EventProps.DATE] = p_date(
-                    row["start_date"],
-                    row["start_time"],
-                    row["end_date"] if end_time else None,
-                    end_time or None,
-                    tz_name=tz_name,
-                )
-                changes.extend(filled)
+                        new_end = ""
+                if new_end:
+                    row["end_time"] = new_end
+                    row["end_date"] = start_date_iso
+                    end_time = new_end
+                    end_date_iso = start_date_iso
+
+            # Overnight: an end at/before the start on the same day means it
+            # runs past midnight (Voyeur 21:00 -> 03:00).
+            if end_time and end_date_iso == start_date_iso and end_time <= start_time:
+                try:
+                    next_day = datetime.strptime(
+                        start_date_iso, "%Y-%m-%d"
+                    ) + timedelta(days=1)
+                    row["end_date"] = next_day.strftime("%Y-%m-%d")
+                    end_date_iso = row["end_date"]
+                    schedule_changes.append("end rolls past midnight")
+                except ValueError:
+                    pass
+
+        if schedule_changes:
+            props[EventProps.DATE] = p_date(
+                start_date_iso,
+                (row.get("start_time") or "").strip() or None,
+                (row.get("end_date") or "").strip() or None,
+                (row.get("end_time") or "").strip() or None,
+                tz_name=tz_name,
+            )
+            changes.extend(schedule_changes)
 
     # Staffing: template default instructor (before the description fill,
     # which prepends "Instructors: ..." from this field).

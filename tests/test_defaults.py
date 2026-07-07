@@ -3,6 +3,10 @@
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
+import pytest
+from pydantic import ValidationError
+
+from event_sync.models import EventRecord
 from event_sync.notion_orchestrator import (
     DEFAULT_SETTINGS_SEED,
     _apply_row_defaults,
@@ -263,6 +267,84 @@ class TestTemplateScheduleDefaults:
         _apply_row_defaults(row, klass, {})
         assert row["start_time"] == "09:00"
         assert row["end_time"] == "11:30"
+
+
+class TestDurationFallback:
+    """Rows with a start but no usable end get a default duration."""
+
+    def test_missing_end_gets_default_duration(self):
+        row = bare_row(start_time="19:00", end_date="", end_time="")
+        props, changes = _apply_row_defaults(row, None, {})
+
+        assert row["end_time"] == "21:00"
+        assert row["end_date"] == "2026-09-01"
+        assert props[EventProps.DATE]["date"]["end"] == "2026-09-01T21:00:00"
+        assert any("start + 2h" in c for c in changes)
+
+    def test_zero_duration_end_is_replaced(self):
+        # This is the "New Event" failure mode: end == start -> Wix 400.
+        row = bare_row(start_time="23:00", end_date="2026-09-01", end_time="23:00")
+        props, _ = _apply_row_defaults(row, None, {})
+
+        assert row["end_time"] == "01:00"
+        assert row["end_date"] == "2026-09-02"  # rolled past midnight
+        date_value = props[EventProps.DATE]["date"]
+        assert date_value["start"] == "2026-09-01T23:00:00"
+        assert date_value["end"] == "2026-09-02T01:00:00"
+
+    def test_duration_setting_is_honored(self):
+        row = bare_row(start_time="19:00", end_date="", end_time="")
+        _apply_row_defaults(row, None, {"default_duration_hours": "3.5"})
+        assert row["end_time"] == "22:30"
+
+    def test_template_end_beats_duration_fallback(self):
+        row = bare_row(start_time="19:00", end_date="", end_time="")
+        klass = sample_class(default_end_time="23:00")
+        _apply_row_defaults(row, klass, {})
+        assert row["end_time"] == "23:00"
+
+    def test_typed_overnight_end_rolls_forward(self):
+        row = bare_row(start_time="21:00", end_date="2026-09-01", end_time="01:00")
+        props, changes = _apply_row_defaults(row, None, {})
+
+        assert row["end_date"] == "2026-09-02"
+        assert "end rolls past midnight" in changes
+        assert props[EventProps.DATE]["date"]["end"] == "2026-09-02T01:00:00"
+
+    def test_valid_typed_times_are_untouched(self):
+        row = bare_row(start_time="19:00", end_time="21:00")
+        props, _ = _apply_row_defaults(row, None, {})
+        assert EventProps.DATE not in props
+
+
+class TestDurationValidation:
+    def _record_kwargs(self, **overrides):
+        kwargs = dict(
+            name="Test",
+            start_date="2026-09-01",
+            start_time="19:00",
+            end_date="2026-09-01",
+            end_time="21:00",
+            location="Studio",
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_zero_duration_is_rejected_with_clear_message(self):
+        with pytest.raises(ValidationError, match="End must be after start"):
+            EventRecord(**self._record_kwargs(end_time="19:00"))
+
+    def test_negative_duration_is_rejected(self):
+        with pytest.raises(ValidationError, match="End must be after start"):
+            EventRecord(**self._record_kwargs(end_time="18:00"))
+
+    def test_overnight_with_next_day_end_date_is_valid(self):
+        record = EventRecord(
+            **self._record_kwargs(
+                start_time="21:00", end_date="2026-09-02", end_time="01:00"
+            )
+        )
+        assert record.end_date == "2026-09-02"
 
 
 class TestEnrichNameFill:

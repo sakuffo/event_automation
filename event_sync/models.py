@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import ClassVar, FrozenSet, List, Optional, Tuple
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .utils import convert_date_to_iso
 
@@ -82,6 +88,26 @@ class EventRecord(BaseModel):
                 f"registration_type must be one of {', '.join(sorted(VALID_REGISTRATION_TYPES))}"
             )
         return normalized
+
+    @model_validator(mode="after")
+    def ensure_positive_duration(self) -> "EventRecord":
+        """Wix rejects events whose end is at or before the start."""
+        try:
+            start = datetime.strptime(
+                f"{self.start_date} {self.start_time}", "%Y-%m-%d %H:%M"
+            )
+            end = datetime.strptime(
+                f"{self.end_date} {self.end_time}", "%Y-%m-%d %H:%M"
+            )
+        except ValueError:  # pragma: no cover - field validators catch these
+            return self
+        if end <= start:
+            raise ValueError(
+                "End must be after start — set an End Time on the Date "
+                f"(got {self.start_date} {self.start_time} → "
+                f"{self.end_date} {self.end_time})"
+            )
+        return self
 
     @field_validator("ticket_price")
     @classmethod
