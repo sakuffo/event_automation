@@ -67,6 +67,7 @@ class WixClient:
             'Content-Type': content_type
         }
 
+
         # Add account ID if available (required for some APIs like Site Media)
         if self.account_id:
             headers['wix-account-id'] = self.account_id
@@ -136,6 +137,7 @@ class WixClient:
         page_size: int,
         *,
         initial_offset: int = 0,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield results across all pages for Wix POST query endpoints."""
 
@@ -158,10 +160,13 @@ class WixClient:
                 if offset:
                     paging['offset'] = offset
                 elif 'offset' in paging:
-                    # Normalise any user-provided offset when zero
                     paging['offset'] = 0
 
-            response = self._request('POST', endpoint, json={'query': query})
+            body: Dict[str, Any] = {'query': query}
+            if extra_body:
+                body.update(extra_body)
+
+            response = self._request('POST', endpoint, json=body)
             payload = response.json() or {}
             items = payload.get(array_key, []) or []
 
@@ -201,6 +206,7 @@ class WixClient:
         include_drafts: bool = True,
         status_filter: Optional[str] = None,
         offset: int = 0,
+        fieldsets: Optional[List[str]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield events across all pages with cursor/offset pagination."""
 
@@ -210,12 +216,17 @@ class WixClient:
         elif not include_drafts:
             base_query['filter'] = {'status': {'$ne': 'DRAFT'}}
 
+        extra: Optional[Dict[str, Any]] = None
+        if fieldsets:
+            extra = {'fieldsets': fieldsets}
+
         yield from self._paged_post(
             '/events/v3/events/query',
             'events',
             base_query,
             page_size,
             initial_offset=offset,
+            extra_body=extra,
         )
 
     def get_event(self, event_id: str, include_registration: bool = True) -> Dict[str, Any]:
@@ -227,30 +238,45 @@ class WixClient:
         response = self._request('GET', f'/events/v3/events/{event_id}', params=params)
         return response.json().get('event', {})
 
-    def create_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new event with V3 API
-
-        Supports registration types: RSVP, TICKETS, RSVP_AND_TICKETS
-        """
+    def create_event(self, event_data: Dict[str, Any], draft: bool = False) -> Dict[str, Any]:
+        """Create a new event. Pass ``draft=True`` to create as a draft."""
+        payload: Dict[str, Any] = {'event': event_data}
+        if draft:
+            payload['draft'] = True
         response = self._request(
             'POST',
             '/events/v3/events',
-            json={'event': event_data}
+            json=payload,
         )
         return response.json().get('event', {})
 
     def update_event(self, event_id: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
         """Update an existing event"""
         response = self._request(
-            'POST',
+            'PATCH',
             f'/events/v3/events/{event_id}',
             json={'event': event_data}
         )
         return response.json().get('event', {})
 
-    def delete_event(self, event_id: str) -> bool:
-        """Delete an event"""
+    def has_orders(self, event_id: str) -> bool:
+        """Check if an event has any ticket orders."""
         try:
+            orders = list(islice(self.iter_orders(event_id=event_id, page_size=1), 1))
+            return len(orders) > 0
+        except Exception:
+            return True
+
+    def delete_event(self, event_id: str, force: bool = False) -> bool:
+        """Delete an event. Refuses if the event has orders unless force=True."""
+        try:
+            if not force and self.has_orders(event_id):
+                logger.error(
+                    "Refusing to delete event %s — it has existing orders. "
+                    "Use force=True to override.",
+                    event_id,
+                )
+                return False
             self._request('DELETE', f'/events/v3/events/{event_id}')
             return True
         except Exception as exc:
@@ -260,6 +286,15 @@ class WixClient:
     def publish_event(self, event_id: str) -> Dict[str, Any]:
         """Publish a draft event (changes status from DRAFT to UPCOMING)"""
         response = self._request('POST', f'/events/v3/events/{event_id}/publish')
+        return response.json().get('event', {})
+
+    def cancel_event(self, event_id: str) -> Dict[str, Any]:
+        """Cancel an event (closes registration; Wix may notify registrants).
+
+        After cancellation the event status becomes CANCELED. Wix cannot
+        un-cancel — reuse requires clone + publish.
+        """
+        response = self._request('POST', f'/events/v3/events/{event_id}/cancel')
         return response.json().get('event', {})
 
     # Ticket/Registration Operations
@@ -338,52 +373,293 @@ class WixClient:
         # Fallback (shouldn't happen)
         raise WixApiError("Upload succeeded but no file descriptor returned")
 
-    def create_ticket_definition(self, event_id: str, ticket_name: str, price: float,
-                                 capacity: Optional[int] = None, currency: str = "CAD") -> Dict[str, Any]:
-        """
-        Create a ticket definition for a TICKETING event
-
-        Args:
-            event_id: The event ID to create tickets for
-            ticket_name: Name of the ticket (e.g., "General Admission")
-            price: Ticket price (e.g., 25.00)
-            capacity: Maximum number of tickets available (optional)
-            currency: Currency code (default: CAD)
-
-        Returns:
-            Dict containing the created ticket definition
-
-        Note:
-            - Only works for events with registration.initialType = "TICKETING"
-            - Uses simple defaults suitable for small business use
-            - Buyer pays fees (standard Wix configuration)
-        """
-        ticket_data = {
-            "ticketDefinition": {
-                "eventId": event_id,  # Required in body
-                "name": ticket_name,
-                "limitPerCheckout": 10,  # Max tickets per order
-                "pricingMethod": {
-                    "fixedPrice": {
-                        "value": str(price),
-                        "currency": currency
-                    }
-                },
-                "feeType": "FEE_ADDED_AT_CHECKOUT"  # Required: Buyer pays fees
-            }
+    def create_ticket_definition(
+        self,
+        event_id: str,
+        ticket_name: str,
+        price: float,
+        capacity: Optional[int] = None,
+        limit_per_checkout: int = 4,
+        currency: str = "CAD",
+        fee_type: str = "FEE_ADDED_AT_CHECKOUT",
+        sale_start: Optional[str] = None,
+        sale_end: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a ticket definition for a TICKETING event."""
+        definition: Dict[str, Any] = {
+            "eventId": event_id,
+            "name": ticket_name,
+            "limitPerCheckout": limit_per_checkout,
+            "pricingMethod": {
+                "fixedPrice": {
+                    "value": str(price),
+                    "currency": currency,
+                }
+            },
+            "feeType": fee_type,
         }
 
-        # Add capacity limit if specified
-        if capacity:
-            ticket_data["ticketDefinition"]["limited"] = True
-            ticket_data["ticketDefinition"]["quantity"] = capacity
+        if capacity is not None and capacity > 0:
+            definition["initialLimit"] = capacity
+
+        if sale_start or sale_end:
+            sale_period: Dict[str, Any] = {}
+            if sale_start:
+                sale_period["startDate"] = sale_start
+            if sale_end:
+                sale_period["endDate"] = sale_end
+            definition["salePeriod"] = sale_period
 
         response = self._request(
             'POST',
             '/events-ticket-definitions/v3/ticket-definitions',
-            json=ticket_data
+            json={"ticketDefinition": definition},
+        )
+        result = response.json().get('ticketDefinition', {})
+
+        actual_limit = result.get("initialLimit") or result.get("actualLimit")
+        is_limited = result.get("limited", False)
+        if capacity is not None and capacity > 0:
+            if not is_limited or actual_limit != capacity:
+                logger.warning(
+                    "Ticket capacity mismatch — requested %d, got limited=%s actualLimit=%s",
+                    capacity, is_limited, actual_limit,
+                )
+
+        return result
+
+    def update_ticket_definition(
+        self,
+        ticket_def_id: str,
+        revision: str,
+        *,
+        price: Optional[float] = None,
+        capacity: Optional[int] = None,
+        currency: str = "CAD",
+    ) -> Dict[str, Any]:
+        """Update an existing ticket definition's price and/or capacity."""
+        update: Dict[str, Any] = {
+            "id": ticket_def_id,
+            "revision": revision,
+        }
+        if price is not None:
+            update["pricingMethod"] = {
+                "fixedPrice": {"value": str(price), "currency": currency}
+            }
+        if capacity is not None and capacity > 0:
+            update["initialLimit"] = capacity
+
+        response = self._request(
+            'PATCH',
+            f'/events-ticket-definitions/v3/ticket-definitions/{ticket_def_id}',
+            json={"ticketDefinition": update},
         )
         return response.json().get('ticketDefinition', {})
+
+    def get_ticket_definitions(
+        self, event_id: str, include_sales: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return all ticket definitions for an event."""
+        try:
+            body: Dict[str, Any] = {'query': {'filter': {'eventId': event_id}}}
+            if include_sales:
+                body['fields'] = ['SALES_DETAILS']
+            response = self._request(
+                'POST',
+                '/events-ticket-definitions/v3/ticket-definitions/query',
+                json=body,
+            )
+            return response.json().get('ticketDefinitions', [])
+        except Exception as exc:
+            logger.warning("Could not query ticket definitions for %s: %s", event_id, exc)
+            return []
+
+    # Category Operations
+
+    def query_categories(self) -> List[Dict[str, Any]]:
+        """Return all event categories on the site."""
+        try:
+            response = self._request(
+                'POST',
+                '/events/v1/categories/query',
+                json={'query': {'paging': {'limit': 100}}},
+            )
+            return response.json().get('categories', [])
+        except Exception as exc:
+            logger.warning("Could not query categories: %s", exc)
+            return []
+
+    def create_category(self, name: str) -> Dict[str, Any]:
+        """Create a single event category and return it."""
+        response = self._request(
+            'POST',
+            '/events/v1/categories',
+            json={'category': {'name': name, 'states': ['MANUAL']}},
+        )
+        return response.json().get('category', {})
+
+    def assign_event_to_category(self, category_id: str, event_id: str) -> None:
+        """Assign an event to a category."""
+        self._request(
+            'POST',
+            f'/events/v1/categories/{category_id}/events',
+            json={'eventId': [event_id]},
+        )
+
+    def unassign_event_from_category(self, category_id: str, event_id: str) -> None:
+        """Remove an event from a category."""
+        self._request(
+            'DELETE',
+            f'/events/v1/categories/{category_id}/events',
+            params={'eventId': event_id},
+        )
+
+    # Tax Operations (eCommerce manual tax mappings)
+
+    def _paged_query(
+        self,
+        endpoint: str,
+        array_key: str,
+        base_query: Optional[Dict[str, Any]] = None,
+        page_size: int = 100,
+    ) -> Iterator[Dict[str, Any]]:
+        """Yield results across all pages for Wix cursor-paged query endpoints.
+
+        These ``billing/v1`` tax endpoints use ``cursorPaging`` (next/prev cursor
+        tokens) rather than the offset paging used by :meth:`_paged_post`.
+        """
+        if page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+
+        cursor: Optional[str] = None
+        while True:
+            query: Dict[str, Any] = deepcopy(base_query) if base_query else {}
+            paging = query.setdefault('cursorPaging', {})
+            paging['limit'] = page_size
+            if cursor:
+                paging['cursor'] = cursor
+            else:
+                paging.pop('cursor', None)
+
+            response = self._request('POST', endpoint, json={'query': query})
+            payload = response.json() or {}
+            items = payload.get(array_key, []) or []
+
+            for item in items:
+                yield item
+
+            metadata = payload.get('pagingMetadata') or {}
+            cursors = metadata.get('cursors') or {}
+            cursor = cursors.get('next')
+            if not cursor or not metadata.get('hasNext'):
+                break
+
+    def query_tax_regions(self) -> List[Dict[str, Any]]:
+        """Return all eCommerce tax regions on the site."""
+        try:
+            return list(self._paged_query('/billing/v1/tax-regions/query', 'taxRegions'))
+        except Exception as exc:
+            logger.warning("Could not query tax regions: %s", exc)
+            return []
+
+    def query_tax_groups(self) -> List[Dict[str, Any]]:
+        """Return all eCommerce tax groups on the site."""
+        try:
+            return list(self._paged_query('/billing/v1/tax-groups/query', 'taxGroups'))
+        except Exception as exc:
+            logger.warning("Could not query tax groups: %s", exc)
+            return []
+
+    def query_manual_tax_mappings(self) -> List[Dict[str, Any]]:
+        """Return all manual tax mappings (tax rate per region/group combo)."""
+        try:
+            return list(
+                self._paged_query(
+                    '/billing/v1/manual-tax-mappings/query', 'manualTaxMappings'
+                )
+            )
+        except Exception as exc:
+            logger.warning("Could not query manual tax mappings: %s", exc)
+            return []
+
+    def create_manual_tax_mapping(
+        self,
+        *,
+        tax_group_id: str,
+        tax_region_id: str,
+        tax_rate: str,
+        tax_name: Optional[str] = None,
+        tax_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+        jurisdiction_type: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a single manual tax mapping. ``tax_rate`` is decimal (``0.13``)."""
+        mapping: Dict[str, Any] = {
+            'taxGroupId': tax_group_id,
+            'taxRegionId': tax_region_id,
+            'taxRate': tax_rate,
+        }
+        if tax_name:
+            mapping['taxName'] = tax_name
+        if tax_type:
+            mapping['taxType'] = tax_type
+        if jurisdiction:
+            mapping['jurisdiction'] = jurisdiction
+        if jurisdiction_type:
+            mapping['jurisdictionType'] = jurisdiction_type
+        if description:
+            mapping['description'] = description
+
+        response = self._request(
+            'POST',
+            '/billing/v1/manual-tax-mappings',
+            json={'manualTaxMapping': mapping},
+        )
+        return response.json().get('manualTaxMapping', {})
+
+    def update_manual_tax_mapping(
+        self,
+        mapping_id: str,
+        revision: str,
+        *,
+        tax_rate: Optional[str] = None,
+        tax_name: Optional[str] = None,
+        tax_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update an existing manual tax mapping. ``tax_rate`` is decimal (``0.13``)."""
+        mapping: Dict[str, Any] = {
+            'id': mapping_id,
+            'revision': revision,
+        }
+        if tax_rate is not None:
+            mapping['taxRate'] = tax_rate
+        if tax_name is not None:
+            mapping['taxName'] = tax_name
+        if tax_type is not None:
+            mapping['taxType'] = tax_type
+
+        response = self._request(
+            'PATCH',
+            f'/billing/v1/manual-tax-mappings/{mapping_id}',
+            json={'manualTaxMapping': mapping},
+        )
+        return response.json().get('manualTaxMapping', {})
+
+    def bulk_create_manual_tax_mappings(
+        self,
+        mappings: List[Dict[str, Any]],
+        return_entity: bool = False,
+    ) -> Dict[str, Any]:
+        """Create up to 100 manual tax mappings in a single request."""
+        if not mappings:
+            return {}
+        response = self._request(
+            'POST',
+            '/billing/v1/bulk/manual-tax-mappings/create',
+            json={'manualTaxMappings': mappings, 'returnEntity': return_entity},
+        )
+        return response.json()
 
     # Utility Methods
 

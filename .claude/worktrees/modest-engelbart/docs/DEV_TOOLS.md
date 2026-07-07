@@ -370,6 +370,14 @@ Run this mini-regression before shipping changes to the sync pipeline:
 - Auto-ticket creation is enabled by default when `registration_type == "TICKETING"` and `ticket_price > 0`.
 - Run `python sync_events.py sync --no-tickets` to confirm the opt-out path still logs the skip message.
 
+### Config Round-Trip Smoke Tests
+
+- `python sync_events.py pull-config` writes `config_events` + `config_events_last_pull` for every `UPCOMING`/`STARTED` event.
+- `python sync_events.py push-config --dry-run` enumerates pending event/category/tax/ticket diffs without touching Wix.
+- `python sync_events.py pull-categories` writes the slim 8-column `category_config` tab; rerun with `--scope all` to include past events (sorted future-first).
+- `python sync_events.py push-categories --dry-run` lists every `assign`/`unassign` it would issue. With `--scope upcoming` (default), past-event rows are bucketed as `out_of_scope` and skipped — confirm by mixing one `ENDED` row in with `UPCOMING` rows.
+- Regression: edit only a description column in `category_config` and run `push-categories`; verify zero API calls related to that event other than the read used for the diff.
+
 ### Follow-Up Checks
 
 - `python dev_events.py list` → confirm newly created events.

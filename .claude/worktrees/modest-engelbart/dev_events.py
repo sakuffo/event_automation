@@ -204,9 +204,7 @@ def update_event_title(client: WixClient, event_id: str, new_title: str):
     print(f"Updating event {event_id}...")
 
     try:
-        event = client.get_event(event_id)
-        event['title'] = new_title
-        result = client.update_event(event_id, event)
+        result = client.update_event(event_id, {'title': new_title})
 
         print(f"✅ Event updated successfully!")
         print(f"   New Title: {result.get('title')}")

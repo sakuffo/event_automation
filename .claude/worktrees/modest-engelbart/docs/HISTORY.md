@@ -7,12 +7,12 @@ This document consolidates all historical documentation, changelogs, and develop
 ## Table of Contents
 
 1. [Project Timeline](#project-timeline)
-2. [Changelog](#changelog)
+2. [Changelog](#changelog) — most recent: Categories-Only Round-Trip (2026-04-18)
 3. [Hardening & Modularization (2025-10-31)](#hardening--modularization-2025-10-31)
 4. [Code Refactor (2025-10-07)](#code-refactor-2025-10-07)
 5. [Ticket Automation Implementation (2025-10-08)](#ticket-automation-implementation-2025-10-08)
 6. [Documentation Organization (2025-10-07)](#documentation-organization-2025-10-07)
-6. [Code Audit](#code-audit)
+7. [Code Audit](#code-audit)
 
 ---
 
@@ -61,6 +61,28 @@ This document consolidates all historical documentation, changelogs, and develop
 ---
 
 ## Changelog
+
+### [2026-04-18] - Categories-Only Round-Trip
+**Status:** ✅ Complete
+
+#### Added
+- New CLI commands `pull-categories` and `push-categories` that round-trip only the `categories` field for Wix events.
+- `--scope upcoming|all` flag (default `upcoming`) on both new commands. `upcoming` keeps only `UPCOMING`/`STARTED` events (matching `pull-config`); `all` includes every non-draft event (past, present, future).
+- `--dry-run` on `push-categories` for previewing every `assign`/`unassign` call.
+- New env-driven sheet tab `CATEGORY_CONFIG_TAB` (default `category_config`) plus a `category_config_last_pull` snapshot mirroring the `pull-config` pattern.
+- New 8-column sheet contract — `event_name`, `categories`, `short_description`, `detailed_description`, `start_date`, `start_time`, `status`, `event_id` — with read-only headers prefixed `(ro) ` and a frozen header row. Only `categories` is consulted on push.
+- Match-by-`event_id` resolution with a `(title, start_date, start_time)` fallback so hand-added rows still work.
+- New orchestrator helpers `pull_category_config` and `push_category_config` reusing the existing `_resolve_category_id` cache and `_localize_wix_start` helper.
+- `tests/test_orchestrator_category_config.py` covering row construction, scope filtering, add/remove diff, matching fallback, dry-run, and a regression that asserts editing a description column never triggers `update_event`.
+
+#### Changed
+- `event_sync/config.py` gained `category_config_tab` driven by `CATEGORY_CONFIG_TAB`.
+- `event_sync/cli.py` wires the new commands through `_ensure_command_config` (full Wix + Sheets credentials).
+- `CLAUDE.md`, `README.md`, and `SETUP.md` document the new commands, the `--scope` flag, and the new env var.
+
+#### Constraints
+- The push path is intentionally limited to `iter_events`, `query_categories`, `create_category`, `assign_event_to_category`, and `unassign_event_from_category`. It never calls `update_event`, ticket APIs, or media APIs.
+- Descriptions are pulled for human reference but silently ignored on push.
 
 ### [2025-11-03] - Wix Description Formatting & Timezone Fix
 **Status:** ✅ Complete
@@ -736,5 +758,5 @@ All documentation verified against working code:
 ---
 
 **Document Created:** 2025-10-15
-**Last Updated:** 2025-10-31
+**Last Updated:** 2026-04-18
 **Status:** Complete

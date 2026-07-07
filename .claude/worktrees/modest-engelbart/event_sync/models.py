@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import ClassVar, FrozenSet, List, Optional, Tuple
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .utils import convert_date_to_iso
 
@@ -15,6 +24,7 @@ VALID_REGISTRATION_TYPES = {"RSVP", "TICKETING", "EXTERNAL", "NO_REGISTRATION"}
 
 class EventRecord(BaseModel):
     name: str = Field(..., min_length=1)
+    category: Optional[str] = None
     event_type: Optional[str] = None
     start_date: str
     start_time: str
@@ -22,11 +32,29 @@ class EventRecord(BaseModel):
     end_time: str
     location: str = Field(..., min_length=1)
     ticket_price: float = 0.0
-    capacity: int = 100
+    capacity: int = 24
     registration_type: str = "RSVP"
     image_url: Optional[str] = None
     teaser: Optional[str] = None
     description: Optional[str] = None
+
+    # Extended fields for config_events (optional, used by push-config)
+    # For multiple tickets, separate with ; (e.g. "Regular; Student")
+    ticket_name: Optional[str] = None
+    ticket_price_raw: Optional[str] = None
+    ticket_capacity: Optional[str] = None
+    fee_type: Optional[str] = None
+    sale_start: Optional[str] = None
+    sale_end: Optional[str] = None
+    tax_name: Optional[str] = None
+    tax_rate: Optional[str] = None
+    tax_type: Optional[str] = None
+
+    # Notion-backend bookkeeping (populated when the record comes from Notion).
+    notion_page_id: Optional[str] = None
+    wix_event_id: Optional[str] = None
+    status: Optional[str] = None
+    synced_hash: Optional[str] = None
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -61,6 +89,26 @@ class EventRecord(BaseModel):
             )
         return normalized
 
+    @model_validator(mode="after")
+    def ensure_positive_duration(self) -> "EventRecord":
+        """Wix rejects events whose end is at or before the start."""
+        try:
+            start = datetime.strptime(
+                f"{self.start_date} {self.start_time}", "%Y-%m-%d %H:%M"
+            )
+            end = datetime.strptime(
+                f"{self.end_date} {self.end_time}", "%Y-%m-%d %H:%M"
+            )
+        except ValueError:  # pragma: no cover - field validators catch these
+            return self
+        if end <= start:
+            raise ValueError(
+                "End must be after start — set an End Time on the Date "
+                f"(got {self.start_date} {self.start_time} → "
+                f"{self.end_date} {self.end_time})"
+            )
+        return self
+
     @field_validator("ticket_price")
     @classmethod
     def ensure_non_negative_price(cls, value: float) -> float:
@@ -74,7 +122,13 @@ class EventRecord(BaseModel):
             raise ValueError("capacity must be greater than zero")
         return value_int
 
-    @field_validator("image_url", "teaser", "description", "event_type", mode="before")
+    @field_validator(
+        "image_url", "teaser", "description", "event_type", "category",
+        "ticket_name", "ticket_price_raw", "ticket_capacity",
+        "fee_type", "sale_start", "sale_end",
+        "tax_name", "tax_rate", "tax_type",
+        mode="before",
+    )
     @classmethod
     def empty_str_to_none(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -84,10 +138,143 @@ class EventRecord(BaseModel):
 
     def to_payload(self) -> dict:
         """Return a plain dict suitable for orchestration or logging."""
-
         return self.model_dump()
 
+    # Fields that influence what gets pushed to Wix. Bookkeeping fields
+    # (notion_page_id, wix_event_id, status, synced_hash) are excluded so the
+    # hash only changes when a human edit would change the Wix payload.
+    HASHED_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "name",
+        "category",
+        "start_date",
+        "start_time",
+        "end_date",
+        "end_time",
+        "location",
+        "ticket_price",
+        "capacity",
+        "registration_type",
+        "image_url",
+        "teaser",
+        "description",
+        "ticket_name",
+        "ticket_price_raw",
+        "ticket_capacity",
+        "fee_type",
+        "sale_start",
+        "sale_end",
+        "tax_name",
+        "tax_rate",
+        "tax_type",
+    )
 
-__all__ = ["EventRecord", "ValidationError"]
+    # Fields holding semicolon-separated lists whose tokens may be numeric.
+    _SEMICOLON_FIELDS: ClassVar[FrozenSet[str]] = frozenset(
+        {"ticket_name", "ticket_price_raw", "ticket_capacity", "category"}
+    )
+
+    @staticmethod
+    def _canonical_token(token: str) -> str:
+        token = token.strip()
+        try:
+            number = float(token)
+        except ValueError:
+            return token
+        if number == int(number):
+            return str(int(number))
+        return str(number)
+
+    @classmethod
+    def _canonical_hash_value(cls, field: str, value) -> str:
+        """Normalize a field value so formatting drift doesn't change the hash.
+
+        ``None`` and ``""`` collapse together, floats drop trailing zeros
+        (``35.00`` == ``35``), and semicolon lists normalize token spacing.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return cls._canonical_token(str(value))
+        text = str(value).strip()
+        if not text:
+            return ""
+        if field in cls._SEMICOLON_FIELDS or field == "tax_rate":
+            tokens = [cls._canonical_token(t) for t in text.split(";")]
+            return "; ".join(t for t in tokens if t)
+        return text
+
+    def content_hash(self) -> str:
+        """Stable hash of the sync-relevant fields.
+
+        Stored in Notion as ``Synced Hash`` after a successful push so later
+        runs can detect edits to already-published rows without a snapshot tab.
+        """
+        payload = {
+            field: self._canonical_hash_value(field, getattr(self, field))
+            for field in self.HASHED_FIELDS
+        }
+        # ticket_price is derived from ticket_price_raw whenever raw is set,
+        # so hash only the raw form to keep round-tripped records stable.
+        if payload.get("ticket_price_raw"):
+            payload["ticket_price"] = ""
+        canonical = json.dumps(payload, sort_keys=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class TicketSpec:
+    """Parsed ticket definition from the tickets column."""
+    name: str
+    price: float
+    capacity: int = 24
+    limit_per_checkout: int = 4
+
+
+def parse_tickets(
+    ticket_name: Optional[str] = None,
+    ticket_price=None,
+    ticket_capacity: Optional[str] = None,
+    default_capacity: int = 24,
+) -> List[TicketSpec]:
+    """Build ticket specs from separate name/price/capacity fields.
+
+    Each field can hold multiple values separated by ``;`` for multi-ticket events.
+    ``ticket_price`` can be a float, int, or semicolon-separated string.
+    """
+    if not ticket_name or ticket_price is None:
+        return []
+
+    names = [n.strip() for n in ticket_name.split(";") if n.strip()]
+    if not names:
+        return []
+
+    price_str = str(ticket_price)
+    price_parts = [p.strip() for p in price_str.split(";")]
+    prices: List[float] = []
+    for p in price_parts:
+        try:
+            prices.append(float(p))
+        except ValueError:
+            prices.append(0.0)
+
+    # Parse capacities
+    cap_parts = [c.strip() for c in (ticket_capacity or "").split(";")] if ticket_capacity else []
+    capacities: List[int] = []
+    for c in cap_parts:
+        try:
+            capacities.append(int(c)) if c else capacities.append(default_capacity)
+        except ValueError:
+            capacities.append(default_capacity)
+
+    specs: List[TicketSpec] = []
+    for i, name in enumerate(names):
+        price = prices[i] if i < len(prices) else prices[-1] if prices else 0.0
+        capacity = capacities[i] if i < len(capacities) else default_capacity
+        specs.append(TicketSpec(name=name, price=price, capacity=capacity))
+
+    return specs
+
+
+__all__ = ["EventRecord", "TicketSpec", "parse_tickets", "ValidationError"]
 
 

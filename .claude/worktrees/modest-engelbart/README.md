@@ -1,13 +1,31 @@
-# Wix Events + Google Sheets Auto-Sync (Python)
+# Wix Events Automation with a Notion Backend (Python)
 
-Automatically sync events from Google Sheets to your Wix Events website using GitHub Actions. Simple Python script, runs daily, zero cost.
+Events are planned in a Notion workspace and pushed to the Wix Events website
+by a Python CLI — run locally or on a GitHub Actions schedule. Anyone on the
+team can drop an event placeholder into Notion; the system enriches it from
+the class catalog, a human flips it to Ready, and the sync publishes it to
+Wix with tickets, categories, and images.
+
+> The previous Google Sheets pipeline still works side by side (see
+> [Legacy Google Sheets pipeline](#legacy-google-sheets-pipeline)) and will be
+> removed once the Notion flow has proven itself through a full posting cycle.
 
 ## What This Does
 
-1. Reads events from a Google Sheet (your event planning spreadsheet)
-2. Creates those events in Wix Events via API v3
-3. Runs automatically every day at 9 AM EST
-4. Costs $0/month (uses free tiers)
+1. Team members add events to the **Event Scheduling** database in Notion (a name that
+   matches a catalog template + a date is enough)
+2. `enrich` fills in the blanks (categories, price, description, image) from
+   the **Catalog** (class + recurring-event templates) and **Settings** defaults
+3. A human reviews the Draft in Notion and flips Status to **Ready**
+4. `sync` creates the event in Wix (tickets, categories, image included) and
+   writes back the Wix ID, sync time, and status — so Notion always shows
+   what's posted, what's pending, and what failed
+5. Once a row is Published, the Wix website is the source of truth: each sync
+   refreshes the Notion row from the live event. To push local Notion edits
+   back to Wix instead, flip the row to **Update** — it's pushed on the next
+   sync and lands back on Published
+
+Full backend reference: [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md)
 
 ## Quick Start
 
@@ -20,236 +38,234 @@ make setup           # Using Makefile
 # Windows
 setup.bat            # Run setup script
 
-# Test and run
-python sync_events.py validate  # Check credentials
-python sync_events.py test      # Test Wix connection
-python sync_events.py sync      # Run the sync
+# Configure .env (see Environment Variables below), then:
+python sync_events.py validate      # Check credentials
+python sync_events.py test          # Test Wix connection
+
+# One-time Notion bootstrap
+python sync_events.py setup-notion   # Create the 4 databases, print their IDs
+#   -> copy the printed NOTION_*_DB_ID values into .env
+python sync_events.py import-classes # Seed the Catalog DB from the class_info sheet
+python sync_events.py pull           # Backfill the Event Scheduling DB from live Wix events
 ```
+
+## The Routine (day to day)
+
+1. **Add events in Notion** — new row in the Event Scheduling DB with Status `Idea`,
+   a Name matching a catalog template (or a linked Template), and a Date.
+   Anyone can do this. Set up the default "New Event" template once (see
+   [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#default-new-event-template-create-by-hand--the-api-cant-create-templates))
+   so new rows come pre-filled with the never-changing fields (HST 13% at
+   checkout, fee at checkout, location, capacity); the pipeline also fills
+   any blanks from the Settings DB automatically.
+
+```bash
+# 2. Fill in the blanks from the catalog (Idea -> Draft). `sync` runs this
+#    pass automatically, so this standalone command is optional (preview/debug).
+python sync_events.py enrich
+
+# 3. Review the Draft rows in Notion, fix anything, flip Status to Ready.
+
+# 4. Preview, then push to Wix (sync enriches first; --no-enrich to skip)
+python sync_events.py sync --dry-run
+python sync_events.py sync
+```
+
+Tips:
+
+- Month filter: `python sync_events.py enrich -m aug sep` / `sync -m aug`.
+- `sync --draft` creates events as Wix drafts; re-run `sync` without the flag
+  to publish them.
+- Re-running `sync` is always safe — unchanged rows are skipped (content
+  hash), Published rows are refreshed from Wix, failures land in the row's
+  `Sync Error` with Status `Error`.
+- To edit live events, edit the row in Notion, flip Status to `Update`, and
+  run `sync` — the changes are pushed to Wix and the row returns to
+  `Published`. (Editing a `Published` row without the flip gets overwritten
+  from Wix on the next sync, since the website is authoritative for
+  Published rows.)
 
 ## Commands
 
 ```bash
-# Using Python directly
-python sync_events.py validate  # Validate credentials
-python sync_events.py test      # Test Wix API connection
-python sync_events.py list      # List existing Wix events
-python sync_events.py prepare-sheet  # Step 1: Rebuild generated_events tab
-python sync_events.py prepare-sheet -m mar  # Step 1 for March only
-python sync_events.py sync      # Sync events from Google Sheets
-python sync_events.py generate --output-sheet my_tab  # Custom generation target
-python sync_events.py generate --output-sheet my_tab -m March  # Custom tab + month filter
+# Setup / diagnostics
+python sync_events.py validate            # Validate credentials (Wix + Google + Notion)
+python sync_events.py test                # Test Wix API connection
+python sync_events.py list                # List existing Wix events
 
-# Using Make shortcuts
-make setup          # Complete setup
-make validate       # Validate credentials
-make test          # Test connection
-make list          # List events
-make sync          # Run sync
-make install-dev   # Install dev/test dependencies
-make unit          # Run pytest suite
-make clean         # Clean up files
+# Notion pipeline
+python sync_events.py setup-notion        # One-time: create Notion databases
+python sync_events.py import-classes      # One-time: class_info sheet -> Catalog DB
+python sync_events.py pull                # Wix -> Notion backfill/refresh (--scope all for past events)
+python sync_events.py enrich              # Fill blanks on Idea/Draft rows (-m for months; sync does this too)
+python sync_events.py sync                # Enrich pass + push Ready/Update rows, refresh Published rows from Wix (--no-enrich, --dry-run, --draft, -m)
+
+# Site config: eCommerce tax-by-location (pay-link checkout tax)
+python sync_events.py pull-site-config    # Wix tax regions/mappings -> Notion Site Config DB
+python sync_events.py push-site-config --dry-run
+python sync_events.py push-site-config    # Apply rates (e.g. 13% HST) to every location
 ```
 
 All CLI subcommands accept `--log-level` (e.g., `python sync_events.py sync --log-level DEBUG`).
 
-## Two-Step Workflow (Manual Step 2)
+## Notion Data Model
 
-```bash
-# Step 1: Rebuild destination tab in GOOGLE_SHEET_ID from SOURCE_SHEET_ID
-python sync_events.py prepare-sheet
-# Optional month filter: mar, MAR, March, etc.
-python sync_events.py prepare-sheet -m March
+Four databases, created by `setup-notion` (details and property tables in
+[docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md)):
 
-# Step 2 (manual): Push events from GOOGLE_SHEET_ID into Wix
-python sync_events.py sync
-```
+- **Event Scheduling** — one row per event (scheduled or still being
+  ideated); the single source of truth until publication. Lifecycle: `Idea →
+  Draft → Ready → Published` (plus `Error`, `Skip`). Published rows mirror
+  the live Wix event (sync refreshes them from the website); flip a row to
+  `Update` to push local edits back to Wix, `Cancel` to cancel it on Wix
+  (row becomes `Cancelled`), or `Delete` to remove it from Wix entirely
+  (row becomes `Removed`). Sync bookkeeping (`Wix Event ID`, `Last Synced`,
+  `Synced Hash`, `Sync Error`) is code-owned.
+- **Catalog** — class and recurring-event templates (`Type` = class/event;
+  categories, tagline, description, image, optional price/capacity
+  overrides). Enrichment matches by relation or name.
+- **Settings** — key/value defaults (`default_img`, …).
+- **Site Config** — one row per tax location; only name/type/rate are pushed.
 
-Notes:
+Recommended views to add by hand: Calendar on Date, Board by Status, a
+"Needs attention" table filtered to non-empty Sync Error.
 
-- `prepare-sheet` fully clears and rewrites the destination tab each run.
-- Destination tab defaults to `generated_events` and can be changed via `GENERATED_EVENTS_TAB`.
-- Source tabs default to `rolling_schedule` and `class_info` and can be changed via `ROLLING_SCHEDULE_TAB` and `CLASS_INFO_TAB`.
-- `defaults.default_img` is used as the fallback `image_url` when `class_info.image_link` is empty.
+## Automation (GitHub Actions)
 
-## Google Sheet Format
+[.github/workflows/sync-events.yml](.github/workflows/sync-events.yml) runs
+`sync` (which starts with an enrich pass) daily at 9 AM EST, on manual
+dispatch, and on `repository_dispatch` (type `notion-sync`) so a Notion
+button/automation webhook can trigger an instant run — see
+[docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
 
-Your spreadsheet should have these columns (A-L):
-
-| Event Name | Event Type | Start Date | Start Time | End Date | End Time | Location | Description | Ticket Price | Capacity | Registration Type | Image URL |
-|------------|------------|------------|------------|----------|----------|----------|-------------|--------------|----------|-------------------|-----------|
-| Workshop 1 | Workshop   | 2024-03-15 | 14:00      | 2024-03-15 | 16:00   | Room 101 | Learn basics | 0           | 30       | RSVP             | https://drive.google.com/file/d/ABC123... |
-
-- **Dates**: YYYY-MM-DD format
-- **Times**: HH:MM (24-hour format)
-- **Registration Types**:
-  - `RSVP` - Free RSVP events
-  - `TICKETS` - Creates ticketed event (shows "Tickets are not on sale" until you add tickets via Dashboard)
-  - `EXTERNAL` - External registration
-  - `NO_REGISTRATION` - Display only
-- **Image URL** (Column L): Google Drive link to event image (optional)
-  - Accepts full URL, short URL, or just the file ID
-  - Must be shared with service account or set to "Anyone with the link"
-
-## How It Works
-
-- **Modular Python package (`event_sync/`)** - reusable components for Sheets, Drive, and Wix
-- **Google Sheets API** reads your spreadsheet using service account auth
-- **Wix Events API v3** creates events on your Wix site via REST API
-- **GitHub Actions** runs the sync automatically (daily + manual trigger)
-- **Duplicate detection & updates** - skips identical events and patches changes from Sheets
-
-### Why Python REST API?
-
-This project uses Python + Wix REST API instead of JavaScript SDK because:
-
-- ✅ Simple Google Sheets integration (Python libraries)
-- ✅ Perfect for automated scripts (GitHub Actions)
-- ✅ Creates TICKETING event placeholders - tickets added manually via Dashboard
-- ✅ One language/codebase for small business simplicity
-- ✅ No complex ticket pricing automation needed
-
-**JavaScript SDK would be better for:** Web apps, Node.js backends, real-time webhooks, or automated ticket creation/pricing via API.
-
-### Update Behavior
-
-- Events are keyed by title, start date, and start time so the sync can spot existing records.
-- When the sheet changes schedule, location, registration type, teaser, description, or title, the Wix event is patched instead of skipped.
-- Unchanged rows log as skipped to avoid unnecessary API calls.
-- Ticket definitions are still created only on insert; adjust them manually in Wix if pricing or capacity changes later.
-
-## Project Structure
-
-```
-.
-├── event_sync/                # Modular sync package (config, CLI, services)
-│   ├── __init__.py
-│   ├── cli.py
-│   ├── config.py
-│   ├── constants.py
-│   ├── images.py
-│   ├── logging_utils.py
-│   ├── models.py
-│   ├── orchestrator.py
-│   ├── runtime.py
-│   └── sheets.py
-├── sync_events.py             # Compatibility wrapper (delegates to package CLI)
-├── wix_client.py              # Reusable Wix API client library
-├── dev_events.py              # Development: Event CRUD operations
-├── dev_tickets.py             # Development: Ticket/RSVP automation
-├── requirements.txt            # Python dependencies
-├── requirements-dev.txt        # Dev/test dependencies (pytest)
-├── .env                       # Your credentials (create manually; see SETUP.md)
-├── setup.sh                   # Unix/Mac setup script
-├── setup.bat                  # Windows setup script
-├── Makefile                   # Command shortcuts
-├── .github/
-│   └── workflows/
-│       ├── ci.yml             # CI pipeline (lint + tests)
-│       └── sync-events.yml    # GitHub Actions workflow
-├── README.md                  # This file
-├── SETUP.md                   # Detailed setup guide
-├── DEV_TOOLS.md              # Development tools documentation
-├── docs/CODE_AUDIT.md        # Architecture snapshot & hardening checklist
-└── CHECKLIST.md              # Setup checklist
-```
+Required repo secrets: `WIX_API_KEY`, `WIX_ACCOUNT_ID`, `WIX_SITE_ID`,
+`GOOGLE_CREDENTIALS` (Drive images), `NOTION_ACCESS_TOKEN`, and the four
+`NOTION_*_DB_ID` values.
 
 ## Environment Variables
 
 Create a `.env` file with:
 
 ```bash
+# Wix
 WIX_API_KEY=your_wix_api_key
 WIX_ACCOUNT_ID=your_account_id
 WIX_SITE_ID=your_site_id
-GOOGLE_SHEET_ID=your_spreadsheet_id
-SOURCE_SHEET_ID=your_source_spreadsheet_id  # optional; falls back to GOOGLE_SHEET_ID
-DEFAULTS_TAB=defaults
-GENERATED_EVENTS_TAB=generated_events
+
+# Notion
+NOTION_ACCESS_TOKEN=ntn_...                 # integration token (share the parent page with it)
+NOTION_PARENT_PAGE_ID=...                   # only needed by setup-notion
+NOTION_EVENT_SCHEDULING_DB_ID=...           # printed by setup-notion (was NOTION_EVENTS_DB_ID; old name still accepted)
+NOTION_CATALOG_DB_ID=...                    # was NOTION_CLASSES_DB_ID (old name still accepted)
+NOTION_SETTINGS_DB_ID=...
+NOTION_SITE_CONFIG_DB_ID=...
+
+# Google (Drive image downloads + legacy sheet commands)
 GOOGLE_CREDENTIALS={"type":"service_account"...}  # Full JSON on one line
+GOOGLE_SHEET_ID=your_spreadsheet_id               # legacy pipeline + import-classes
+SOURCE_SHEET_ID=your_source_spreadsheet_id        # optional; falls back to GOOGLE_SHEET_ID
 ```
 
-## Cost Breakdown
+Optional: `ENV_MODE=development` + `DEV_WIX_*` for a sandbox Wix site, and the
+legacy tab-name overrides (`GENERATED_EVENTS_TAB`, `CATEGORY_CONFIG_TAB`,
+`SITE_CONFIG_TAB`, `ROLLING_SCHEDULE_TAB`, `CLASS_INFO_TAB`, `DEFAULTS_TAB`).
 
-**$0/month** using free tiers:
-- Google Sheets API: 100 requests/100 seconds (free)
-- Wix Events API: Included with Wix site
-- GitHub Actions: 2,000 minutes/month free
-- Daily sync uses ~30 seconds = 15 minutes/month
+## How It Works
 
-## Requirements
+- **Modular Python package (`event_sync/`)** — `notion_store.py` owns all
+  Notion I/O (API version `2025-09-03`, data-source aware);
+  `notion_orchestrator.py` composes Notion with the existing Wix call paths
+- **Wix Events API v3** creates/patches events via REST (`wix_client.py`)
+- **Google Drive** still hosts event images; `images.py` downloads (Drive API
+  or plain HTTP), resizes with Pillow, and uploads to Wix Media
+- **Duplicate detection** — rows match Wix by `Wix Event ID` first, then by
+  title+date+time; unchanged rows are skipped via a content hash
+- **Registration type normalization** — `TICKETS` in Notion maps to
+  `TICKETING` in the Wix API
+- **Category pricing** — `CATEGORY_PRICING` in `event_sync/constants.py`
+  (class `Price Override` in Notion wins when set; unknown categories default
+  to $30)
 
-- Python 3.8+
-- Wix website with Events app
-- Google Cloud project with Sheets API and Drive API enabled
-- GitHub account for automation
+## Legacy Google Sheets pipeline
+
+Kept working during the transition; every command has the same behavior as
+before the Notion migration:
+
+```bash
+python sync_events.py prepare-sheet            # rolling_schedule + class_info -> generated_events tab
+python sync_events.py sync-sheet               # generated_events tab -> Wix (was: sync)
+python sync_events.py pull-config              # Wix -> config_events tab
+python sync_events.py push-config --dry-run    # config_events tab -> Wix
+python sync_events.py pull-categories          # Wix -> category_config tab
+python sync_events.py push-categories          # category_config tab -> Wix
+python sync_events.py pull-site-config-sheet   # Wix tax -> site_config tab (was: pull-site-config)
+python sync_events.py push-site-config-sheet   # site_config tab -> Wix (was: push-site-config)
+python sync_events.py generate                 # merged CSV to stdout
+python sync_events.py clean-synced             # delete rope+class events matching the generated tab
+python sync_events.py publish-drafts           # publish drafts matching the generated tab
+```
+
+The sheet format, round-trip semantics, and tab names are documented in the
+git history of this README and in [docs/HISTORY.md](docs/HISTORY.md).
+
+## Project Structure
+
+```
+.
+├── event_sync/                # Modular sync package
+│   ├── cli.py                 # CLI (Notion commands + legacy sheet commands)
+│   ├── config.py              # Env-driven settings (Wix, Google, Notion)
+│   ├── constants.py           # Pricing table, defaults, column mappings
+│   ├── images.py              # Drive/HTTP image download -> Wix Media upload
+│   ├── models.py              # EventRecord (+ content_hash), TicketSpec
+│   ├── notion_store.py        # All Notion I/O: schemas, mapping, queries
+│   ├── notion_orchestrator.py # enrich / sync / pull / site-config flows
+│   ├── orchestrator.py        # Wix flows shared by both backends + legacy sheet flows
+│   ├── generator.py           # [legacy] sheet merge + tab writers
+│   ├── sheets.py              # [legacy] sheet readers
+│   └── runtime.py             # Lazy Google/Wix/Notion clients + caches
+├── sync_events.py             # CLI entrypoint
+├── wix_client.py              # Reusable Wix API client
+├── scripts/                   # Dev helpers (create test Idea rows, set status)
+├── docs/NOTION_BACKEND.md     # Notion data model + lifecycle + triggers
+├── .github/workflows/         # ci.yml, sync-events.yml
+└── tests/                     # pytest suite
+```
+
+## Testing & Quality Checks
+
+- `make install-dev` – install production + testing dependencies.
+- `make unit` – run the pytest suite locally (includes Notion property-mapping
+  and hash-diff tests with a mocked Notion client).
+- GitHub Actions (`.github/workflows/ci.yml`) runs the same tests on every
+  push/pull request.
 
 ## Development Tools
 
-Test and develop without using the live site! See [docs/DEV_TOOLS.md](docs/DEV_TOOLS.md) for complete documentation.
+Test against the dev/sandbox Wix site without touching the live one! See
+[docs/DEV_TOOLS.md](docs/DEV_TOOLS.md).
 
-Quick examples:
-
-```bash
-# Create test events (prefixed with "-test-" for easy cleanup)
-make dev-samples              # Create 5 sample events (RSVP + TICKETS mix)
-make dev-create               # Create single RSVP event
-make dev-create-ticket        # Create single TICKETED event
-
-# List events
-make dev-list                 # List all events
-
-# Create test RSVPs
-make dev-rsvp EVENT_ID=abc123           # Single RSVP
-make dev-bulk-rsvp EVENT_ID=abc123      # 10 RSVPs
-
-# Search
-make dev-search QUERY='Workshop'        # Search events
-
-# Or use directly with more control
-python dev_events.py create "Concert" 7 false TICKETS  # Creates ticketed event placeholder
-python dev_events.py create "Workshop" 7 true RSVP     # Creates RSVP event
-
-# TICKETS events workflow:
-# 1. API creates event with TICKETING registration type → Shows "Tickets are not on sale"
-# 2. You add tickets manually via Wix Dashboard → Tickets go on sale
-# Note: Registration type cannot be changed after creation
-
-# Cleanup dev/test events
-make dev-clean-drafts       # Delete all draft events
-make dev-clean-test         # Delete all test events
-python dev_events.py delete-pattern "Workshop" --confirm
-```
-
-Full command list: `make dev-help`
-
-**Dev/Sandbox Mode:**
-Configure separate credentials for testing in `.env`:
 ```bash
 ENV_MODE=development
 DEV_WIX_API_KEY=your_dev_api_key
 DEV_WIX_SITE_ID=your_dev_site_id
 ```
 
-## Testing & Quality Checks
+Dev helpers for the Notion flow:
 
-- `make install-dev` – install production + testing dependencies.
-- `make unit` – run the pytest suite locally (includes new event model + image helpers).
-- GitHub Actions (`.github/workflows/ci.yml`) runs the same tests on every push/pull request.
-- Scheduled workflow (`sync-events.yml`) continues to run the production sync once credentials are validated.
+```bash
+python scripts/create_test_idea_row.py "Your First Rope Class" 2026-08-12 19:00 22:00
+python scripts/set_event_status.py <page_id> Ready
+```
 
 ## Documentation
 
-### Getting Started
-
-- [SETUP.md](SETUP.md) - Complete setup instructions
-- [CHECKLIST.md](CHECKLIST.md) - Setup checklist
-
-### Technical Documentation
-
-- [docs/DEV_TOOLS.md](docs/DEV_TOOLS.md) - Development tools and commands
-- [docs/TICKETING.md](docs/TICKETING.md) - Creating ticketed events (technical guide)
-- [docs/HISTORY.md](docs/HISTORY.md) - Project history and change log
-- [docs/CODE_AUDIT.md](docs/CODE_AUDIT.md) - Architecture analysis
+- [SETUP.md](SETUP.md) — Complete setup instructions
+- [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md) — Notion databases, lifecycle, triggers
+- [docs/DEV_TOOLS.md](docs/DEV_TOOLS.md) — Development tools and commands
+- [docs/TICKETING.md](docs/TICKETING.md) — Creating ticketed events (technical guide)
+- [docs/HISTORY.md](docs/HISTORY.md) — Project history and change log
+- [docs/CODE_AUDIT.md](docs/CODE_AUDIT.md) — Architecture analysis
 
 ## License
 
