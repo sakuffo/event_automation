@@ -309,7 +309,7 @@ def validate_credentials(config: AppConfig) -> bool:
         all_valid = False
 
     notion_dbs = {
-        "NOTION_EVENTS_DB_ID": config.notion_events_db_id,
+        "NOTION_EVENT_SCHEDULING_DB_ID": config.notion_event_scheduling_db_id,
         "NOTION_CATALOG_DB_ID": config.notion_catalog_db_id,
         "NOTION_SETTINGS_DB_ID": config.notion_settings_db_id,
         "NOTION_SITE_CONFIG_DB_ID": config.notion_site_config_db_id,

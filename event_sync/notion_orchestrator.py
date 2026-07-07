@@ -139,7 +139,7 @@ def setup_notion(runtime: SyncRuntime) -> bool:
 
     # Make the fresh ids usable this run (config may not have them yet).
     config.notion_catalog_db_id = results["NOTION_CATALOG_DB_ID"]
-    config.notion_events_db_id = results["NOTION_EVENTS_DB_ID"]
+    config.notion_event_scheduling_db_id = results["NOTION_EVENT_SCHEDULING_DB_ID"]
     config.notion_settings_db_id = results["NOTION_SETTINGS_DB_ID"]
     config.notion_site_config_db_id = results["NOTION_SITE_CONFIG_DB_ID"]
 
@@ -173,11 +173,11 @@ def setup_notion(runtime: SyncRuntime) -> bool:
         logger.warning("  ⚠️  Could not update Catalog Type options: %s", exc)
 
     try:
-        renames = store.migrate_catalog_naming()
+        renames = store.migrate_naming()
         for change in renames:
             logger.info("⚙️  Renamed: %s", change)
     except Exception as exc:
-        logger.warning("  ⚠️  Could not migrate catalog naming: %s", exc)
+        logger.warning("  ⚠️  Could not migrate database naming: %s", exc)
 
     logger.info("\n✅ Databases ready. Add these to your .env (and GitHub secrets):\n")
     for env_name, db_id in results.items():
@@ -975,8 +975,13 @@ def notion_sync_events(
     draft: bool = False,
     dry_run: bool = False,
     month_filters: Optional[List[str]] = None,
+    run_enrich: bool = True,
 ) -> bool:
     """Push Notion rows to Wix.
+
+    Starts with an enrich pass (unless ``run_enrich`` is False or this is a
+    dry run) so Idea/Draft rows get filled and annotated on the same run —
+    drafts still need a human flip to Ready before anything is pushed.
 
     ``Ready`` rows are created (or, if they already match a Wix event,
     updated/published). ``Published`` rows are re-pushed only when their
@@ -996,6 +1001,14 @@ def notion_sync_events(
     except ValueError as exc:
         logger.error("%s", exc)
         return False
+
+    if run_enrich:
+        if dry_run:
+            logger.info("⏭️  Skipping enrich pass (dry run writes nothing to Notion)\n")
+        else:
+            if not enrich_events(runtime, month_filters=month_filters):
+                logger.warning("⚠️  Enrich pass had errors — continuing with sync")
+            logger.info("")
 
     try:
         store: NotionStore = runtime.get_notion_store()

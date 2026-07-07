@@ -787,9 +787,9 @@ class NotionStore:
         dropdown for databases created before those statuses existed. Existing
         options are preserved untouched. Returns how many options were added.
         """
-        db_id = self.config.notion_events_db_id
+        db_id = self.config.notion_event_scheduling_db_id
         if not db_id:
-            raise ConfigError("NOTION_EVENTS_DB_ID is missing")
+            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
 
         ds_id = self.data_source_id(db_id)
         data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
@@ -868,12 +868,29 @@ class NotionStore:
         )
         return True
 
-    def migrate_catalog_naming(self) -> List[str]:
-        """One-time in-place renames for the classes -> catalog redesign.
+    def _rename_database_title(
+        self, database_id: str, old_title: str, new_title: str
+    ) -> bool:
+        """Rename a database title if it currently matches ``old_title``."""
+        database = self.client.databases.retrieve(database_id=database_id)
+        title_text = "".join(
+            t.get("plain_text", "") for t in database.get("title") or []
+        ).strip()
+        if title_text != old_title:
+            return False
+        self.client.databases.update(
+            database_id=database_id,
+            title=[{"type": "text", "text": {"content": new_title}}],
+        )
+        return True
+
+    def migrate_naming(self) -> List[str]:
+        """One-time in-place renames from the catalog/scheduling redesigns.
 
         - Catalog DB title property ``Class`` -> ``Template``
         - Events DB relation property ``Class`` -> ``Template``
         - Catalog database title ``Classes`` -> ``Catalog``
+        - Events database title ``Events`` -> ``Event Scheduling``
 
         Idempotent: each step is skipped once the new name is in place.
         Returns human-readable labels of the changes performed.
@@ -884,22 +901,17 @@ class NotionStore:
         if catalog_db:
             if self._rename_property(catalog_db, "Class", TemplateProps.NAME):
                 changes.append("Catalog title property: Class -> Template")
-
-            database = self.client.databases.retrieve(database_id=catalog_db)
-            title_text = "".join(
-                t.get("plain_text", "") for t in database.get("title") or []
-            ).strip()
-            if title_text == "Classes":
-                self.client.databases.update(
-                    database_id=catalog_db,
-                    title=[{"type": "text", "text": {"content": "Catalog"}}],
-                )
+            if self._rename_database_title(catalog_db, "Classes", "Catalog"):
                 changes.append("Database title: Classes -> Catalog")
 
-        events_db = self.config.notion_events_db_id
-        if events_db:
-            if self._rename_property(events_db, "Class", EventProps.TEMPLATE):
-                changes.append("Events relation property: Class -> Template")
+        scheduling_db = self.config.notion_event_scheduling_db_id
+        if scheduling_db:
+            if self._rename_property(scheduling_db, "Class", EventProps.TEMPLATE):
+                changes.append("Event Scheduling relation property: Class -> Template")
+            if self._rename_database_title(
+                scheduling_db, "Events", "Event Scheduling"
+            ):
+                changes.append("Database title: Events -> Event Scheduling")
 
         return changes
 
@@ -938,16 +950,18 @@ class NotionStore:
             logger.info("Created Catalog DB: %s", catalog_db)
         results["NOTION_CATALOG_DB_ID"] = catalog_db
 
-        events_db = self.config.notion_events_db_id
-        if events_db:
-            logger.info("Events DB already configured (%s)", events_db)
+        scheduling_db = self.config.notion_event_scheduling_db_id
+        if scheduling_db:
+            logger.info("Event Scheduling DB already configured (%s)", scheduling_db)
         else:
             catalog_ds_id = self.data_source_id(catalog_db)
-            events_db, _ = self.create_database(
-                parent_page_id, "Events", _events_db_properties(catalog_ds_id)
+            scheduling_db, _ = self.create_database(
+                parent_page_id,
+                "Event Scheduling",
+                _events_db_properties(catalog_ds_id),
             )
-            logger.info("Created Events DB: %s", events_db)
-        results["NOTION_EVENTS_DB_ID"] = events_db
+            logger.info("Created Event Scheduling DB: %s", scheduling_db)
+        results["NOTION_EVENT_SCHEDULING_DB_ID"] = scheduling_db
 
         settings_db = self.config.notion_settings_db_id
         if settings_db:
@@ -977,9 +991,9 @@ class NotionStore:
         self, statuses: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """Fetch Events rows, optionally filtered to a set of Status values."""
-        db_id = self.config.notion_events_db_id
+        db_id = self.config.notion_event_scheduling_db_id
         if not db_id:
-            raise ConfigError("NOTION_EVENTS_DB_ID is missing")
+            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
 
         filter_: Optional[Dict[str, Any]] = None
         if statuses:
@@ -1042,9 +1056,9 @@ class NotionStore:
         page_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create or fully refresh an Events row from a record (used by pull)."""
-        db_id = self.config.notion_events_db_id
+        db_id = self.config.notion_event_scheduling_db_id
         if not db_id:
-            raise ConfigError("NOTION_EVENTS_DB_ID is missing")
+            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
         props = event_properties_from_record(
             record, self.config.timezone, include_bookkeeping=True
         )
@@ -1073,9 +1087,9 @@ class NotionStore:
         Lets ``pull`` land incomplete Wix events (no date, no location) in
         Notion with a Sync Error note instead of dropping them.
         """
-        db_id = self.config.notion_events_db_id
+        db_id = self.config.notion_event_scheduling_db_id
         if not db_id:
-            raise ConfigError("NOTION_EVENTS_DB_ID is missing")
+            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
         props = event_properties_from_raw_row(row, self.config.timezone)
         props[EventProps.STATUS] = p_select(status)
         props[EventProps.SOURCE] = p_select(source)

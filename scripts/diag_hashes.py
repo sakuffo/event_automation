@@ -16,7 +16,7 @@ def main() -> int:
     config = load_config()
     store = NotionStore(config)
 
-    db_id = config.notion_events_db_id
+    db_id = config.notion_event_scheduling_db_id
     for page in store.iter_pages(db_id):
         from event_sync.notion_store import event_page_to_row
 

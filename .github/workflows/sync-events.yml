@@ -29,31 +29,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Enrich draft events in Notion
+      # `sync` starts with an enrich pass, so one step covers both.
+      - name: Enrich + sync events from Notion to Wix
         env:
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}
           WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           NOTION_ACCESS_TOKEN: ${{ secrets.NOTION_ACCESS_TOKEN }}
-          NOTION_EVENTS_DB_ID: ${{ secrets.NOTION_EVENTS_DB_ID }}
+          NOTION_EVENT_SCHEDULING_DB_ID: ${{ secrets.NOTION_EVENT_SCHEDULING_DB_ID }}
           NOTION_CATALOG_DB_ID: ${{ secrets.NOTION_CATALOG_DB_ID }}
-          # Legacy secret name; remove once NOTION_CATALOG_DB_ID is set in repo secrets.
-          NOTION_CLASSES_DB_ID: ${{ secrets.NOTION_CLASSES_DB_ID }}
-          NOTION_SETTINGS_DB_ID: ${{ secrets.NOTION_SETTINGS_DB_ID }}
-          NOTION_SITE_CONFIG_DB_ID: ${{ secrets.NOTION_SITE_CONFIG_DB_ID }}
-        run: python sync_events.py enrich
-
-      - name: Sync events from Notion to Wix
-        env:
-          WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
-          WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}
-          WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
-          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          NOTION_ACCESS_TOKEN: ${{ secrets.NOTION_ACCESS_TOKEN }}
+          # Legacy secret names; remove once the new *_DB_ID secrets are set.
           NOTION_EVENTS_DB_ID: ${{ secrets.NOTION_EVENTS_DB_ID }}
-          NOTION_CATALOG_DB_ID: ${{ secrets.NOTION_CATALOG_DB_ID }}
-          # Legacy secret name; remove once NOTION_CATALOG_DB_ID is set in repo secrets.
           NOTION_CLASSES_DB_ID: ${{ secrets.NOTION_CLASSES_DB_ID }}
           NOTION_SETTINGS_DB_ID: ${{ secrets.NOTION_SETTINGS_DB_ID }}
           NOTION_SITE_CONFIG_DB_ID: ${{ secrets.NOTION_SITE_CONFIG_DB_ID }}

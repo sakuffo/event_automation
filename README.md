@@ -12,7 +12,7 @@ Wix with tickets, categories, and images.
 
 ## What This Does
 
-1. Team members add events to the **Events** database in Notion (a name that
+1. Team members add events to the **Event Scheduling** database in Notion (a name that
    matches a catalog template + a date is enough)
 2. `enrich` fills in the blanks (categories, price, description, image) from
    the **Catalog** (class + recurring-event templates) and **Settings** defaults
@@ -44,12 +44,12 @@ python sync_events.py test          # Test Wix connection
 python sync_events.py setup-notion   # Create the 4 databases, print their IDs
 #   -> copy the printed NOTION_*_DB_ID values into .env
 python sync_events.py import-classes # Seed the Catalog DB from the class_info sheet
-python sync_events.py pull           # Backfill Events DB from live Wix events
+python sync_events.py pull           # Backfill the Event Scheduling DB from live Wix events
 ```
 
 ## The Routine (day to day)
 
-1. **Add events in Notion** — new row in the Events DB with Status `Idea`,
+1. **Add events in Notion** — new row in the Event Scheduling DB with Status `Idea`,
    a Name matching a catalog template (or a linked Template), and a Date.
    Anyone can do this. Set up the default "New Event" template once (see
    [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#default-new-event-template-create-by-hand--the-api-cant-create-templates))
@@ -58,12 +58,13 @@ python sync_events.py pull           # Backfill Events DB from live Wix events
    any blanks from the Settings DB automatically.
 
 ```bash
-# 2. Fill in the blanks from the class catalog (Idea -> Draft)
+# 2. Fill in the blanks from the catalog (Idea -> Draft). `sync` runs this
+#    pass automatically, so this standalone command is optional (preview/debug).
 python sync_events.py enrich
 
 # 3. Review the Draft rows in Notion, fix anything, flip Status to Ready.
 
-# 4. Preview, then push to Wix
+# 4. Preview, then push to Wix (sync enriches first; --no-enrich to skip)
 python sync_events.py sync --dry-run
 python sync_events.py sync
 ```
@@ -90,8 +91,8 @@ python sync_events.py list                # List existing Wix events
 python sync_events.py setup-notion        # One-time: create Notion databases
 python sync_events.py import-classes      # One-time: class_info sheet -> Catalog DB
 python sync_events.py pull                # Wix -> Notion backfill/refresh (--scope all for past events)
-python sync_events.py enrich              # Fill blanks on Idea/Draft rows (-m for months)
-python sync_events.py sync                # Push Ready + changed Published rows (--dry-run, --draft, -m)
+python sync_events.py enrich              # Fill blanks on Idea/Draft rows (-m for months; sync does this too)
+python sync_events.py sync                # Enrich pass + push Ready/changed rows (--no-enrich, --dry-run, --draft, -m)
 
 # Site config: eCommerce tax-by-location (pay-link checkout tax)
 python sync_events.py pull-site-config    # Wix tax regions/mappings -> Notion Site Config DB
@@ -106,11 +107,12 @@ All CLI subcommands accept `--log-level` (e.g., `python sync_events.py sync --lo
 Four databases, created by `setup-notion` (details and property tables in
 [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md)):
 
-- **Events** — one row per event; the single source of truth. Lifecycle:
-  `Idea → Draft → Ready → Published` (plus `Error`, `Skip`). Flip a row to
-  `Cancel` to cancel it on Wix (row becomes `Cancelled`), or `Delete` to
-  remove it from Wix entirely (row becomes `Removed`). Sync bookkeeping
-  (`Wix Event ID`, `Last Synced`, `Synced Hash`, `Sync Error`) is code-owned.
+- **Event Scheduling** — one row per event (scheduled or still being
+  ideated); the single source of truth. Lifecycle: `Idea → Draft → Ready →
+  Published` (plus `Error`, `Skip`). Flip a row to `Cancel` to cancel it on
+  Wix (row becomes `Cancelled`), or `Delete` to remove it from Wix entirely
+  (row becomes `Removed`). Sync bookkeeping (`Wix Event ID`, `Last Synced`,
+  `Synced Hash`, `Sync Error`) is code-owned.
 - **Catalog** — class and recurring-event templates (`Type` = class/event;
   categories, tagline, description, image, optional price/capacity
   overrides). Enrichment matches by relation or name.
@@ -123,9 +125,9 @@ Recommended views to add by hand: Calendar on Date, Board by Status, a
 ## Automation (GitHub Actions)
 
 [.github/workflows/sync-events.yml](.github/workflows/sync-events.yml) runs
-`enrich` + `sync` daily at 9 AM EST, on manual dispatch, and on
-`repository_dispatch` (type `notion-sync`) so a Notion button/automation
-webhook can trigger an instant run — see
+`sync` (which starts with an enrich pass) daily at 9 AM EST, on manual
+dispatch, and on `repository_dispatch` (type `notion-sync`) so a Notion
+button/automation webhook can trigger an instant run — see
 [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
 
 Required repo secrets: `WIX_API_KEY`, `WIX_ACCOUNT_ID`, `WIX_SITE_ID`,
@@ -145,7 +147,7 @@ WIX_SITE_ID=your_site_id
 # Notion
 NOTION_ACCESS_TOKEN=ntn_...                 # integration token (share the parent page with it)
 NOTION_PARENT_PAGE_ID=...                   # only needed by setup-notion
-NOTION_EVENTS_DB_ID=...                     # printed by setup-notion
+NOTION_EVENT_SCHEDULING_DB_ID=...           # printed by setup-notion (was NOTION_EVENTS_DB_ID; old name still accepted)
 NOTION_CATALOG_DB_ID=...                    # was NOTION_CLASSES_DB_ID (old name still accepted)
 NOTION_SETTINGS_DB_ID=...
 NOTION_SITE_CONFIG_DB_ID=...

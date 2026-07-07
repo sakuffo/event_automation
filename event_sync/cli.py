@@ -176,7 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     pull_parser = subparsers.add_parser(
         "pull",
         parents=[common],
-        help="Pull Wix events into the Notion Events DB (backfill/refresh)",
+        help="Pull Wix events into the Notion Event Scheduling DB (backfill/refresh)",
     )
     pull_parser.add_argument(
         "--scope",
@@ -201,7 +201,15 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser = subparsers.add_parser(
         "sync",
         parents=[common],
-        help="Push Ready + changed Published rows from Notion to Wix",
+        help=(
+            "Push Ready + changed Published rows from Notion to Wix "
+            "(runs an enrich pass first)"
+        ),
+    )
+    sync_parser.add_argument(
+        "--no-enrich",
+        action="store_true",
+        help="Skip the enrich pass that normally runs before syncing",
     )
     sync_parser.add_argument(
         "--no-tickets",
@@ -438,6 +446,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                 draft=args.draft,
                 dry_run=args.dry_run,
                 month_filters=args.month,
+                run_enrich=not args.no_enrich,
             )
             return 0 if ok else 1
 

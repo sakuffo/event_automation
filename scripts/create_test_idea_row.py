@@ -1,4 +1,4 @@
-"""Dev helper: create a bare Idea row in the Notion Events DB.
+"""Dev helper: create a bare Idea row in the Notion Event Scheduling DB.
 
 Simulates a teammate dropping in a placeholder (just a class name + date) so
 enrich/sync can be exercised. Not part of the production pipeline.
@@ -36,7 +36,7 @@ def main() -> int:
         EventProps.STATUS: p_select(STATUS_IDEA),
         EventProps.DATE: p_date(date, start, date, end, tz_name=config.timezone),
     }
-    page = store.create_page(config.notion_events_db_id, props)
+    page = store.create_page(config.notion_event_scheduling_db_id, props)
     print(f"Created Idea row '{name}' on {date} {start}-{end}: {page.get('id')}")
     return 0
 

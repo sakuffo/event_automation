@@ -278,7 +278,7 @@ def make_config(**overrides) -> AppConfig:
         google_sheet_id=None,
         google_credentials_raw=None,
         notion_token="secret",
-        notion_events_db_id="db-events",
+        notion_event_scheduling_db_id="db-events",
         notion_catalog_db_id="db-catalog",
         notion_settings_db_id="db-settings",
         notion_site_config_db_id="db-site",

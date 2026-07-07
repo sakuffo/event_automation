@@ -15,10 +15,13 @@ path has proven itself through a full posting cycle.
 Created by `python sync_events.py setup-notion` under the parent page
 (`NOTION_PARENT_PAGE_ID`). IDs live in `.env` / GitHub secrets.
 
-### Events — the single source of truth
+### Event Scheduling — the single source of truth
 
-One row per event. Replaces the `rolling_schedule`, `generated_events`,
-`config_events`, and `category_config` sheet tabs.
+Formerly the "Events" DB (env var `NOTION_EVENT_SCHEDULING_DB_ID`; the old
+`NOTION_EVENTS_DB_ID` is still accepted). One row per event — everything
+scheduled, plus what's being ideated on and yet to be scheduled. Replaces the
+`rolling_schedule`, `generated_events`, `config_events`, and
+`category_config` sheet tabs.
 
 | Property | Type | Who writes it | Notes |
 |---|---|---|---|
@@ -139,14 +142,15 @@ python sync_events.py setup-notion       # one-time: create the 4 databases (re-
 python sync_events.py import-classes     # one-time: class_info sheet -> Catalog DB
 python sync_events.py import-event-templates --dry-run   # preview recurring-event baselines
 python sync_events.py import-event-templates             # seed Type=event templates from the export CSV
-python sync_events.py pull               # Wix -> Events DB (backfill/refresh Published rows)
+python sync_events.py pull               # Wix -> Event Scheduling DB (backfill/refresh Published rows)
 python sync_events.py pull --scope all   # include past events
 
-python sync_events.py enrich             # fill blanks on Idea/Draft rows
+python sync_events.py enrich             # fill blanks on Idea/Draft rows (preview/debug; sync does this too)
 python sync_events.py enrich -m aug sep  # only touch specific months
 
-python sync_events.py sync --dry-run     # preview what would change
-python sync_events.py sync               # push Ready + changed Published rows
+python sync_events.py sync --dry-run     # preview what would change (skips the enrich pass)
+python sync_events.py sync               # enrich pass, then push Ready + changed Published rows
+python sync_events.py sync --no-enrich   # push without the enrich pass
 python sync_events.py sync --draft       # create new events as Wix drafts
 python sync_events.py sync -m aug        # only sync specific months
 
@@ -167,6 +171,9 @@ Notes:
 - `pull` never overwrites rows in Idea/Draft/Ready/Error/Skip status. If a
   pulled Wix event matches such a row by title+date+time, the row is *linked*
   (Wix Event ID written) but its fields are left alone.
+- `sync` starts with the same enrich pass as the `enrich` command (skip with
+  `--no-enrich`; dry runs skip it automatically since enrich writes to
+  Notion). Drafts still need a human flip to Ready before anything is pushed.
 - `sync` matches rows to Wix by `Wix Event ID` first, then by
   title+date+time — so a hand-added Ready row that duplicates an existing Wix
   event updates it instead of creating a duplicate.
@@ -178,7 +185,7 @@ Notes:
 So new rows come pre-filled with the boring fields, set up a default database
 template once (about 3 minutes):
 
-1. Open the **Events** database → click the dropdown arrow next to the blue
+1. Open the **Event Scheduling** database → click the dropdown arrow next to the blue
    `New` button → `+ New template`.
 2. Name the template `New Event` and set these properties on it:
    - Status: `Idea`
@@ -207,7 +214,7 @@ a safety net at `sync` time for rows flipped straight to `Ready`.
 Runs are plain CLI invocations — locally or via GitHub Actions
 ([.github/workflows/sync-events.yml](../.github/workflows/sync-events.yml)):
 
-- **Daily cron** runs `enrich` + `sync` at 9 AM EST.
+- **Daily cron** runs `sync` (which starts with an enrich pass) at 9 AM EST.
 - **Manual**: Actions tab → "Sync Events from Notion to Wix" → Run workflow.
 - **From Notion** (optional, paid plan): a database automation or button with
   a *Send webhook* action can fire the workflow instantly:
@@ -223,7 +230,7 @@ Runs are plain CLI invocations — locally or via GitHub Actions
 ```bash
 NOTION_ACCESS_TOKEN=ntn_...              # integration token (share the parent page with it)
 NOTION_PARENT_PAGE_ID=...                # page that holds the databases (setup-notion only)
-NOTION_EVENTS_DB_ID=...
+NOTION_EVENT_SCHEDULING_DB_ID=...        # was NOTION_EVENTS_DB_ID (old name still accepted)
 NOTION_CATALOG_DB_ID=...                 # was NOTION_CLASSES_DB_ID (old name still accepted)
 NOTION_SETTINGS_DB_ID=...
 NOTION_SITE_CONFIG_DB_ID=...
