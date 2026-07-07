@@ -116,7 +116,7 @@ python sync_events.py push-site-config --dry-run  # Preview rate changes
 python sync_events.py push-site-config            # Apply rates (e.g. 13% HST) to every location
 
 # Using Make shortcuts
-make setup          # Complete setup
+make setup          # Complete setup 2
 make validate       # Validate credentials
 make test          # Test connection
 make list          # List events
