@@ -202,8 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
         "sync",
         parents=[common],
         help=(
-            "Push Ready + changed Published rows from Notion to Wix "
-            "(runs an enrich pass first)"
+            "Sync Notion with Wix: push Ready/Update rows, refresh Published "
+            "rows from Wix (runs an enrich pass first)"
         ),
     )
     sync_parser.add_argument(

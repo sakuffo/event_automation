@@ -344,6 +344,18 @@ class TestNotionStoreQueries:
         filter_ = store._fake.data_sources.calls[0]["filter"]
         assert "or" in filter_ and len(filter_["or"]) == 2
 
+    def test_fetch_event_rows_can_include_missing_status(self, fake_store):
+        store = fake_store([
+            {"results": [], "has_more": False, "next_cursor": None},
+        ])
+        store.fetch_event_rows(statuses=["Idea", "Draft"], include_missing_status=True)
+        filter_ = store._fake.data_sources.calls[0]["filter"]
+        assert len(filter_["or"]) == 3
+        assert {
+            "property": EventProps.STATUS,
+            "select": {"is_empty": True},
+        } in filter_["or"]
+
 
 class TestStatusLifecycle:
     def test_every_status_has_a_select_option(self):
@@ -381,12 +393,12 @@ class TestStatusLifecycle:
 
         added = store.ensure_event_status_options()
 
-        assert added == 4
+        assert added == 5
         sent = fake.data_sources.update_calls[0]["properties"]
         sent_names = [o["name"] for o in sent[EventProps.STATUS]["select"]["options"]]
         # Existing options (with their ids) come first, new ones appended.
         assert sent_names[:6] == ["Idea", "Draft", "Ready", "Published", "Error", "Skip"]
-        assert {"Cancel", "Cancelled", "Delete", "Removed"} <= set(sent_names)
+        assert {"Update", "Cancel", "Cancelled", "Delete", "Removed"} <= set(sent_names)
 
     def test_ensure_status_options_noop_when_complete(self, monkeypatch):
         schema = self._schema_with_options(list(notion_store.ALL_STATUSES))

@@ -20,8 +20,10 @@ Wix with tickets, categories, and images.
 4. `sync` creates the event in Wix (tickets, categories, image included) and
    writes back the Wix ID, sync time, and status — so Notion always shows
    what's posted, what's pending, and what failed
-5. Editing an already-Published row is picked up automatically on the next
-   sync — no snapshot tabs, no status juggling
+5. Once a row is Published, the Wix website is the source of truth: each sync
+   refreshes the Notion row from the live event. To push local Notion edits
+   back to Wix instead, flip the row to **Update** — it's pushed on the next
+   sync and lands back on Published
 
 Full backend reference: [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md)
 
@@ -75,9 +77,13 @@ Tips:
 - `sync --draft` creates events as Wix drafts; re-run `sync` without the flag
   to publish them.
 - Re-running `sync` is always safe — unchanged rows are skipped (content
-  hash), changed Published rows are patched, failures land in the row's
+  hash), Published rows are refreshed from Wix, failures land in the row's
   `Sync Error` with Status `Error`.
-- To edit live events, just edit the Published row in Notion and run `sync`.
+- To edit live events, edit the row in Notion, flip Status to `Update`, and
+  run `sync` — the changes are pushed to Wix and the row returns to
+  `Published`. (Editing a `Published` row without the flip gets overwritten
+  from Wix on the next sync, since the website is authoritative for
+  Published rows.)
 
 ## Commands
 
@@ -92,7 +98,7 @@ python sync_events.py setup-notion        # One-time: create Notion databases
 python sync_events.py import-classes      # One-time: class_info sheet -> Catalog DB
 python sync_events.py pull                # Wix -> Notion backfill/refresh (--scope all for past events)
 python sync_events.py enrich              # Fill blanks on Idea/Draft rows (-m for months; sync does this too)
-python sync_events.py sync                # Enrich pass + push Ready/changed rows (--no-enrich, --dry-run, --draft, -m)
+python sync_events.py sync                # Enrich pass + push Ready/Update rows, refresh Published rows from Wix (--no-enrich, --dry-run, --draft, -m)
 
 # Site config: eCommerce tax-by-location (pay-link checkout tax)
 python sync_events.py pull-site-config    # Wix tax regions/mappings -> Notion Site Config DB
@@ -108,9 +114,11 @@ Four databases, created by `setup-notion` (details and property tables in
 [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md)):
 
 - **Event Scheduling** — one row per event (scheduled or still being
-  ideated); the single source of truth. Lifecycle: `Idea → Draft → Ready →
-  Published` (plus `Error`, `Skip`). Flip a row to `Cancel` to cancel it on
-  Wix (row becomes `Cancelled`), or `Delete` to remove it from Wix entirely
+  ideated); the single source of truth until publication. Lifecycle: `Idea →
+  Draft → Ready → Published` (plus `Error`, `Skip`). Published rows mirror
+  the live Wix event (sync refreshes them from the website); flip a row to
+  `Update` to push local edits back to Wix, `Cancel` to cancel it on Wix
+  (row becomes `Cancelled`), or `Delete` to remove it from Wix entirely
   (row becomes `Removed`). Sync bookkeeping (`Wix Event ID`, `Last Synced`,
   `Synced Hash`, `Sync Error`) is code-owned.
 - **Catalog** — class and recurring-event templates (`Type` = class/event;

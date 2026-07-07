@@ -353,7 +353,7 @@ class TestEnrichNameFill:
     def _run_enrich(self, rows, classes):
         updates: Dict[str, Dict[str, Any]] = {}
         store = SimpleNamespace(
-            fetch_event_rows=lambda statuses=None: rows,
+            fetch_event_rows=lambda statuses=None, include_missing_status=False: rows,
             fetch_classes=lambda: classes,
             fetch_settings=lambda: {},
             update_event_fields=lambda page_id, props: updates.__setitem__(
@@ -402,3 +402,33 @@ class TestEnrichNameFill:
         updates = self._run_enrich([row], self._catalog())
         assert EventProps.NAME not in updates["page-1"]
         assert row["event_name"] == "Custom Title"
+
+    def test_blank_status_bootstraps_to_idea_then_promotes(self):
+        # A complete row with no status behaves like a fresh Idea row: it
+        # gets Idea, then the normal promotion lands it at Draft.
+        row = bare_row(
+            event_name="",
+            status="",
+            template_relation_ids=["tpl-1"],
+        )
+        updates = self._run_enrich([row], self._catalog())
+
+        props = updates["page-1"]
+        assert row["status"] == "Idea"
+        assert props[EventProps.STATUS] == {"select": {"name": "Draft"}}
+
+    def test_blank_status_on_incomplete_row_stays_idea(self):
+        row = bare_row(
+            event_name="",
+            status="",
+            start_date="",
+            start_time="",
+            end_date="",
+            end_time="",
+            template_relation_ids=["tpl-1"],
+        )
+        updates = self._run_enrich([row], self._catalog())
+
+        props = updates["page-1"]
+        assert props[EventProps.STATUS] == {"select": {"name": "Idea"}}
+        assert props[EventProps.SYNC_ERROR]["rich_text"]  # not-ready note

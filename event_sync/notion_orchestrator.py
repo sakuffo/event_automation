@@ -36,6 +36,7 @@ from .notion_store import (
     STATUS_PUBLISHED,
     STATUS_READY,
     STATUS_REMOVED,
+    STATUS_UPDATE,
     TEMPLATE_TYPE_CLASS,
     TEMPLATE_TYPE_EVENT,
     event_page_to_row,
@@ -985,7 +986,9 @@ def enrich_events(
 
     try:
         store: NotionStore = runtime.get_notion_store()
-        rows = store.fetch_event_rows(statuses=[STATUS_IDEA, STATUS_DRAFT])
+        rows = store.fetch_event_rows(
+            statuses=[STATUS_IDEA, STATUS_DRAFT], include_missing_status=True
+        )
         if not rows:
             logger.info("No Idea/Draft rows found — nothing to enrich.")
             return True
@@ -1006,9 +1009,11 @@ def enrich_events(
 
             klass = _resolve_class_for_row(row, classes, classes_by_page_id)
 
-            # A linked Template is enough — fill a blank Name from the
-            # template so the rest of the enrichment can run right away.
-            name_props: Dict[str, Any] = {}
+            # Bootstrap fills: a linked Template is enough — a blank Name
+            # comes from the template, and a blank Status starts as Idea (so
+            # the normal Idea→Draft promotion applies in the same pass).
+            bootstrap_props: Dict[str, Any] = {}
+            bootstrap_changes: List[str] = []
             if not (row.get("event_name") or "").strip():
                 if klass is None:
                     logger.info(
@@ -1016,7 +1021,13 @@ def enrich_events(
                     )
                     continue
                 row["event_name"] = klass["class"]
-                name_props[EventProps.NAME] = p_title(klass["class"])
+                bootstrap_props[EventProps.NAME] = p_title(klass["class"])
+                bootstrap_changes.append("name from template")
+
+            if not (row.get("status") or "").strip():
+                row["status"] = STATUS_IDEA
+                bootstrap_props[EventProps.STATUS] = p_select(STATUS_IDEA)
+                bootstrap_changes.append("status Idea")
 
             name = row["event_name"]
             page_id = row["page_id"]
@@ -1024,9 +1035,11 @@ def enrich_events(
             props, changes = _apply_row_defaults(
                 row, klass, settings, tz_name=runtime.config.timezone
             )
-            if name_props:
-                props.update(name_props)
-                changes.insert(0, "name from template")
+            if bootstrap_props:
+                # Merge first so the later Idea→Draft promotion can still
+                # override the bootstrapped Status in the same update.
+                props.update(bootstrap_props)
+                changes[:0] = bootstrap_changes
 
             # Validate what the row would look like at sync time; surface
             # anything still missing in Sync Error so editors can see it.
@@ -1115,20 +1128,24 @@ def notion_sync_events(
     month_filters: Optional[List[str]] = None,
     run_enrich: bool = True,
 ) -> bool:
-    """Push Notion rows to Wix.
+    """Sync Notion rows with Wix.
 
     Starts with an enrich pass (unless ``run_enrich`` is False or this is a
     dry run) so Idea/Draft rows get filled and annotated on the same run —
     drafts still need a human flip to Ready before anything is pushed.
 
     ``Ready`` rows are created (or, if they already match a Wix event,
-    updated/published). ``Published`` rows are re-pushed only when their
-    content hash differs from ``Synced Hash`` or a previous sync error is
-    recorded. ``Cancel`` rows cancel the Wix event (row becomes ``Cancelled``);
+    updated/published). ``Published`` rows treat Wix as authoritative: the
+    Notion row is refreshed from the live event, so edits made on the website
+    flow back into Notion. To push local Notion edits the other way, flip the
+    row to ``Update`` — it is pushed to Wix and lands back on ``Published``.
+    ``Cancel`` rows cancel the Wix event (row becomes ``Cancelled``);
     ``Delete`` rows delete it outright (row becomes ``Removed``). Results are
     written back onto each row.
     """
-    logger.info("🚀 Starting Notion → Wix sync...\n")
+    from .generator import _wix_event_to_config_row
+
+    logger.info("🚀 Starting Notion ⇄ Wix sync...\n")
     if dry_run:
         logger.info("🔍 DRY RUN — nothing will be written to Wix or Notion\n")
     if draft:
@@ -1151,11 +1168,17 @@ def notion_sync_events(
     try:
         store: NotionStore = runtime.get_notion_store()
         rows = store.fetch_event_rows(
-            statuses=[STATUS_READY, STATUS_PUBLISHED, STATUS_CANCEL, STATUS_DELETE]
+            statuses=[
+                STATUS_READY,
+                STATUS_PUBLISHED,
+                STATUS_UPDATE,
+                STATUS_CANCEL,
+                STATUS_DELETE,
+            ]
         )
         rows = [r for r in rows if _row_in_months(r, allowed_months)]
         if not rows:
-            logger.info("No Ready/Published/Cancel/Delete rows to sync.")
+            logger.info("No Ready/Published/Update/Cancel/Delete rows to sync.")
             return True
 
         client = runtime.get_wix_client()
@@ -1169,6 +1192,7 @@ def notion_sync_events(
             "created": [],
             "updated": [],
             "published": [],
+            "refreshed": [],
             "cancelled": [],
             "removed": [],
             "skipped": [],
@@ -1318,6 +1342,106 @@ def notion_sync_events(
                 time.sleep(1)
                 continue
 
+            # ------------------------------------------------ Published rows
+            # Wix is authoritative for Published rows: refresh the Notion row
+            # from the live event so website edits flow back. To push local
+            # edits the other way, flip the row to Update. Handled before
+            # validation so an incomplete row can still be refreshed.
+            if row_status == STATUS_PUBLISHED:
+                wix_event, wix_id = _match_raw_row(row)
+                if wix_event is None:
+                    logger.warning(
+                        "  ⚠️  %s: marked Published but not found in Wix — "
+                        "flip Status to Ready to recreate it", name,
+                    )
+                    results["not_found"].append(name)
+                    if not dry_run:
+                        store.write_sync_result(
+                            page_id,
+                            error="Not found in Wix (deleted?). Set Status to Ready to recreate.",
+                        )
+                    continue
+
+                # Events cancelled on the website land as Cancelled rows,
+                # mirroring pull.
+                target_status = (
+                    STATUS_CANCELLED
+                    if (wix_event.get("status") or "") == "CANCELED"
+                    else STATUS_PUBLISHED
+                )
+
+                ticket_defs = client.get_ticket_definitions(wix_id)
+                config_row = _wix_event_to_config_row(
+                    wix_event, ticket_defs, tz_name=runtime.config.timezone
+                )
+
+                wix_record: Optional[EventRecord] = None
+                invalid_note = ""
+                try:
+                    wix_record = row_to_event_record(config_row)
+                except ValidationError as exc:
+                    invalid_note = (
+                        "Pulled from Wix with missing fields — "
+                        f"{parse_validation_error(exc)}"
+                    )
+
+                if wix_record is None:
+                    # Wix event too incomplete to validate (e.g. TBD date):
+                    # land it anyway with a Sync Error note, like pull does.
+                    if dry_run:
+                        logger.info("  REFRESH: %s — %s", name, invalid_note)
+                        results["incomplete"].append(name)
+                        continue
+                    store.upsert_event_from_raw_row(
+                        config_row, status=target_status, source=SOURCE_WIX,
+                        wix_event_id=wix_id, error=invalid_note, page_id=page_id,
+                    )
+                    logger.warning("  ⚠️  %s: %s", name, invalid_note)
+                    results["incomplete"].append(name)
+                    continue
+
+                wix_record.wix_event_id = wix_id
+                wix_record.synced_hash = wix_record.content_hash()
+
+                row_hash: Optional[str] = None
+                try:
+                    row_hash = row_to_event_record(row).content_hash()
+                except ValidationError:
+                    row_hash = None
+
+                if row_hash == wix_record.synced_hash and row_status == target_status:
+                    stale_bookkeeping = (
+                        (row.get("synced_hash") or "") != wix_record.synced_hash
+                        or (row.get("wix_event_id") or "").strip() != wix_id
+                        or bool((row.get("sync_error") or "").strip())
+                    )
+                    if stale_bookkeeping and not dry_run:
+                        store.write_sync_result(
+                            page_id, wix_event_id=wix_id,
+                            synced_hash=wix_record.synced_hash, error=None,
+                        )
+                    logger.info("  ⏭️  %s (matches Wix)", name)
+                    results["skipped"].append(name)
+                    continue
+
+                if dry_run:
+                    logger.info(
+                        "  REFRESH: %s (Notion row updated from Wix%s)",
+                        name,
+                        " — becomes Cancelled"
+                        if target_status == STATUS_CANCELLED else "",
+                    )
+                    results["refreshed"].append(name)
+                    continue
+
+                store.upsert_event_from_record(
+                    wix_record, status=target_status, source=SOURCE_WIX,
+                    page_id=page_id,
+                )
+                logger.info("  ⬇️  %s: refreshed from Wix (%s)", name, target_status)
+                results["refreshed"].append(name)
+                continue
+
             # Safety net for rows flipped straight to Ready without enrich:
             # fill blanks from the class catalog + Settings defaults so the
             # push uses (and the row shows) the same defaults enrich applies.
@@ -1336,21 +1460,12 @@ def notion_sync_events(
                 record = row_to_event_record(row)
             except ValidationError as exc:
                 message = parse_validation_error(exc)
-                if row_status == STATUS_PUBLISHED:
-                    # Row mirrors an event that is incomplete in Wix itself
-                    # (e.g. TBD date). Flag it, don't fail the whole run.
-                    logger.warning("  ⚠️  %s: incomplete row — %s", name, message)
-                    results["incomplete"].append(name)
-                    note = f"Incomplete: {message}"
-                    if not dry_run and (row.get("sync_error") or "") != note:
-                        store.write_sync_result(page_id, error=note)
-                else:
-                    logger.error("  ❌ %s: invalid row — %s", name, message)
-                    results["failed"].append(name)
-                    if not dry_run:
-                        store.write_sync_result(
-                            page_id, status=STATUS_ERROR, error=f"Invalid row: {message}",
-                        )
+                logger.error("  ❌ %s: invalid row — %s", name, message)
+                results["failed"].append(name)
+                if not dry_run:
+                    store.write_sync_result(
+                        page_id, status=STATUS_ERROR, error=f"Invalid row: {message}",
+                    )
                 continue
 
             # Match to a live Wix event: id first, then title|date|time.
@@ -1381,34 +1496,31 @@ def notion_sync_events(
                     )
                 continue
 
-            # ------------------------------------------------ Published rows
-            if row_status == STATUS_PUBLISHED:
+            # -------------------------------------------------- Update rows
+            # A human flipped the row to Update: push the Notion row's state
+            # to Wix (the reverse of the Published refresh), then land the
+            # row back on Published.
+            if row_status == STATUS_UPDATE:
                 if wix_event is None:
                     logger.warning(
-                        "  ⚠️  %s: marked Published but not found in Wix — "
-                        "flip Status to Ready to recreate it", name,
+                        "  ⚠️  %s: marked Update but not found in Wix — "
+                        "flip Status to Ready to create it", name,
                     )
                     results["not_found"].append(name)
                     if not dry_run:
                         store.write_sync_result(
                             page_id,
-                            error="Not found in Wix (deleted?). Set Status to Ready to recreate.",
+                            error="Not found in Wix (deleted?). Set Status to Ready to create it.",
                         )
-                    continue
-
-                had_error = bool((row.get("sync_error") or "").strip())
-                if row.get("synced_hash") == current_hash and not had_error:
-                    logger.info("  ⏭️  %s (no changes)", name)
-                    results["skipped"].append(name)
                     continue
 
                 plan = compute_event_update_plan(client, runtime, record, wix_id, wix_event)
                 if not plan["any_changes"]:
-                    logger.info("  ⏭️  %s (Wix already matches)", name)
+                    logger.info("  ⏭️  %s (Wix already matches) — back to Published", name)
                     results["skipped"].append(name)
                     if not dry_run:
                         store.write_sync_result(
-                            page_id, wix_event_id=wix_id,
+                            page_id, status=STATUS_PUBLISHED, wix_event_id=wix_id,
                             synced_hash=current_hash, error=None,
                         )
                     continue
@@ -1419,7 +1531,7 @@ def notion_sync_events(
                     continue
 
                 logger.info(
-                    "♻️  Updating: %s on %s [%s]",
+                    "♻️  Pushing local changes: %s on %s [%s]",
                     name, record.start_date, plan["change_desc"],
                 )
                 if plan["event_changed"]:
@@ -1559,8 +1671,16 @@ def notion_sync_events(
             for n in results["published"]:
                 logger.info("  • %s", n)
         if results["updated"]:
-            logger.info("\n♻️  Updated: %d", len(results["updated"]))
+            label = "Would push to Wix" if dry_run else "Pushed to Wix"
+            logger.info("\n♻️  %s: %d", label, len(results["updated"]))
             for n in results["updated"]:
+                logger.info("  • %s", n)
+        if results["refreshed"]:
+            label = (
+                "Would refresh from Wix" if dry_run else "Refreshed from Wix"
+            )
+            logger.info("\n⬇️  %s: %d", label, len(results["refreshed"]))
+            for n in results["refreshed"]:
                 logger.info("  • %s", n)
         if results["cancelled"]:
             label = "Would cancel" if dry_run else "Cancelled"
@@ -1582,7 +1702,10 @@ def notion_sync_events(
             for n in results["incomplete"]:
                 logger.warning("  • %s", n)
         if results["not_found"]:
-            logger.warning("\n⚠️  Published rows missing from Wix: %d", len(results["not_found"]))
+            logger.warning(
+                "\n⚠️  Published/Update rows missing from Wix: %d",
+                len(results["not_found"]),
+            )
             for n in results["not_found"]:
                 logger.warning("  • %s", n)
         if results["failed"]:

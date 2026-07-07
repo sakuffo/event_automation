@@ -51,6 +51,7 @@ STATUS_PUBLISHED = "Published"
 STATUS_ERROR = "Error"
 STATUS_SKIP = "Skip"
 # Action statuses (humans set them, sync performs the Wix call)...
+STATUS_UPDATE = "Update"
 STATUS_CANCEL = "Cancel"
 STATUS_DELETE = "Delete"
 # ...and the terminal states sync writes back afterwards.
@@ -62,6 +63,7 @@ ALL_STATUSES = [
     STATUS_DRAFT,
     STATUS_READY,
     STATUS_PUBLISHED,
+    STATUS_UPDATE,
     STATUS_CANCEL,
     STATUS_CANCELLED,
     STATUS_DELETE,
@@ -77,6 +79,7 @@ STATUS_SELECT_OPTIONS = [
     {"name": STATUS_DRAFT, "color": "yellow"},
     {"name": STATUS_READY, "color": "blue"},
     {"name": STATUS_PUBLISHED, "color": "green"},
+    {"name": STATUS_UPDATE, "color": "pink"},
     {"name": STATUS_CANCEL, "color": "orange"},
     {"name": STATUS_CANCELLED, "color": "brown"},
     {"name": STATUS_DELETE, "color": "red"},
@@ -1021,9 +1024,16 @@ class NotionStore:
     # -- events --------------------------------------------------------------
 
     def fetch_event_rows(
-        self, statuses: Optional[List[str]] = None
+        self,
+        statuses: Optional[List[str]] = None,
+        include_missing_status: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Fetch Events rows, optionally filtered to a set of Status values."""
+        """Fetch Events rows, optionally filtered to a set of Status values.
+
+        ``include_missing_status`` also matches rows whose Status is empty —
+        used by enrich so freshly created rows without a status are picked up
+        and bootstrapped to Idea.
+        """
         db_id = self.config.notion_event_scheduling_db_id
         if not db_id:
             raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
@@ -1034,6 +1044,10 @@ class NotionStore:
                 {"property": EventProps.STATUS, "select": {"equals": s}}
                 for s in statuses
             ]
+            if include_missing_status:
+                clauses.append(
+                    {"property": EventProps.STATUS, "select": {"is_empty": True}}
+                )
             filter_ = clauses[0] if len(clauses) == 1 else {"or": clauses}
 
         tz_name = self.config.timezone
