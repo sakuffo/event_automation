@@ -155,6 +155,9 @@ class TemplateProps:
     IMAGE_URL = "Image URL"
     PRICE_OVERRIDE = "Price Override"
     DEFAULT_CAPACITY = "Default Capacity"
+    DEFAULT_START_TIME = "Default Start Time"
+    DEFAULT_END_TIME = "Default End Time"
+    DEFAULT_INSTRUCTOR = "Default Instructor"
 
 
 class SettingProps:
@@ -246,6 +249,11 @@ def _catalog_db_properties() -> Dict[str, Any]:
         TemplateProps.IMAGE_URL: {"url": {}},
         TemplateProps.PRICE_OVERRIDE: {"number": {"format": "canadian_dollar"}},
         TemplateProps.DEFAULT_CAPACITY: {"number": {"format": "number"}},
+        # Default schedule/staffing for rows created from this template:
+        # times are HH:MM strings applied when the row's Date lacks a time.
+        TemplateProps.DEFAULT_START_TIME: {"rich_text": {}},
+        TemplateProps.DEFAULT_END_TIME: {"rich_text": {}},
+        TemplateProps.DEFAULT_INSTRUCTOR: {"rich_text": {}},
     }
 
 
@@ -849,6 +857,31 @@ class NotionStore:
         )
         return len(missing)
 
+    def ensure_catalog_properties(self) -> List[str]:
+        """Add any Catalog schema properties missing from the live database.
+
+        Existing properties (and their values) are never touched — only
+        wholly missing ones are created. Returns the names added.
+        """
+        db_id = self.config.notion_catalog_db_id
+        if not db_id:
+            raise ConfigError("NOTION_CATALOG_DB_ID is missing")
+
+        ds_id = self.data_source_id(db_id)
+        data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
+        live = data_source.get("properties") or {}
+
+        missing = {
+            name: definition
+            for name, definition in _catalog_db_properties().items()
+            if name not in live
+        }
+        if not missing:
+            return []
+
+        self.client.data_sources.update(data_source_id=ds_id, properties=missing)
+        return sorted(missing)
+
     def _rename_property(
         self, database_id: str, old_name: str, new_name: str
     ) -> bool:
@@ -1125,6 +1158,15 @@ class NotionStore:
                 "image_url": v_url(page, TemplateProps.IMAGE_URL),
                 "price_override": v_number(page, TemplateProps.PRICE_OVERRIDE),
                 "default_capacity": v_number(page, TemplateProps.DEFAULT_CAPACITY),
+                "default_start_time": v_plain_text(
+                    page, TemplateProps.DEFAULT_START_TIME
+                ).strip(),
+                "default_end_time": v_plain_text(
+                    page, TemplateProps.DEFAULT_END_TIME
+                ).strip(),
+                "default_instructor": v_plain_text(
+                    page, TemplateProps.DEFAULT_INSTRUCTOR
+                ).strip(),
             }
         logger.info("Fetched %d class definition(s) from Notion", len(classes))
         return classes
@@ -1140,13 +1182,15 @@ class NotionStore:
         template_type: Optional[str] = None,
         price_override: Optional[float] = None,
         default_capacity: Optional[float] = None,
+        default_start_time: Optional[str] = None,
+        default_end_time: Optional[str] = None,
+        default_instructor: Optional[str] = None,
         existing_page_id: Optional[str] = None,
     ) -> str:
         """Create or update a catalog row (class or event template).
 
-        ``template_type`` / ``price_override`` / ``default_capacity`` are only
-        written when provided, so the original import-classes path leaves them
-        untouched.
+        The optional keyword fields are only written when provided, so the
+        original import-classes path leaves them untouched.
         """
         props = {
             TemplateProps.NAME: p_title(name),
@@ -1161,6 +1205,12 @@ class NotionStore:
             props[TemplateProps.PRICE_OVERRIDE] = p_number(price_override)
         if default_capacity is not None:
             props[TemplateProps.DEFAULT_CAPACITY] = p_number(default_capacity)
+        if default_start_time is not None:
+            props[TemplateProps.DEFAULT_START_TIME] = p_rich_text(default_start_time)
+        if default_end_time is not None:
+            props[TemplateProps.DEFAULT_END_TIME] = p_rich_text(default_end_time)
+        if default_instructor is not None:
+            props[TemplateProps.DEFAULT_INSTRUCTOR] = p_rich_text(default_instructor)
         if existing_page_id:
             self.update_page(existing_page_id, props)
             return existing_page_id

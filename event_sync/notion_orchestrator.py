@@ -9,6 +9,7 @@ CLI aliases until the Notion path is proven out.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from .constants import (
@@ -38,10 +39,12 @@ from .notion_store import (
     TEMPLATE_TYPE_CLASS,
     TEMPLATE_TYPE_EVENT,
     event_page_to_row,
+    p_date,
     p_multi_select,
     p_number,
     p_rich_text,
     p_select,
+    p_title,
     p_url,
     parse_validation_error,
     row_to_event_record,
@@ -160,6 +163,17 @@ def setup_notion(runtime: SyncRuntime) -> bool:
             )
     except Exception as exc:
         logger.warning("  ⚠️  Could not update Events Status options: %s", exc)
+
+    try:
+        added_props = store.ensure_catalog_properties()
+        if added_props:
+            logger.info(
+                "⚙️  Added Catalog propert%s: %s",
+                "y" if len(added_props) == 1 else "ies",
+                ", ".join(added_props),
+            )
+    except Exception as exc:
+        logger.warning("  ⚠️  Could not patch Catalog properties: %s", exc)
 
     try:
         added_types = store.ensure_template_type_options()
@@ -430,6 +444,8 @@ def import_event_templates(
                 image_url=(source.get("main_image_url") or "").strip(),
                 template_type=TEMPLATE_TYPE_EVENT,
                 price_override=price,
+                default_start_time=(source.get("start_local_time") or "").strip(),
+                default_end_time=(source.get("end_local_time") or "").strip(),
                 existing_page_id=(existing_entry or {}).get("page_id"),
             )
             if existing_entry:
@@ -639,6 +655,23 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
 _BASELINE_TAGS = ["rope", "class"]
 
 
+def _normalize_hhmm(text: str) -> str:
+    """Normalize a time string to zero-padded HH:MM (``"2:30"`` -> ``"02:30"``).
+
+    Returns ``""`` for anything unparseable so callers can treat it as unset.
+    """
+    parts = (text or "").strip().split(":")
+    if len(parts) != 2:
+        return ""
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return ""
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
 def _lookup_price_for_category(category: str) -> Optional[float]:
     """Price for a category tag, tolerating slugged forms (case-insensitive)."""
     if not category:
@@ -687,8 +720,9 @@ def _apply_row_defaults(
     row: Dict[str, Any],
     klass: Optional[Dict[str, Any]],
     settings: Dict[str, str],
+    tz_name: str = "America/Toronto",
 ) -> tuple:
-    """Fill blank fields on an Events row from its class and the Settings DB.
+    """Fill blank fields on an Events row from its template and the Settings DB.
 
     Only empty fields are touched — anything a human typed stays as-is.
     Settings ``default_*`` rows win over the constants fallbacks. Mutates
@@ -701,6 +735,60 @@ def _apply_row_defaults(
 
     if not (row.get("event_name") or "").strip():
         return props, changes
+
+    # Schedule: a template can carry default start/end times (HH:MM) so a
+    # date-only Date property becomes a full schedule. Only blank time parts
+    # are filled; a time someone picked in Notion stays as-is. Without a
+    # start time (typed or defaulted) the Date is left alone — enrich will
+    # flag the missing time as before.
+    if klass and (row.get("start_date") or "").strip():
+        tpl_start = _normalize_hhmm(klass.get("default_start_time") or "")
+        tpl_end = _normalize_hhmm(klass.get("default_end_time") or "")
+        if (row.get("start_time") or "").strip() or tpl_start:
+            filled: List[str] = []
+            if not (row.get("start_time") or "").strip():
+                row["start_time"] = tpl_start
+                filled.append(f"start time {tpl_start}")
+            if not (row.get("end_time") or "").strip() and tpl_end:
+                row["end_time"] = tpl_end
+                filled.append(f"end time {tpl_end}")
+            if filled:
+                if not (row.get("end_date") or "").strip():
+                    row["end_date"] = row["start_date"]
+                end_time = (row.get("end_time") or "").strip()
+                # Overnight events (Voyeur 21:00 -> 03:00): an end at or
+                # before the start on the same day rolls to the next day.
+                if (
+                    end_time
+                    and row["end_date"] == row["start_date"]
+                    and end_time <= (row.get("start_time") or "")
+                ):
+                    try:
+                        start_day = datetime.strptime(
+                            row["start_date"], "%Y-%m-%d"
+                        )
+                        row["end_date"] = (
+                            start_day + timedelta(days=1)
+                        ).strftime("%Y-%m-%d")
+                    except ValueError:
+                        pass
+                props[EventProps.DATE] = p_date(
+                    row["start_date"],
+                    row["start_time"],
+                    row["end_date"] if end_time else None,
+                    end_time or None,
+                    tz_name=tz_name,
+                )
+                changes.extend(filled)
+
+    # Staffing: template default instructor (before the description fill,
+    # which prepends "Instructors: ..." from this field).
+    if klass and not (row.get("instructor") or "").strip():
+        tpl_instructor = (klass.get("default_instructor") or "").strip()
+        if tpl_instructor:
+            props[EventProps.INSTRUCTOR] = p_rich_text(tpl_instructor)
+            changes.append("instructor")
+            row["instructor"] = tpl_instructor
 
     default_image = (settings.get("default_img") or "").strip()
     default_location = (settings.get("default_location") or "").strip() or DEFAULT_LOCATION
@@ -843,13 +931,16 @@ def enrich_events(
     runtime: SyncRuntime,
     month_filters: Optional[List[str]] = None,
 ) -> bool:
-    """Fill blanks on Idea/Draft rows from the Classes catalog and Settings.
+    """Fill blanks on Idea/Draft rows from the Catalog and Settings.
 
     Only empty fields are filled — anything a human typed stays as-is. Rows
-    that match a class get the merged category tags (class categories plus the
-    ``rope``/``class`` baseline), pricing from ``CATEGORY_PRICING`` (or the
-    class Price Override), and the class tagline/description/image. Idea rows
-    that were successfully enriched are promoted to Draft.
+    with a linked Template but a blank Name get the template's name written
+    in first, so picking a template from the catalog is enough to start a
+    row. Rows that match a template get the merged category tags (plus the
+    ``rope``/``class`` baseline for class templates), pricing from the
+    template Price Override (or ``CATEGORY_PRICING``), and the template
+    tagline/description/image. Idea rows that were successfully enriched are
+    promoted to Draft.
     """
     logger.info("✨ Enriching Idea/Draft rows in Notion...\n")
 
@@ -880,15 +971,29 @@ def enrich_events(
             if not _row_in_months(row, allowed_months):
                 continue
 
+            klass = _resolve_class_for_row(row, classes, classes_by_page_id)
+
+            # A linked Template is enough — fill a blank Name from the
+            # template so the rest of the enrichment can run right away.
+            name_props: Dict[str, Any] = {}
             if not (row.get("event_name") or "").strip():
-                logger.info("  ⏭️  Skipping unnamed row (add a Name first)")
-                continue
+                if klass is None:
+                    logger.info(
+                        "  ⏭️  Skipping unnamed row (add a Name or link a Template first)"
+                    )
+                    continue
+                row["event_name"] = klass["class"]
+                name_props[EventProps.NAME] = p_title(klass["class"])
 
             name = row["event_name"]
             page_id = row["page_id"]
 
-            klass = _resolve_class_for_row(row, classes, classes_by_page_id)
-            props, changes = _apply_row_defaults(row, klass, settings)
+            props, changes = _apply_row_defaults(
+                row, klass, settings, tz_name=runtime.config.timezone
+            )
+            if name_props:
+                props.update(name_props)
+                changes.insert(0, "name from template")
 
             # Validate what the row would look like at sync time; surface
             # anything still missing in Sync Error so editors can see it.
@@ -1186,7 +1291,9 @@ def notion_sync_events(
             if row_status == STATUS_READY and (row.get("event_name") or "").strip():
                 classes, classes_by_page_id, settings = _get_defaults_context()
                 klass = _resolve_class_for_row(row, classes, classes_by_page_id)
-                fill_props, fill_changes = _apply_row_defaults(row, klass, settings)
+                fill_props, fill_changes = _apply_row_defaults(
+                    row, klass, settings, tz_name=runtime.config.timezone
+                )
                 if fill_changes:
                     logger.info("  ✨ %s: defaulted %s", name, ", ".join(fill_changes))
                     if not dry_run:
