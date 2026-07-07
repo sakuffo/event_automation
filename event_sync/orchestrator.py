@@ -301,6 +301,30 @@ def validate_credentials(config: AppConfig) -> bool:
                 logger.info("✅ %s is set", name)
 
     logger.info("")
+    logger.info("Notion backend:")
+    if config.notion_token:
+        logger.info("✅ NOTION_ACCESS_TOKEN is set")
+    else:
+        logger.error("❌ NOTION_ACCESS_TOKEN is missing (required for the Notion pipeline)")
+        all_valid = False
+
+    notion_dbs = {
+        "NOTION_EVENTS_DB_ID": config.notion_events_db_id,
+        "NOTION_CATALOG_DB_ID": config.notion_catalog_db_id,
+        "NOTION_SETTINGS_DB_ID": config.notion_settings_db_id,
+        "NOTION_SITE_CONFIG_DB_ID": config.notion_site_config_db_id,
+    }
+    missing_dbs = [name for name, value in notion_dbs.items() if not value]
+    for name, value in notion_dbs.items():
+        if value:
+            logger.info("✅ %s is set", name)
+    if missing_dbs:
+        logger.warning(
+            "⚠️  Not set yet (run setup-notion to create + print them): %s",
+            ", ".join(missing_dbs),
+        )
+
+    logger.info("")
     if all_valid:
         logger.info("✅ All credentials are configured correctly!\n")
         logger.info("Next steps:")
@@ -482,9 +506,9 @@ def _build_wix_event_payload(
             from .constants import DEFAULT_TAX_NAME, DEFAULT_TAX_RATE, DEFAULT_TAX_TYPE
             event_data["registration"]["tickets"] = {
                 "taxSettings": {
-                    "type": DEFAULT_TAX_TYPE,
-                    "name": DEFAULT_TAX_NAME,
-                    "rate": DEFAULT_TAX_RATE,
+                    "type": event.tax_type or DEFAULT_TAX_TYPE,
+                    "name": event.tax_name or DEFAULT_TAX_NAME,
+                    "rate": event.tax_rate or DEFAULT_TAX_RATE,
                 }
             }
 
@@ -723,7 +747,8 @@ def create_wix_event(
     runtime: SyncRuntime,
     auto_create_tickets: bool = True,
     draft: bool = False,
-) -> bool:
+) -> Optional[str]:
+    """Create a Wix event. Returns the new event id on success, None on failure."""
     file_descriptor = None
     if event.image_url:
         file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
@@ -750,24 +775,21 @@ def create_wix_event(
 
         if draft:
             logger.info("   ℹ️  Tickets deferred — run publish-drafts to publish and add tickets")
-        else:
-            should_create_ticket = (
-                auto_create_tickets
-                and event.registration_type == "TICKETING"
-                and event.ticket_price > 0
-            )
-
-            if should_create_ticket:
+        elif event.registration_type == "TICKETING" and auto_create_tickets:
+            if event.ticket_name:
+                # Multi-ticket specs (semicolon-separated names/prices/capacities)
+                _create_tickets_from_config(client, event_id, event)
+            elif event.ticket_price > 0:
                 _ensure_ticket_definition(client, event_id, event)
-            elif event.registration_type == "TICKETING" and not auto_create_tickets:
-                logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
+        elif event.registration_type == "TICKETING" and not auto_create_tickets:
+            logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
 
         _assign_categories(client, event_id, event)
 
-        return True
+        return event_id
     except Exception as exc:
         logger.error("❌ Failed to create event %s: %s", event.name, exc)
-        return False
+        return None
 
 
 def _repair_missing_tickets(
@@ -794,8 +816,24 @@ def update_wix_event(
     existing_event: Dict[str, Any],
     auto_create_tickets: bool = True,
 ) -> bool:
+    from .images import is_wix_media_url, normalize_wix_media_url
+
+    existing_image_url = (existing_event.get("mainImage") or {}).get("url") or ""
+    same_wix_image = (
+        bool(event.image_url)
+        and is_wix_media_url(event.image_url)
+        and bool(existing_image_url)
+        and normalize_wix_media_url(event.image_url)
+        == normalize_wix_media_url(existing_image_url)
+    )
+
     file_descriptor = None
-    if event.image_url:
+    if same_wix_image:
+        # Image already lives in Wix Media and matches the event's current
+        # mainImage (row was pulled from Wix) — the payload builder preserves
+        # it, so skip the pointless re-download/re-upload.
+        pass
+    elif event.image_url:
         file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
         if file_descriptor:
             logger.info("   ✅ Image uploaded successfully")
@@ -1078,6 +1116,227 @@ def _create_tickets_from_config(client, event_id: str, event: EventRecord) -> bo
     return ok
 
 
+def compute_event_update_plan(
+    client,
+    runtime: SyncRuntime,
+    event: EventRecord,
+    event_id: str,
+    wix_event: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Diff an ``EventRecord`` against a live Wix event.
+
+    Covers event fields, categories, per-event ticket tax, and existing ticket
+    definitions (price/capacity, guarded by sold counts). Returns a plan dict
+    consumed by :func:`apply_event_update_plan`. Shared by the sheet-backed
+    ``push-config`` and the Notion-backed ``sync`` update path.
+    """
+    event_diffs = _diff_event_fields(event, wix_event, runtime)
+    event_changed = bool(event_diffs)
+
+    # Categories
+    wix_cats = wix_event.get("categories", {})
+    wix_cat_list = wix_cats.get("categories", []) if isinstance(wix_cats, dict) else []
+    wix_cat_names = sorted(c.get("name", "") for c in wix_cat_list)
+    desired_cat_names = sorted(
+        t.strip() for t in (event.category or "").split(";") if t.strip()
+    )
+    cats_changed = wix_cat_names != desired_cat_names
+
+    # Tax settings (per-event ticket tax)
+    wix_reg = wix_event.get("registration", {})
+    wix_tax = (wix_reg.get("tickets") or {}).get("taxSettings", {})
+    desired_tax_name = event.tax_name or ""
+    desired_tax_rate = event.tax_rate or ""
+    desired_tax_type = event.tax_type or ""
+    wix_has_tax = bool(wix_tax.get("name") or wix_tax.get("rate"))
+    desired_has_tax = bool(desired_tax_name or desired_tax_rate)
+    wix_rate = wix_tax.get("rate") or ""
+    if desired_tax_rate and wix_rate:
+        rate_matches = _rates_equal(desired_tax_rate, wix_rate)
+    else:
+        rate_matches = desired_tax_rate == wix_rate
+    tax_changed = (
+        (wix_has_tax != desired_has_tax)
+        or (desired_tax_name != (wix_tax.get("name") or ""))
+        or not rate_matches
+        or (desired_tax_type != (wix_tax.get("type") or ""))
+    )
+
+    # Ticket price/capacity (with sales data for safety)
+    wix_ticket_defs = client.get_ticket_definitions(event_id, include_sales=True)
+    desired_specs = parse_tickets(
+        ticket_name=event.ticket_name,
+        ticket_price=event.ticket_price_raw or event.ticket_price,
+        ticket_capacity=event.ticket_capacity,
+    )
+    tickets_changed = False
+    ticket_updates: List[Dict[str, Any]] = []
+    for spec in desired_specs:
+        for td in wix_ticket_defs:
+            if td.get("name") == spec.name:
+                wix_price = float(td.get("pricingMethod", {}).get("fixedPrice", {}).get("value", "0"))
+                wix_cap = td.get("initialLimit") or td.get("actualLimit")
+                sold = (td.get("salesDetails") or {}).get("soldCount", 0)
+
+                new_price = spec.price if wix_price != spec.price else None
+                new_capacity = spec.capacity if (wix_cap and wix_cap != spec.capacity) else None
+
+                if new_capacity is not None and new_capacity < sold:
+                    logger.warning(
+                        "   ⚠️  Cannot reduce '%s' capacity to %d — %d tickets already sold",
+                        spec.name, new_capacity, sold,
+                    )
+                    new_capacity = None
+
+                if new_price is not None or new_capacity is not None:
+                    tickets_changed = True
+                    ticket_updates.append({
+                        "id": td["id"],
+                        "revision": td["revision"],
+                        "name": spec.name,
+                        "new_price": new_price,
+                        "new_capacity": new_capacity,
+                        "old_price": wix_price,
+                        "old_capacity": wix_cap,
+                        "sold": sold,
+                    })
+                break
+
+    changes = []
+    if event_changed:
+        changes.append("event data")
+    if cats_changed:
+        changes.append("categories")
+    if tax_changed:
+        changes.append("tax")
+    if tickets_changed:
+        changes.append("tickets")
+
+    return {
+        "event_diffs": event_diffs,
+        "event_changed": event_changed,
+        "cats_changed": cats_changed,
+        "wix_cat_names": wix_cat_names,
+        "desired_cat_names": desired_cat_names,
+        "wix_cat_list": wix_cat_list,
+        "tax_changed": tax_changed,
+        "wix_has_tax": wix_has_tax,
+        "desired_has_tax": desired_has_tax,
+        "desired_tax_name": desired_tax_name,
+        "desired_tax_rate": desired_tax_rate,
+        "desired_tax_type": desired_tax_type,
+        "tickets_changed": tickets_changed,
+        "ticket_updates": ticket_updates,
+        "any_changes": bool(changes),
+        "change_desc": " + ".join(changes),
+    }
+
+
+def log_update_plan_dry_run(event: EventRecord, plan: Dict[str, Any]) -> None:
+    """Log a dry-run preview of an update plan (shared formatting)."""
+    event_name = event.name.strip()
+    logger.info(
+        "  UPDATE: %s on %s [%s]", event_name, event.start_date, plan["change_desc"],
+    )
+    if plan["event_changed"]:
+        _log_event_diff(event_name, plan["event_diffs"])
+    for tu in plan["ticket_updates"]:
+        parts = []
+        if tu["new_price"] is not None:
+            parts.append(f"price ${tu['old_price']:.2f} -> ${tu['new_price']:.2f}")
+        if tu["new_capacity"] is not None:
+            parts.append(f"capacity {tu['old_capacity']} -> {tu['new_capacity']}")
+        logger.info("    🎫 %s: %s", tu["name"], ", ".join(parts))
+
+
+def apply_event_update_plan(
+    client,
+    runtime: SyncRuntime,
+    event: EventRecord,
+    event_id: str,
+    wix_event: Dict[str, Any],
+    plan: Dict[str, Any],
+) -> bool:
+    """Apply a plan from :func:`compute_event_update_plan` to Wix."""
+    event_name = event.name.strip()
+    ok = True
+
+    if plan["event_changed"]:
+        if not update_wix_event(event, runtime=runtime, existing_event_id=event_id, existing_event=wix_event):
+            ok = False
+
+    if plan["tax_changed"]:
+        if not plan["desired_has_tax"] and plan["wix_has_tax"]:
+            logger.warning(
+                "   ⚠️  Cannot remove tax via API (Wix limitation) — "
+                "use Wix Dashboard to disable tax for %s", event_name,
+            )
+        elif plan["desired_has_tax"]:
+            try:
+                client.update_event(event_id, {
+                    "registration": {
+                        "tickets": {
+                            "taxSettings": {
+                                "type": plan["desired_tax_type"] or "ADDED_AT_CHECKOUT",
+                                "name": plan["desired_tax_name"],
+                                "rate": plan["desired_tax_rate"],
+                            }
+                        }
+                    }
+                })
+                logger.info(
+                    "   💰 Tax updated: %s %s%%",
+                    plan["desired_tax_name"], plan["desired_tax_rate"],
+                )
+            except Exception as exc:
+                logger.warning("   ⚠️  Failed to update tax: %s", exc)
+
+    if plan["tickets_changed"]:
+        for tu in plan["ticket_updates"]:
+            try:
+                client.update_ticket_definition(
+                    tu["id"],
+                    tu["revision"],
+                    price=tu["new_price"],
+                    capacity=tu["new_capacity"],
+                )
+                parts = []
+                if tu["new_price"] is not None:
+                    parts.append(f"price -> ${tu['new_price']:.2f}")
+                if tu["new_capacity"] is not None:
+                    parts.append(f"capacity -> {tu['new_capacity']}")
+                logger.info("   🎫 Updated '%s': %s", tu["name"], ", ".join(parts))
+            except Exception as exc:
+                logger.warning("   ⚠️  Failed to update ticket '%s': %s", tu["name"], exc)
+
+    if plan["cats_changed"]:
+        wix_cat_set = set(plan["wix_cat_names"])
+        desired_cat_set = set(plan["desired_cat_names"])
+        to_add = desired_cat_set - wix_cat_set
+        to_remove = wix_cat_set - desired_cat_set
+
+        for tag in to_add:
+            cat_id = _resolve_category_id(client, tag)
+            if cat_id:
+                try:
+                    client.assign_event_to_category(cat_id, event_id)
+                    logger.info("   🏷️  Added category: %s", tag)
+                except Exception as exc:
+                    logger.warning("   ⚠️  Failed to add category '%s': %s", tag, exc)
+
+        wix_cat_id_map = {c.get("name", ""): c.get("id", "") for c in plan["wix_cat_list"]}
+        for tag in to_remove:
+            cat_id = wix_cat_id_map.get(tag)
+            if cat_id:
+                try:
+                    client.unassign_event_from_category(cat_id, event_id)
+                    logger.info("   🗑️  Removed category: %s", tag)
+                except Exception as exc:
+                    logger.warning("   ⚠️  Failed to remove category '%s': %s", tag, exc)
+
+    return ok
+
+
 def push_config_events(
     runtime: SyncRuntime,
     dry_run: bool = False,
@@ -1118,72 +1377,9 @@ def push_config_events(
                 results["skipped"].append(event_name)
                 continue
 
-            event_diffs = _diff_event_fields(event, wix_event, runtime)
-            event_changed = bool(event_diffs)
+            plan = compute_event_update_plan(client, runtime, event, event_id, wix_event)
 
-            # Check categories
-            wix_cats = wix_event.get("categories", {})
-            wix_cat_list = wix_cats.get("categories", []) if isinstance(wix_cats, dict) else []
-            wix_cat_names = sorted(c.get("name", "") for c in wix_cat_list)
-            sheet_cat_names = sorted(t.strip() for t in (event.category or "").split(";") if t.strip())
-            cats_changed = wix_cat_names != sheet_cat_names
-
-            # Check tax settings
-            wix_reg = wix_event.get("registration", {})
-            wix_tax = (wix_reg.get("tickets") or {}).get("taxSettings", {})
-            sheet_tax_name = event.tax_name or ""
-            sheet_tax_rate = event.tax_rate or ""
-            sheet_tax_type = event.tax_type or ""
-            wix_has_tax = bool(wix_tax.get("name") or wix_tax.get("rate"))
-            sheet_has_tax = bool(sheet_tax_name or sheet_tax_rate)
-            tax_changed = (
-                (wix_has_tax != sheet_has_tax)
-                or (sheet_tax_name != (wix_tax.get("name") or ""))
-                or (sheet_tax_rate != (wix_tax.get("rate") or ""))
-                or (sheet_tax_type != (wix_tax.get("type") or ""))
-            )
-
-            # Check ticket price/capacity (with sales data for safety)
-            wix_ticket_defs = client.get_ticket_definitions(event_id, include_sales=True)
-            sheet_specs = parse_tickets(
-                ticket_name=event.ticket_name,
-                ticket_price=event.ticket_price_raw or event.ticket_price,
-                ticket_capacity=event.ticket_capacity,
-            )
-            tickets_changed = False
-            ticket_updates: List[Dict[str, Any]] = []
-            for spec in sheet_specs:
-                for td in wix_ticket_defs:
-                    if td.get("name") == spec.name:
-                        wix_price = float(td.get("pricingMethod", {}).get("fixedPrice", {}).get("value", "0"))
-                        wix_cap = td.get("initialLimit") or td.get("actualLimit")
-                        sold = (td.get("salesDetails") or {}).get("soldCount", 0)
-
-                        new_price = spec.price if wix_price != spec.price else None
-                        new_capacity = spec.capacity if (wix_cap and wix_cap != spec.capacity) else None
-
-                        if new_capacity is not None and new_capacity < sold:
-                            logger.warning(
-                                "   ⚠️  Cannot reduce '%s' capacity to %d — %d tickets already sold",
-                                spec.name, new_capacity, sold,
-                            )
-                            new_capacity = None
-
-                        if new_price is not None or new_capacity is not None:
-                            tickets_changed = True
-                            ticket_updates.append({
-                                "id": td["id"],
-                                "revision": td["revision"],
-                                "name": spec.name,
-                                "new_price": new_price,
-                                "new_capacity": new_capacity,
-                                "old_price": wix_price,
-                                "old_capacity": wix_cap,
-                                "sold": sold,
-                            })
-                        break
-
-            if not event_changed and not cats_changed and not tax_changed and not tickets_changed:
+            if not plan["any_changes"]:
                 if dry_run:
                     logger.info("  SKIP: %s (no changes)", event_name)
                 else:
@@ -1191,107 +1387,19 @@ def push_config_events(
                 results["skipped"].append(event_name)
                 continue
 
-            changes = []
-            if event_changed:
-                changes.append("event data")
-            if cats_changed:
-                changes.append("categories")
-            if tax_changed:
-                changes.append("tax")
-            if tickets_changed:
-                changes.append("tickets")
-            change_desc = " + ".join(changes)
-
             if dry_run:
-                logger.info("  UPDATE: %s on %s [%s]", event_name, event.start_date, change_desc)
-                if event_changed:
-                    _log_event_diff(event_name, event_diffs)
-                for tu in ticket_updates:
-                    parts = []
-                    if tu["new_price"] is not None:
-                        parts.append(f"price ${tu['old_price']:.2f} -> ${tu['new_price']:.2f}")
-                    if tu["new_capacity"] is not None:
-                        parts.append(f"capacity {tu['old_capacity']} -> {tu['new_capacity']}")
-                    logger.info("    🎫 %s: %s", tu["name"], ", ".join(parts))
+                log_update_plan_dry_run(event, plan)
                 results["updated"].append(event_name)
                 continue
 
-            logger.info("♻️  Updating: %s on %s [%s]", event_name, event.start_date, change_desc)
-            if event_changed:
-                _log_event_diff(event_name, event_diffs)
-            ok = True
+            logger.info(
+                "♻️  Updating: %s on %s [%s]",
+                event_name, event.start_date, plan["change_desc"],
+            )
+            if plan["event_changed"]:
+                _log_event_diff(event_name, plan["event_diffs"])
 
-            if event_changed:
-                if not update_wix_event(event, runtime=runtime, existing_event_id=event_id, existing_event=wix_event):
-                    ok = False
-
-            if tax_changed:
-                if not sheet_has_tax and wix_has_tax:
-                    logger.warning(
-                        "   ⚠️  Cannot remove tax via API (Wix limitation) — "
-                        "use Wix Dashboard to disable tax for %s", event_name,
-                    )
-                elif sheet_has_tax:
-                    try:
-                        client.update_event(event_id, {
-                            "registration": {
-                                "tickets": {
-                                    "taxSettings": {
-                                        "type": sheet_tax_type or "ADDED_AT_CHECKOUT",
-                                        "name": sheet_tax_name,
-                                        "rate": sheet_tax_rate,
-                                    }
-                                }
-                            }
-                        })
-                        logger.info("   💰 Tax updated: %s %s%%", sheet_tax_name, sheet_tax_rate)
-                    except Exception as exc:
-                        logger.warning("   ⚠️  Failed to update tax: %s", exc)
-
-            if tickets_changed:
-                for tu in ticket_updates:
-                    try:
-                        client.update_ticket_definition(
-                            tu["id"],
-                            tu["revision"],
-                            price=tu["new_price"],
-                            capacity=tu["new_capacity"],
-                        )
-                        parts = []
-                        if tu["new_price"] is not None:
-                            parts.append(f"price -> ${tu['new_price']:.2f}")
-                        if tu["new_capacity"] is not None:
-                            parts.append(f"capacity -> {tu['new_capacity']}")
-                        logger.info("   🎫 Updated '%s': %s", tu["name"], ", ".join(parts))
-                    except Exception as exc:
-                        logger.warning("   ⚠️  Failed to update ticket '%s': %s", tu["name"], exc)
-
-            if cats_changed:
-                wix_cat_set = set(wix_cat_names)
-                sheet_cat_set = set(sheet_cat_names)
-                to_add = sheet_cat_set - wix_cat_set
-                to_remove = wix_cat_set - sheet_cat_set
-
-                for tag in to_add:
-                    cat_id = _resolve_category_id(client, tag)
-                    if cat_id:
-                        try:
-                            client.assign_event_to_category(cat_id, event_id)
-                            logger.info("   🏷️  Added category: %s", tag)
-                        except Exception as exc:
-                            logger.warning("   ⚠️  Failed to add category '%s': %s", tag, exc)
-
-                wix_cat_id_map = {c.get("name", ""): c.get("id", "") for c in wix_cat_list}
-                for tag in to_remove:
-                    cat_id = wix_cat_id_map.get(tag)
-                    if cat_id:
-                        try:
-                            client.unassign_event_from_category(cat_id, event_id)
-                            logger.info("   🗑️  Removed category: %s", tag)
-                        except Exception as exc:
-                            logger.warning("   ⚠️  Failed to remove category '%s': %s", tag, exc)
-
-            if ok:
+            if apply_event_update_plan(client, runtime, event, event_id, wix_event, plan):
                 results["updated"].append(event_name)
             else:
                 results["failed"].append(event_name)
@@ -1460,6 +1568,7 @@ def _split_categories_cell(value: str) -> List[str]:
 
 def _index_events_by_id_and_key(
     runtime: SyncRuntime,
+    fieldsets: Optional[List[str]] = None,
 ) -> tuple:
     """Return ``(by_id, by_key)`` dicts of live Wix events.
 
@@ -1473,7 +1582,9 @@ def _index_events_by_id_and_key(
     by_id: Dict[str, Dict[str, Any]] = {}
     by_key: Dict[str, Dict[str, Any]] = {}
 
-    for event in client.iter_events(page_size=100, fieldsets=["CATEGORIES"]):
+    for event in client.iter_events(
+        page_size=100, fieldsets=fieldsets or ["CATEGORIES"],
+    ):
         event_id = event.get("id")
         if not event_id:
             continue
@@ -1850,7 +1961,6 @@ def push_site_config(runtime: SyncRuntime, dry_run: bool = False) -> bool:
     touched are ``query_manual_tax_mappings``, ``update_manual_tax_mapping``,
     and ``bulk_create_manual_tax_mappings``.
     """
-    from .constants import TAX_LOCATION_SETTING, tax_rate_percent_to_decimal
     from .sheets import fetch_site_config_rows
 
     logger.info("🚀 Push site config (tax locations) to Wix...\n")
@@ -1865,7 +1975,21 @@ def push_site_config(runtime: SyncRuntime, dry_run: bool = False) -> bool:
                 runtime.config.site_config_tab,
             )
             return False
+        return process_site_config_rows(runtime, rows, dry_run=dry_run)
+    except Exception as exc:
+        logger.error("Fatal error during site config push: %s", exc)
+        return False
 
+
+def process_site_config_rows(
+    runtime: SyncRuntime,
+    rows: List[Dict[str, Any]],
+    dry_run: bool = False,
+) -> bool:
+    """Apply tax-location rows to Wix (shared by sheet and Notion backends)."""
+    from .constants import TAX_LOCATION_SETTING, tax_rate_percent_to_decimal
+
+    try:
         client = runtime.get_wix_client()
         live_mappings = client.query_manual_tax_mappings()
         live_by_id = {m.get("id", ""): m for m in live_mappings if m.get("id")}

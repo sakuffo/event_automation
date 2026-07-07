@@ -37,6 +37,13 @@ class AppConfig:
     site_config_tab: str = "site_config"
     # Separate source sheet for generate command (defaults to google_sheet_id if not set)
     source_sheet_id: Optional[str] = None
+    # Notion backend
+    notion_token: Optional[str] = None
+    notion_parent_page_id: Optional[str] = None
+    notion_event_scheduling_db_id: Optional[str] = None
+    notion_catalog_db_id: Optional[str] = None
+    notion_settings_db_id: Optional[str] = None
+    notion_site_config_db_id: Optional[str] = None
     _google_credentials_cache: Optional[Dict[str, Any]] = field(
         default=None, init=False, repr=False
     )
@@ -64,6 +71,40 @@ class AppConfig:
 
     def ensure_valid(self) -> None:
         errors = self.validation_errors()
+        if errors:
+            raise ConfigError("; ".join(errors))
+
+    def notion_validation_errors(self, require_databases: bool = True) -> List[str]:
+        """Validation for Notion-backed commands.
+
+        ``require_databases=False`` is used by ``setup-notion``, which only
+        needs the token — it guides the user through picking a parent page.
+        """
+        errors: List[str] = []
+        if not self.notion_token:
+            errors.append("NOTION_ACCESS_TOKEN is missing")
+        if require_databases:
+            for env_name, value in (
+                ("NOTION_EVENT_SCHEDULING_DB_ID", self.notion_event_scheduling_db_id),
+                ("NOTION_CATALOG_DB_ID", self.notion_catalog_db_id),
+                ("NOTION_SETTINGS_DB_ID", self.notion_settings_db_id),
+                ("NOTION_SITE_CONFIG_DB_ID", self.notion_site_config_db_id),
+            ):
+                if not value:
+                    errors.append(f"{env_name} is missing (run setup-notion first)")
+        return errors
+
+    def ensure_notion_valid(self, require_databases: bool = True) -> None:
+        errors = self.notion_validation_errors(require_databases=require_databases)
+        if errors:
+            raise ConfigError("; ".join(errors))
+
+    def ensure_wix_valid(self) -> None:
+        errors: List[str] = []
+        if not self.wix_api_key:
+            errors.append("WIX_API_KEY is missing")
+        if not self.wix_site_id:
+            errors.append("WIX_SITE_ID is missing")
         if errors:
             raise ConfigError("; ".join(errors))
 
@@ -99,6 +140,17 @@ def load_config() -> AppConfig:
         category_config_tab=os.getenv("CATEGORY_CONFIG_TAB", "category_config"),
         site_config_tab=os.getenv("SITE_CONFIG_TAB", "site_config"),
         source_sheet_id=os.getenv("SOURCE_SHEET_ID"),
+        notion_token=os.getenv("NOTION_ACCESS_TOKEN") or os.getenv("NOTION_TOKEN"),
+        notion_parent_page_id=os.getenv("NOTION_PARENT_PAGE_ID"),
+        # NOTION_EVENTS_DB_ID / NOTION_CLASSES_DB_ID are the pre-redesign
+        # names, kept as fallbacks so old .env files and CI secrets keep
+        # working.
+        notion_event_scheduling_db_id=os.getenv("NOTION_EVENT_SCHEDULING_DB_ID")
+        or os.getenv("NOTION_EVENTS_DB_ID"),
+        notion_catalog_db_id=os.getenv("NOTION_CATALOG_DB_ID")
+        or os.getenv("NOTION_CLASSES_DB_ID"),
+        notion_settings_db_id=os.getenv("NOTION_SETTINGS_DB_ID"),
+        notion_site_config_db_id=os.getenv("NOTION_SITE_CONFIG_DB_ID"),
     )
 
 

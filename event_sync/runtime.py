@@ -27,6 +27,7 @@ class SyncRuntime:
         self._wix_client: Optional[WixClient] = None
         self._sheets_service = None
         self._drive_service = None
+        self._notion_store = None
         self._credentials_info: Optional[Dict[str, Any]] = None
         self._drive_download_cache: Dict[str, CacheEntry] = {}
         self._wix_upload_cache: Dict[str, Dict[str, Any]] = {}
@@ -74,6 +75,15 @@ class SyncRuntime:
             )
             self._drive_service = build("drive", "v3", credentials=credentials)
         return self._drive_service
+
+    def get_notion_store(self):
+        if self._notion_store is None:
+            from .notion_store import NotionStore
+
+            if not self.config.notion_token:
+                raise ConfigError("NOTION_ACCESS_TOKEN is missing")
+            self._notion_store = NotionStore(self.config)
+        return self._notion_store
 
     # -------------------------
     # Caching helpers

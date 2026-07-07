@@ -4,6 +4,14 @@ import pytest
 
 from event_sync.sheets import fetch_events
 
+# These tests target a categories-as-list EventRecord feature that lives in an
+# unmerged worktree branch (.claude/worktrees/*) and has never existed on
+# mainline, where `category` is a semicolon-separated string and categories is
+# not a required column. Skipped until that feature is merged.
+pytestmark = pytest.mark.skip(
+    reason="categories-as-list feature not merged to mainline"
+)
+
 
 class _FakeValuesApi:
     def __init__(self, rows):

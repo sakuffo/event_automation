@@ -1,9 +1,14 @@
-name: Sync Events from Google Sheets to Wix
+name: Sync Events from Notion to Wix
 
 on:
   workflow_dispatch:
   schedule:
     - cron: '0 14 * * *'  # 9 AM EST daily
+  # Notion automations/buttons can fire this via a webhook to
+  # https://api.github.com/repos/{owner}/{repo}/dispatches with
+  # body {"event_type": "notion-sync"}. See docs/NOTION_BACKEND.md.
+  repository_dispatch:
+    types: [notion-sync]
 
 jobs:
   sync-events:
@@ -24,13 +29,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run event sync
+      - name: Enrich draft events in Notion
         env:
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}
           WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
-          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          NOTION_ACCESS_TOKEN: ${{ secrets.NOTION_ACCESS_TOKEN }}
+          NOTION_EVENTS_DB_ID: ${{ secrets.NOTION_EVENTS_DB_ID }}
+          NOTION_CATALOG_DB_ID: ${{ secrets.NOTION_CATALOG_DB_ID }}
+          # Legacy secret name; remove once NOTION_CATALOG_DB_ID is set in repo secrets.
+          NOTION_CLASSES_DB_ID: ${{ secrets.NOTION_CLASSES_DB_ID }}
+          NOTION_SETTINGS_DB_ID: ${{ secrets.NOTION_SETTINGS_DB_ID }}
+          NOTION_SITE_CONFIG_DB_ID: ${{ secrets.NOTION_SITE_CONFIG_DB_ID }}
+        run: python sync_events.py enrich
+
+      - name: Sync events from Notion to Wix
+        env:
+          WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
+          WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}
+          WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          NOTION_ACCESS_TOKEN: ${{ secrets.NOTION_ACCESS_TOKEN }}
+          NOTION_EVENTS_DB_ID: ${{ secrets.NOTION_EVENTS_DB_ID }}
+          NOTION_CATALOG_DB_ID: ${{ secrets.NOTION_CATALOG_DB_ID }}
+          # Legacy secret name; remove once NOTION_CATALOG_DB_ID is set in repo secrets.
+          NOTION_CLASSES_DB_ID: ${{ secrets.NOTION_CLASSES_DB_ID }}
+          NOTION_SETTINGS_DB_ID: ${{ secrets.NOTION_SETTINGS_DB_ID }}
+          NOTION_SITE_CONFIG_DB_ID: ${{ secrets.NOTION_SITE_CONFIG_DB_ID }}
         run: python sync_events.py sync
 
       - name: Report status

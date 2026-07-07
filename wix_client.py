@@ -288,6 +288,15 @@ class WixClient:
         response = self._request('POST', f'/events/v3/events/{event_id}/publish')
         return response.json().get('event', {})
 
+    def cancel_event(self, event_id: str) -> Dict[str, Any]:
+        """Cancel an event (closes registration; Wix may notify registrants).
+
+        After cancellation the event status becomes CANCELED. Wix cannot
+        un-cancel — reuse requires clone + publish.
+        """
+        response = self._request('POST', f'/events/v3/events/{event_id}/cancel')
+        return response.json().get('event', {})
+
     # Ticket/Registration Operations
 
     def create_ticket_order(self, event_id: str, tickets: List[Dict[str, Any]],

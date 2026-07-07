@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
+from typing import ClassVar, FrozenSet, List, Optional, Tuple
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
@@ -41,6 +43,12 @@ class EventRecord(BaseModel):
     tax_name: Optional[str] = None
     tax_rate: Optional[str] = None
     tax_type: Optional[str] = None
+
+    # Notion-backend bookkeeping (populated when the record comes from Notion).
+    notion_page_id: Optional[str] = None
+    wix_event_id: Optional[str] = None
+    status: Optional[str] = None
+    synced_hash: Optional[str] = None
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -105,6 +113,86 @@ class EventRecord(BaseModel):
     def to_payload(self) -> dict:
         """Return a plain dict suitable for orchestration or logging."""
         return self.model_dump()
+
+    # Fields that influence what gets pushed to Wix. Bookkeeping fields
+    # (notion_page_id, wix_event_id, status, synced_hash) are excluded so the
+    # hash only changes when a human edit would change the Wix payload.
+    HASHED_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "name",
+        "category",
+        "start_date",
+        "start_time",
+        "end_date",
+        "end_time",
+        "location",
+        "ticket_price",
+        "capacity",
+        "registration_type",
+        "image_url",
+        "teaser",
+        "description",
+        "ticket_name",
+        "ticket_price_raw",
+        "ticket_capacity",
+        "fee_type",
+        "sale_start",
+        "sale_end",
+        "tax_name",
+        "tax_rate",
+        "tax_type",
+    )
+
+    # Fields holding semicolon-separated lists whose tokens may be numeric.
+    _SEMICOLON_FIELDS: ClassVar[FrozenSet[str]] = frozenset(
+        {"ticket_name", "ticket_price_raw", "ticket_capacity", "category"}
+    )
+
+    @staticmethod
+    def _canonical_token(token: str) -> str:
+        token = token.strip()
+        try:
+            number = float(token)
+        except ValueError:
+            return token
+        if number == int(number):
+            return str(int(number))
+        return str(number)
+
+    @classmethod
+    def _canonical_hash_value(cls, field: str, value) -> str:
+        """Normalize a field value so formatting drift doesn't change the hash.
+
+        ``None`` and ``""`` collapse together, floats drop trailing zeros
+        (``35.00`` == ``35``), and semicolon lists normalize token spacing.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            return cls._canonical_token(str(value))
+        text = str(value).strip()
+        if not text:
+            return ""
+        if field in cls._SEMICOLON_FIELDS or field == "tax_rate":
+            tokens = [cls._canonical_token(t) for t in text.split(";")]
+            return "; ".join(t for t in tokens if t)
+        return text
+
+    def content_hash(self) -> str:
+        """Stable hash of the sync-relevant fields.
+
+        Stored in Notion as ``Synced Hash`` after a successful push so later
+        runs can detect edits to already-published rows without a snapshot tab.
+        """
+        payload = {
+            field: self._canonical_hash_value(field, getattr(self, field))
+            for field in self.HASHED_FIELDS
+        }
+        # ticket_price is derived from ticket_price_raw whenever raw is set,
+        # so hash only the raw form to keep round-tripped records stable.
+        if payload.get("ticket_price_raw"):
+            payload["ticket_price"] = ""
+        canonical = json.dumps(payload, sort_keys=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass

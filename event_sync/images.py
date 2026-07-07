@@ -1,10 +1,12 @@
-"""Google Drive download and Wix upload helpers."""
+"""Image download (Google Drive or HTTP) and Wix upload helpers."""
 
 from __future__ import annotations
 
 import os
 from io import BytesIO
 from typing import Any, Dict, Optional, Tuple
+
+import requests
 
 from .constants import MAX_WIX_IMAGE_BYTES
 from .logging_utils import get_logger
@@ -128,24 +130,78 @@ def prepare_image_for_wix(
     return None, filename, mime_type, False
 
 
+def download_from_http(url: str) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """Download an image from a plain HTTP(S) URL (e.g. wixstatic links)."""
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        mime_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+        filename = os.path.basename(url.split("?")[0]) or "event_image"
+        return response.content, filename, mime_type
+    except Exception as exc:
+        logger.error("❌ Failed to download image from URL: %s", exc)
+        return None, None, None
+
+
+def _is_google_drive_url(image_url: str) -> bool:
+    return "drive.google.com" in image_url or "docs.google.com" in image_url
+
+
+_WIXSTATIC_PREFIX = "https://static.wixstatic.com/media/"
+
+
+def is_wix_media_url(image_url: str) -> bool:
+    """True when the URL points at media already hosted by Wix."""
+    return (image_url or "").startswith(_WIXSTATIC_PREFIX)
+
+
+def normalize_wix_media_url(image_url: str) -> str:
+    """Strip render transforms (``/v1/fill/...``) from a wixstatic URL.
+
+    Pulled event images carry a thumbnail transform suffix that doesn't always
+    serve raw bytes; the bare ``/media/{file}`` URL always does.
+    """
+    if not is_wix_media_url(image_url):
+        return image_url
+    media_file = image_url[len(_WIXSTATIC_PREFIX):].split("/", 1)[0]
+    return f"{_WIXSTATIC_PREFIX}{media_file}" if media_file else image_url
+
+
 def upload_image_to_wix(image_url: str, event_name: str, runtime: SyncRuntime) -> Optional[Dict[str, Any]]:
+    """Upload an event image to Wix Media from a Drive link or plain URL.
+
+    Google Drive links use the Drive API (service-account auth); any other
+    http(s) URL is fetched directly. Bare Drive file ids are also accepted.
+    """
     if not image_url:
         return None
 
     try:
-        file_id = extract_google_drive_file_id(image_url)
-        if not file_id:
-            logger.warning("⚠️  Invalid Google Drive URL: %s", image_url)
-            return None
+        image_url = normalize_wix_media_url(image_url)
+        is_http = image_url.startswith("http://") or image_url.startswith("https://")
+        file_id: Optional[str] = None
+        if not is_http or _is_google_drive_url(image_url):
+            file_id = extract_google_drive_file_id(image_url)
 
-        cached_media = runtime.get_cached_wix_media(file_id)
+        # Cache key: Drive file id when available, else the URL itself.
+        cache_key = file_id or image_url
+
+        cached_media = runtime.get_cached_wix_media(cache_key)
         if cached_media is not None:
             runtime.record_wix_hit()
             logger.info("♻️  Reusing cached Wix media for: %s", event_name)
             return cached_media
 
-        logger.info("📥 Downloading image from Google Drive for: %s", event_name)
-        image_data, filename, mime_type = download_from_google_drive(file_id, runtime)
+        if file_id:
+            logger.info("📥 Downloading image from Google Drive for: %s", event_name)
+            image_data, filename, mime_type = download_from_google_drive(file_id, runtime)
+        elif is_http:
+            logger.info("📥 Downloading image from URL for: %s", event_name)
+            image_data, filename, mime_type = download_from_http(image_url)
+        else:
+            logger.warning("⚠️  Unrecognized image reference: %s", image_url)
+            return None
+
         if not image_data:
             logger.warning("⚠️  Failed to download image for: %s", event_name)
             return None
@@ -173,9 +229,9 @@ def upload_image_to_wix(image_url: str, event_name: str, runtime: SyncRuntime) -
         client = runtime.get_wix_client()
         descriptor = client.upload_image(prepared_bytes, filename, mime_type)
 
-        if descriptor and file_id:
+        if descriptor:
             runtime.record_wix_upload()
-            runtime.cache_wix_media(file_id, descriptor)
+            runtime.cache_wix_media(cache_key, descriptor)
 
         logger.info("✅ Uploaded image for: %s", event_name)
         return descriptor
