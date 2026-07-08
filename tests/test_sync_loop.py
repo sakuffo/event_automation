@@ -212,7 +212,7 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
     ensured: List[tuple] = []
     monkeypatch.setattr(
         notion_orchestrator,
-        "ensure_ticket_definition",
+        "ensure_event_tickets",
         lambda c, wix_id, record, **kw: ensured.append((wix_id, record.ticket_price)),
     )
 
@@ -228,22 +228,45 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
     assert kwargs["error"] is None
 
 
-def test_ready_row_with_named_tickets_uses_config_ticket_creation(monkeypatch):
+def test_ready_row_with_named_tickets_passes_specs_through(monkeypatch):
     store = StoreStub(
         [make_row("Ready", ticket_name="GA; VIP", ticket_price="25; 50")]
     )
     client = ClientStub()
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "DRAFT"}})
-    created: List[str] = []
+    seen: List[str] = []
     monkeypatch.setattr(
         notion_orchestrator,
-        "create_tickets_from_config",
-        lambda c, wix_id, record, **kw: created.append(wix_id) or True,
+        "ensure_event_tickets",
+        lambda c, wix_id, record, **kw: seen.append(record.ticket_name) or True,
     )
 
     assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
     assert client.published == ["wix-1"]
-    assert created == ["wix-1"]
+    assert seen == ["GA; VIP"]
+
+
+def test_ensure_event_tickets_branches_on_named_specs(monkeypatch):
+    from event_sync import wix_flows
+
+    calls: List[str] = []
+    monkeypatch.setattr(
+        wix_flows, "create_tickets_from_config",
+        lambda c, eid, rec, existing_defs=None: calls.append("config") or True,
+    )
+    monkeypatch.setattr(
+        wix_flows, "ensure_ticket_definition",
+        lambda c, eid, rec, existing_defs=None: calls.append("single") or True,
+    )
+
+    named = row_to_event_record(make_row("Ready", ticket_name="GA", ticket_price="25"))
+    single = row_to_event_record(make_row("Ready"))
+    free = row_to_event_record(make_row("Ready", ticket_price="0"))
+
+    assert wix_flows.ensure_event_tickets(None, "e1", named) is True
+    assert wix_flows.ensure_event_tickets(None, "e1", single) is True
+    assert wix_flows.ensure_event_tickets(None, "e1", free) is True
+    assert calls == ["config", "single"]
 
 
 def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
@@ -262,7 +285,7 @@ def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
     ensured: List[str] = []
     monkeypatch.setattr(
         notion_orchestrator,
-        "ensure_ticket_definition",
+        "ensure_event_tickets",
         lambda c, wix_id, record, **kw: ensured.append(wix_id),
     )
 
@@ -293,7 +316,7 @@ def test_ready_row_matches_by_title_date_time_when_id_missing(monkeypatch):
         lambda *a, **k: pytest.fail("matched by key; must not create"),
     )
     monkeypatch.setattr(
-        notion_orchestrator, "ensure_ticket_definition", lambda *a, **kw: None
+        notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: None
     )
 
     assert notion_sync_events(make_runtime(store), run_enrich=False) is True

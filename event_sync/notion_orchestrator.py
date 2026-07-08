@@ -50,9 +50,8 @@ from .notion_store import (
 from .wix_flows import (
     apply_event_update_plan,
     compute_event_update_plan,
-    create_tickets_from_config,
     create_wix_event,
-    ensure_ticket_definition,
+    ensure_event_tickets,
     index_events_by_id_and_key,
     log_update_plan_dry_run,
     process_site_config_rows,
@@ -1667,10 +1666,7 @@ def _push_matched_ready_row(
             )
             return
         if ctx.auto_create_tickets and record.registration_type == "TICKETING":
-            if record.ticket_name:
-                create_tickets_from_config(ctx.client, wix_id, record)
-            elif record.ticket_price > 0:
-                ensure_ticket_definition(ctx.client, wix_id, record)
+            ensure_event_tickets(ctx.client, wix_id, record)
         ctx.results["published"].append(name)
         _write_row_result(
             ctx, page_id, status=STATUS_PUBLISHED, wix_event_id=wix_id,
@@ -1701,15 +1697,9 @@ def _push_matched_ready_row(
 
     if ok and ctx.auto_create_tickets and record.registration_type == "TICKETING" and wix_status != "DRAFT":
         # The plan already fetched this event's ticket definitions.
-        plan_defs = plan.get("wix_ticket_defs")
-        if record.ticket_name:
-            create_tickets_from_config(
-                ctx.client, wix_id, record, existing_defs=plan_defs
-            )
-        elif record.ticket_price > 0:
-            ensure_ticket_definition(
-                ctx.client, wix_id, record, existing_defs=plan_defs
-            )
+        ensure_event_tickets(
+            ctx.client, wix_id, record, existing_defs=plan.get("wix_ticket_defs")
+        )
 
     new_status = STATUS_READY if wix_status == "DRAFT" else STATUS_PUBLISHED
     if ok:

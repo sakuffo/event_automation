@@ -347,6 +347,29 @@ def create_tickets_from_config(
     return ok
 
 
+def ensure_event_tickets(
+    client,
+    event_id: str,
+    record: EventRecord,
+    existing_defs: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Create whatever tickets the record calls for.
+
+    Named multi-ticket specs win over the single-price definition; a record
+    with neither is a no-op. Call-site guards (TICKETING registration,
+    auto-create flags, draft status) stay with the callers.
+    """
+    if record.ticket_name:
+        return create_tickets_from_config(
+            client, event_id, record, existing_defs=existing_defs
+        )
+    if record.ticket_price > 0:
+        return ensure_ticket_definition(
+            client, event_id, record, existing_defs=existing_defs
+        )
+    return True
+
+
 def _repair_missing_tickets(
     client,
     event_id: str,
@@ -408,11 +431,7 @@ def create_wix_event(
             logger.info("   ℹ️  Tickets deferred until the draft is published")
         elif event.registration_type == "TICKETING" and auto_create_tickets:
             # A just-created event has no ticket definitions — skip the check.
-            if event.ticket_name:
-                # Multi-ticket specs (semicolon-separated names/prices/capacities)
-                create_tickets_from_config(client, event_id, event, existing_defs=[])
-            elif event.ticket_price > 0:
-                ensure_ticket_definition(client, event_id, event, existing_defs=[])
+            ensure_event_tickets(client, event_id, event, existing_defs=[])
         elif event.registration_type == "TICKETING" and not auto_create_tickets:
             logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
 
