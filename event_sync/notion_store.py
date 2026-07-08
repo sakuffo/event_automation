@@ -460,6 +460,34 @@ def normalize_rate_string(value: Optional[str]) -> str:
         return text
 
 
+def reg_type_to_select(reg_type: Optional[str]) -> str:
+    """Wix registration type -> the human-facing select value (TICKETING -> TICKETS)."""
+    normalized = (reg_type or "").strip().upper()
+    return "TICKETS" if normalized == "TICKETING" else normalized
+
+
+def _float_or_none(value: Any) -> Optional[float]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def split_price(raw: Any) -> Tuple[Optional[float], str]:
+    """Split a raw price value into ``(single_price_or_None, multi_price_text)``.
+
+    Semicolon-separated multi-ticket prices stay text (routed to the Ticket
+    Prices property); a single value parses to a number or None.
+    """
+    text = str(raw or "").strip()
+    if ";" in text:
+        return None, text
+    return _float_or_none(text), ""
+
+
 # ---------------------------------------------------------------------------
 # Row <-> EventRecord adapters
 # ---------------------------------------------------------------------------
@@ -521,19 +549,13 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
     defaults to ``TICKETING``.
     """
     raw_price = str(row.get("ticket_price") or "").strip()
-    if ";" in raw_price:
-        ticket_price = 0.0
-    else:
-        try:
-            ticket_price = float(raw_price) if raw_price else 0.0
-        except ValueError:
-            ticket_price = 0.0
+    price_number, multi_price = split_price(raw_price)
+    ticket_price = 0.0 if multi_price else (price_number or 0.0)
 
-    capacity_str = str(row.get("capacity") or "").strip()
-    try:
-        capacity = int(float(capacity_str)) if capacity_str else DEFAULT_CAPACITY
-    except ValueError:
-        capacity = DEFAULT_CAPACITY
+    capacity_number = _float_or_none(row.get("capacity"))
+    capacity = (
+        int(capacity_number) if capacity_number is not None else DEFAULT_CAPACITY
+    )
 
     reg_type = (row.get("registration_type") or "").strip() or "TICKETING"
 
@@ -568,6 +590,63 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
     )
 
 
+def _event_content_props(
+    *,
+    name: str,
+    date_prop: Dict[str, Any],
+    categories: str,
+    location: str,
+    reg_select: str,
+    capacity: Optional[int],
+    price_number: Optional[float],
+    multi_price_text: str,
+    ticket_name: Optional[str],
+    ticket_capacity: Optional[str],
+    fee_type: Optional[str],
+    sale_start: Optional[str],
+    sale_end: Optional[str],
+    tax_name: Optional[str],
+    tax_rate_number: Optional[float],
+    tax_type: Optional[str],
+    teaser: Optional[str],
+    description: Optional[str],
+    image_url: Optional[str],
+) -> Dict[str, Any]:
+    """The single owner of the Events content-property shape.
+
+    Both builders (validated record and raw row) feed their normalized values
+    through here, so adding a property is a one-place change. ``capacity=None``
+    omits the property entirely — a raw row's blank capacity must not
+    fabricate a number (``row_to_event_record`` substitutes the default at
+    read time instead).
+    """
+    props: Dict[str, Any] = {
+        EventProps.NAME: p_title(name),
+        EventProps.DATE: date_prop,
+        EventProps.CATEGORIES: p_multi_select(
+            [c.strip() for c in (categories or "").split(";") if c.strip()]
+        ),
+        EventProps.LOCATION: p_rich_text(location),
+        EventProps.REGISTRATION_TYPE: p_select(reg_select or None),
+        EventProps.TICKET_PRICE: p_number(price_number),
+        EventProps.TICKET_NAMES: p_rich_text(ticket_name),
+        EventProps.TICKET_PRICES: p_rich_text(multi_price_text),
+        EventProps.TICKET_CAPACITIES: p_rich_text(ticket_capacity),
+        EventProps.FEE_TYPE: p_rich_text(fee_type),
+        EventProps.SALE_START: p_rich_text(sale_start),
+        EventProps.SALE_END: p_rich_text(sale_end),
+        EventProps.TAX_NAME: p_rich_text(tax_name),
+        EventProps.TAX_RATE: p_number(tax_rate_number),
+        EventProps.TAX_TYPE: p_rich_text(tax_type),
+        EventProps.TEASER: p_rich_text(teaser),
+        EventProps.DESCRIPTION: p_rich_text(description),
+        EventProps.IMAGE_URL: p_url(image_url or None),
+    }
+    if capacity is not None:
+        props[EventProps.CAPACITY] = p_number(capacity)
+    return props
+
+
 def event_properties_from_raw_row(row: Dict[str, Any], tz_name: str) -> Dict[str, Any]:
     """Build Events properties from a raw string row without validation.
 
@@ -588,56 +667,35 @@ def event_properties_from_raw_row(row: Dict[str, Any], tz_name: str) -> Dict[str
 
     start_iso = _iso_or_blank(row.get("start_date", ""))
     end_iso = _iso_or_blank(row.get("end_date", ""))
+    price_number, multi_price = split_price(row.get("ticket_price"))
 
-    reg_type = (row.get("registration_type") or "").strip().upper()
-    reg_select = "TICKETS" if reg_type == "TICKETING" else reg_type
-
-    categories = [
-        c.strip() for c in (row.get("categories") or "").split(";") if c.strip()
-    ]
-
-    price_text = str(row.get("ticket_price") or "").strip()
-    price_number: Optional[float] = None
-    if price_text and ";" not in price_text:
-        try:
-            price_number = float(price_text)
-        except ValueError:
-            price_number = None
-
-    rate_number: Optional[float] = None
-    rate_text = str(row.get("tax_rate") or "").strip()
-    if rate_text:
-        try:
-            rate_number = float(rate_text)
-        except ValueError:
-            rate_number = None
-
-    return {
-        EventProps.NAME: p_title(row.get("event_name") or "(untitled)"),
-        EventProps.DATE: p_date(
+    return _event_content_props(
+        name=row.get("event_name") or "(untitled)",
+        date_prop=p_date(
             start_iso,
             (row.get("start_time") or "").strip() or None,
             end_iso or None,
             (row.get("end_time") or "").strip() or None,
             tz_name=tz_name,
         ),
-        EventProps.CATEGORIES: p_multi_select(categories),
-        EventProps.LOCATION: p_rich_text(row.get("location") or ""),
-        EventProps.REGISTRATION_TYPE: p_select(reg_select or None),
-        EventProps.TICKET_PRICE: p_number(price_number),
-        EventProps.TICKET_NAMES: p_rich_text(row.get("ticket_name") or ""),
-        EventProps.TICKET_PRICES: p_rich_text(price_text if ";" in price_text else ""),
-        EventProps.TICKET_CAPACITIES: p_rich_text(row.get("ticket_capacity") or ""),
-        EventProps.FEE_TYPE: p_rich_text(row.get("fee_type") or ""),
-        EventProps.SALE_START: p_rich_text(row.get("sale_start") or ""),
-        EventProps.SALE_END: p_rich_text(row.get("sale_end") or ""),
-        EventProps.TAX_NAME: p_rich_text(row.get("tax_name") or ""),
-        EventProps.TAX_RATE: p_number(rate_number),
-        EventProps.TAX_TYPE: p_rich_text(row.get("tax_type") or ""),
-        EventProps.TEASER: p_rich_text(row.get("short_description") or ""),
-        EventProps.DESCRIPTION: p_rich_text(row.get("detailed_description") or ""),
-        EventProps.IMAGE_URL: p_url((row.get("image_url") or "").strip() or None),
-    }
+        categories=row.get("categories") or "",
+        location=row.get("location") or "",
+        reg_select=reg_type_to_select(row.get("registration_type")),
+        capacity=None,
+        price_number=price_number,
+        multi_price_text=multi_price,
+        ticket_name=row.get("ticket_name") or "",
+        ticket_capacity=row.get("ticket_capacity") or "",
+        fee_type=row.get("fee_type") or "",
+        sale_start=row.get("sale_start") or "",
+        sale_end=row.get("sale_end") or "",
+        tax_name=row.get("tax_name") or "",
+        tax_rate_number=_float_or_none(row.get("tax_rate")),
+        tax_type=row.get("tax_type") or "",
+        teaser=row.get("short_description") or "",
+        description=row.get("detailed_description") or "",
+        image_url=(row.get("image_url") or "").strip(),
+    )
 
 
 def event_properties_from_record(
@@ -647,59 +705,38 @@ def event_properties_from_record(
     include_bookkeeping: bool = False,
 ) -> Dict[str, Any]:
     """Build the Notion properties payload for an Events page from a record."""
-    reg_type = record.registration_type or "TICKETING"
-    reg_select = "TICKETS" if reg_type == "TICKETING" else reg_type
+    price_number, multi_price = split_price(record.ticket_price_raw or "")
+    if not multi_price and price_number is None:
+        # Absent or unparseable single price: fall back to the derived number.
+        price_number = record.ticket_price or None
 
-    categories = [
-        c.strip() for c in (record.category or "").split(";") if c.strip()
-    ]
-
-    raw_price = (record.ticket_price_raw or "").strip()
-    multi_ticket = ";" in raw_price
-    ticket_price_number: Optional[float] = None
-    if not multi_ticket:
-        if raw_price:
-            try:
-                ticket_price_number = float(raw_price)
-            except ValueError:
-                ticket_price_number = record.ticket_price or None
-        elif record.ticket_price:
-            ticket_price_number = record.ticket_price
-
-    tax_rate_number: Optional[float] = None
-    if record.tax_rate:
-        try:
-            tax_rate_number = float(record.tax_rate)
-        except ValueError:
-            tax_rate_number = None
-
-    props: Dict[str, Any] = {
-        EventProps.NAME: p_title(record.name),
-        EventProps.DATE: p_date(
+    props = _event_content_props(
+        name=record.name,
+        date_prop=p_date(
             record.start_date,
             record.start_time,
             record.end_date,
             record.end_time,
             tz_name=tz_name,
         ),
-        EventProps.CATEGORIES: p_multi_select(categories),
-        EventProps.LOCATION: p_rich_text(record.location),
-        EventProps.REGISTRATION_TYPE: p_select(reg_select),
-        EventProps.CAPACITY: p_number(record.capacity),
-        EventProps.TICKET_PRICE: p_number(ticket_price_number),
-        EventProps.TICKET_NAMES: p_rich_text(record.ticket_name),
-        EventProps.TICKET_PRICES: p_rich_text(raw_price if multi_ticket else ""),
-        EventProps.TICKET_CAPACITIES: p_rich_text(record.ticket_capacity),
-        EventProps.FEE_TYPE: p_rich_text(record.fee_type),
-        EventProps.SALE_START: p_rich_text(record.sale_start),
-        EventProps.SALE_END: p_rich_text(record.sale_end),
-        EventProps.TAX_NAME: p_rich_text(record.tax_name),
-        EventProps.TAX_RATE: p_number(tax_rate_number),
-        EventProps.TAX_TYPE: p_rich_text(record.tax_type),
-        EventProps.TEASER: p_rich_text(record.teaser),
-        EventProps.DESCRIPTION: p_rich_text(record.description),
-        EventProps.IMAGE_URL: p_url(record.image_url),
-    }
+        categories=record.category or "",
+        location=record.location,
+        reg_select=reg_type_to_select(record.registration_type or "TICKETING"),
+        capacity=record.capacity,
+        price_number=price_number,
+        multi_price_text=multi_price,
+        ticket_name=record.ticket_name,
+        ticket_capacity=record.ticket_capacity,
+        fee_type=record.fee_type,
+        sale_start=record.sale_start,
+        sale_end=record.sale_end,
+        tax_name=record.tax_name,
+        tax_rate_number=_float_or_none(record.tax_rate),
+        tax_type=record.tax_type,
+        teaser=record.teaser,
+        description=record.description,
+        image_url=record.image_url,
+    )
 
     if include_bookkeeping:
         props[EventProps.WIX_EVENT_ID] = p_rich_text(record.wix_event_id)
@@ -713,6 +750,10 @@ def event_properties_from_record(
 # ---------------------------------------------------------------------------
 # The store
 # ---------------------------------------------------------------------------
+
+
+def _last_synced_prop() -> Dict[str, Any]:
+    return {"date": {"start": datetime.now(timezone.utc).isoformat()}}
 
 
 class NotionStoreError(RuntimeError):
@@ -749,6 +790,12 @@ class NotionStore:
         self._data_source_ids: Dict[str, str] = {}
 
     # -- plumbing ----------------------------------------------------------
+
+    @staticmethod
+    def _require_db(db_id: Optional[str], env_name: str) -> str:
+        if not db_id:
+            raise ConfigError(f"{env_name} is missing")
+        return db_id
 
     def _api(self, description: str, call, *, retry: bool = True):
         """Run one SDK call with transient-error retry and error context.
@@ -851,9 +898,7 @@ class NotionStore:
         dropdown for databases created before those statuses existed. Existing
         options are preserved untouched. Returns how many options were added.
         """
-        db_id = self.config.notion_event_scheduling_db_id
-        if not db_id:
-            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_event_scheduling_db_id, "NOTION_EVENT_SCHEDULING_DB_ID")
 
         ds_id = self.data_source_id(db_id)
         data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
@@ -885,9 +930,7 @@ class NotionStore:
         options and row values are preserved. Returns how many options were
         added.
         """
-        db_id = self.config.notion_catalog_db_id
-        if not db_id:
-            raise ConfigError("NOTION_CATALOG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID")
 
         ds_id = self.data_source_id(db_id)
         data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
@@ -919,9 +962,7 @@ class NotionStore:
         Existing properties (and their values) are never touched — only
         wholly missing ones are created. Returns the names added.
         """
-        db_id = self.config.notion_catalog_db_id
-        if not db_id:
-            raise ConfigError("NOTION_CATALOG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID")
 
         ds_id = self.data_source_id(db_id)
         data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
@@ -1090,9 +1131,7 @@ class NotionStore:
         used by enrich so freshly created rows without a status are picked up
         and bootstrapped to Idea.
         """
-        db_id = self.config.notion_event_scheduling_db_id
-        if not db_id:
-            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_event_scheduling_db_id, "NOTION_EVENT_SCHEDULING_DB_ID")
 
         filter_: Optional[Dict[str, Any]] = None
         if statuses:
@@ -1130,9 +1169,7 @@ class NotionStore:
         ``error=None`` clears the Sync Error property; pass a message to set it.
         """
         props: Dict[str, Any] = {
-            EventProps.LAST_SYNCED: {
-                "date": {"start": datetime.now(timezone.utc).isoformat()}
-            },
+            EventProps.LAST_SYNCED: _last_synced_prop(),
             EventProps.SYNC_ERROR: p_rich_text(error or ""),
         }
         if status:
@@ -1159,21 +1196,12 @@ class NotionStore:
         page_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create or fully refresh an Events row from a record (used by pull)."""
-        db_id = self.config.notion_event_scheduling_db_id
-        if not db_id:
-            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
         props = event_properties_from_record(
             record, self.config.timezone, include_bookkeeping=True
         )
-        props[EventProps.STATUS] = p_select(status)
-        props[EventProps.SOURCE] = p_select(source)
-        props[EventProps.SYNC_ERROR] = p_rich_text("")
-        props[EventProps.LAST_SYNCED] = {
-            "date": {"start": datetime.now(timezone.utc).isoformat()}
-        }
-        if page_id:
-            return self.update_page(page_id, props)
-        return self.create_page(db_id, props)
+        return self._stamp_and_write_event(
+            props, status=status, source=source, error="", page_id=page_id
+        )
 
     def upsert_event_from_raw_row(
         self,
@@ -1190,17 +1218,30 @@ class NotionStore:
         Lets ``pull`` land incomplete Wix events (no date, no location) in
         Notion with a Sync Error note instead of dropping them.
         """
-        db_id = self.config.notion_event_scheduling_db_id
-        if not db_id:
-            raise ConfigError("NOTION_EVENT_SCHEDULING_DB_ID is missing")
         props = event_properties_from_raw_row(row, self.config.timezone)
+        props[EventProps.WIX_EVENT_ID] = p_rich_text(wix_event_id)
+        return self._stamp_and_write_event(
+            props, status=status, source=source, error=error, page_id=page_id
+        )
+
+    def _stamp_and_write_event(
+        self,
+        props: Dict[str, Any],
+        *,
+        status: str,
+        source: str,
+        error: str,
+        page_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Shared bookkeeping stamp + create-or-update tail for Events upserts."""
         props[EventProps.STATUS] = p_select(status)
         props[EventProps.SOURCE] = p_select(source)
-        props[EventProps.WIX_EVENT_ID] = p_rich_text(wix_event_id)
         props[EventProps.SYNC_ERROR] = p_rich_text(error)
-        props[EventProps.LAST_SYNCED] = {
-            "date": {"start": datetime.now(timezone.utc).isoformat()}
-        }
+        props[EventProps.LAST_SYNCED] = _last_synced_prop()
+        db_id = self._require_db(
+            self.config.notion_event_scheduling_db_id,
+            "NOTION_EVENT_SCHEDULING_DB_ID",
+        )
         if page_id:
             return self.update_page(page_id, props)
         return self.create_page(db_id, props)
@@ -1209,9 +1250,7 @@ class NotionStore:
 
     def fetch_classes(self) -> Dict[str, Dict[str, Any]]:
         """Return Classes rows indexed by lowercased class title."""
-        db_id = self.config.notion_catalog_db_id
-        if not db_id:
-            raise ConfigError("NOTION_CATALOG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID")
 
         classes: Dict[str, Dict[str, Any]] = {}
         for page in self.iter_pages(db_id):
@@ -1284,9 +1323,7 @@ class NotionStore:
         if existing_page_id:
             self.update_page(existing_page_id, props)
             return existing_page_id
-        db_id = self.config.notion_catalog_db_id
-        if not db_id:
-            raise ConfigError("NOTION_CATALOG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID")
         page = self.create_page(db_id, props)
         return page.get("id", "")
 
@@ -1294,9 +1331,7 @@ class NotionStore:
 
     def fetch_settings(self) -> Dict[str, str]:
         """Return Settings rows as a lowercase key -> value dict."""
-        db_id = self.config.notion_settings_db_id
-        if not db_id:
-            raise ConfigError("NOTION_SETTINGS_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_settings_db_id, "NOTION_SETTINGS_DB_ID")
 
         settings: Dict[str, str] = {}
         for page in self.iter_pages(db_id):
@@ -1322,9 +1357,7 @@ class NotionStore:
         checks ``fetch_settings`` first) pass ``existing_page_id=None`` to
         skip the per-key DB scan.
         """
-        db_id = self.config.notion_settings_db_id
-        if not db_id:
-            raise ConfigError("NOTION_SETTINGS_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_settings_db_id, "NOTION_SETTINGS_DB_ID")
 
         if existing_page_id is self._SCAN_FOR_EXISTING:
             existing_page_id = None
@@ -1349,9 +1382,7 @@ class NotionStore:
 
     def fetch_site_config_rows(self) -> List[Dict[str, str]]:
         """Return Site Config rows shaped like the sheet reader's dicts."""
-        db_id = self.config.notion_site_config_db_id
-        if not db_id:
-            raise ConfigError("NOTION_SITE_CONFIG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_site_config_db_id, "NOTION_SITE_CONFIG_DB_ID")
 
         rows: List[Dict[str, str]] = []
         for page in self.iter_pages(db_id):
@@ -1382,9 +1413,7 @@ class NotionStore:
         and duplicate keys keep the first page — the same precedence the
         per-row scan used.
         """
-        db_id = self.config.notion_site_config_db_id
-        if not db_id:
-            raise ConfigError("NOTION_SITE_CONFIG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_site_config_db_id, "NOTION_SITE_CONFIG_DB_ID")
 
         by_mapping: Dict[str, Any] = {}
         by_region_group: Dict[Tuple[str, str], Any] = {}
@@ -1403,13 +1432,7 @@ class NotionStore:
 
     @staticmethod
     def _site_config_rate_number(row: Dict[str, Any]) -> Optional[float]:
-        rate_text = str(row.get("tax_rate") or "").strip()
-        if not rate_text:
-            return None
-        try:
-            return float(rate_text)
-        except ValueError:
-            return None
+        return _float_or_none(row.get("tax_rate"))
 
     @classmethod
     def _site_config_page_matches(cls, page: Dict[str, Any], row: Dict[str, Any]) -> bool:
@@ -1443,9 +1466,7 @@ class NotionStore:
         callers avoid a full DB scan per row. Unchanged rows are not
         rewritten. Returns ``"created"``, ``"updated"``, or ``"unchanged"``.
         """
-        db_id = self.config.notion_site_config_db_id
-        if not db_id:
-            raise ConfigError("NOTION_SITE_CONFIG_DB_ID is missing")
+        db_id = self._require_db(self.config.notion_site_config_db_id, "NOTION_SITE_CONFIG_DB_ID")
 
         if page_index is None:
             page_index = self.index_site_config_pages()
