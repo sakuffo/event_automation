@@ -654,180 +654,237 @@ def _resolve_class_for_row(
     return classes.get((row.get("event_name") or "").strip().lower())
 
 
-def _apply_row_defaults(
+@dataclass
+class _Defaults:
+    """Settings-DB defaults with constants fallbacks, parsed once per fill."""
+
+    image: str
+    location: str
+    registration_type: str
+    tax_name: str
+    tax_rate: str
+    tax_type: str
+    fee_type: str
+    capacity: int
+
+    @classmethod
+    def from_settings(cls, settings: Dict[str, str]) -> "_Defaults":
+        try:
+            capacity = int(float(settings.get("default_capacity", "")))
+        except (TypeError, ValueError):
+            capacity = DEFAULT_CAPACITY
+        tax_rate = (settings.get("default_tax_rate") or "").strip() or DEFAULT_TAX_RATE
+        try:
+            float(tax_rate)
+        except ValueError:
+            tax_rate = DEFAULT_TAX_RATE
+        return cls(
+            image=(settings.get("default_img") or "").strip(),
+            location=(settings.get("default_location") or "").strip()
+            or DEFAULT_LOCATION,
+            registration_type=(
+                (settings.get("default_registration_type") or "").strip().upper()
+                or "TICKETS"
+            ),
+            tax_name=(settings.get("default_tax_name") or "").strip()
+            or DEFAULT_TAX_NAME,
+            tax_rate=tax_rate,
+            tax_type=(settings.get("default_tax_type") or "").strip()
+            or DEFAULT_TAX_TYPE,
+            fee_type=(settings.get("default_fee_type") or "").strip()
+            or DEFAULT_FEE_TYPE,
+            capacity=capacity,
+        )
+
+
+def _is_class_template(klass: Optional[Dict[str, Any]]) -> bool:
+    """Blank Type reads as ``class`` so pre-redesign catalog rows keep behaving."""
+    return (
+        klass is not None
+        and (klass.get("type") or TEMPLATE_TYPE_CLASS) == TEMPLATE_TYPE_CLASS
+    )
+
+
+def _fill_schedule(
     row: Dict[str, Any],
     klass: Optional[Dict[str, Any]],
     settings: Dict[str, str],
-    tz_name: str = "America/Toronto",
+    tz_name: str,
 ) -> tuple:
-    """Fill blank fields on an Events row from its template and the Settings DB.
-
-    Only empty fields are touched — anything a human typed stays as-is.
-    Settings ``default_*`` rows win over the constants fallbacks. Mutates
-    ``row`` in place and returns ``(props, changes)``: the Notion property
-    payload to write and human-readable change labels. Rows without a name
-    are ignored (returns empty).
-    """
+    """Template default times fill blank time parts; a start without a usable
+    end gets the default duration; an end at/before the start on the same day
+    is read as overnight and rolls to the next day. Everything is written back
+    so Notion shows the schedule that will be pushed. Times someone picked
+    stay as-is (a zero-duration end counts as unset — Wix rejects those)."""
     props: Dict[str, Any] = {}
     changes: List[str] = []
 
-    if not (row.get("event_name") or "").strip():
+    start_date_iso = (row.get("start_date") or "").strip()
+    if not start_date_iso:
         return props, changes
 
-    # Schedule: template default times (HH:MM) fill blank time parts; a start
-    # without a usable end gets a default duration (Settings
-    # ``default_duration_hours``); an end at/before the start on the same day
-    # is read as overnight and rolls to the next day. Everything is written
-    # back so Notion shows the schedule that will be pushed. Times someone
-    # picked stay as-is (a zero-duration end counts as unset — Wix rejects
-    # those outright).
-    start_date_iso = (row.get("start_date") or "").strip()
-    if start_date_iso:
-        tpl_start = _normalize_hhmm((klass or {}).get("default_start_time") or "")
-        tpl_end = _normalize_hhmm((klass or {}).get("default_end_time") or "")
-        schedule_changes: List[str] = []
+    tpl_start = _normalize_hhmm((klass or {}).get("default_start_time") or "")
+    tpl_end = _normalize_hhmm((klass or {}).get("default_end_time") or "")
 
-        if not (row.get("start_time") or "").strip() and tpl_start:
-            row["start_time"] = tpl_start
-            schedule_changes.append(f"start time {tpl_start}")
+    if not (row.get("start_time") or "").strip() and tpl_start:
+        row["start_time"] = tpl_start
+        changes.append(f"start time {tpl_start}")
 
-        start_time = (row.get("start_time") or "").strip()
-        end_time = (row.get("end_time") or "").strip()
-        end_date_iso = (row.get("end_date") or "").strip() or start_date_iso
+    start_time = (row.get("start_time") or "").strip()
+    end_time = (row.get("end_time") or "").strip()
+    end_date_iso = (row.get("end_date") or "").strip() or start_date_iso
 
-        if start_time:
-            zero_duration = end_time == start_time and end_date_iso == start_date_iso
-            if not end_time or zero_duration:
-                new_end = tpl_end if tpl_end and tpl_end != start_time else ""
-                if new_end:
-                    schedule_changes.append(f"end time {new_end}")
-                else:
-                    hours = _default_duration_hours(settings)
-                    try:
-                        end_dt = datetime.strptime(
-                            start_time, "%H:%M"
-                        ) + timedelta(hours=hours)
-                        new_end = end_dt.strftime("%H:%M")
-                        schedule_changes.append(
-                            f"end time {new_end} (start + {hours:g}h)"
-                        )
-                    except ValueError:
-                        new_end = ""
-                if new_end:
-                    row["end_time"] = new_end
-                    row["end_date"] = start_date_iso
-                    end_time = new_end
-                    end_date_iso = start_date_iso
-
-            # Overnight: an end at/before the start on the same day means it
-            # runs past midnight (Voyeur 21:00 -> 03:00).
-            if end_time and end_date_iso == start_date_iso and end_time <= start_time:
+    if start_time:
+        zero_duration = end_time == start_time and end_date_iso == start_date_iso
+        if not end_time or zero_duration:
+            new_end = tpl_end if tpl_end and tpl_end != start_time else ""
+            if new_end:
+                changes.append(f"end time {new_end}")
+            else:
+                hours = _default_duration_hours(settings)
                 try:
-                    next_day = datetime.strptime(
-                        start_date_iso, "%Y-%m-%d"
-                    ) + timedelta(days=1)
-                    row["end_date"] = next_day.strftime("%Y-%m-%d")
-                    end_date_iso = row["end_date"]
-                    schedule_changes.append("end rolls past midnight")
+                    end_dt = datetime.strptime(
+                        start_time, "%H:%M"
+                    ) + timedelta(hours=hours)
+                    new_end = end_dt.strftime("%H:%M")
+                    changes.append(
+                        f"end time {new_end} (start + {hours:g}h)"
+                    )
                 except ValueError:
-                    pass
+                    new_end = ""
+            if new_end:
+                row["end_time"] = new_end
+                row["end_date"] = start_date_iso
+                end_time = new_end
+                end_date_iso = start_date_iso
 
-        if schedule_changes:
-            props[EventProps.DATE] = p_date(
-                start_date_iso,
-                (row.get("start_time") or "").strip() or None,
-                (row.get("end_date") or "").strip() or None,
-                (row.get("end_time") or "").strip() or None,
-                tz_name=tz_name,
-            )
-            changes.extend(schedule_changes)
+        # Overnight: an end at/before the start on the same day means it
+        # runs past midnight (Voyeur 21:00 -> 03:00).
+        if end_time and end_date_iso == start_date_iso and end_time <= start_time:
+            try:
+                next_day = datetime.strptime(
+                    start_date_iso, "%Y-%m-%d"
+                ) + timedelta(days=1)
+                row["end_date"] = next_day.strftime("%Y-%m-%d")
+                changes.append("end rolls past midnight")
+            except ValueError:
+                pass
 
-    # Staffing: template default instructor (before the description fill,
-    # which prepends "Instructors: ..." from this field).
+    if changes:
+        props[EventProps.DATE] = p_date(
+            start_date_iso,
+            (row.get("start_time") or "").strip() or None,
+            (row.get("end_date") or "").strip() or None,
+            (row.get("end_time") or "").strip() or None,
+            tz_name=tz_name,
+        )
+    return props, changes
+
+
+def _fill_instructor(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+    """Template default instructor (before the description fill, which
+    prepends "Instructors: ..." from this field)."""
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
     if klass and not (row.get("instructor") or "").strip():
         tpl_instructor = (klass.get("default_instructor") or "").strip()
         if tpl_instructor:
             props[EventProps.INSTRUCTOR] = p_rich_text(tpl_instructor)
             changes.append("instructor")
             row["instructor"] = tpl_instructor
+    return props, changes
 
-    default_image = (settings.get("default_img") or "").strip()
-    default_location = (settings.get("default_location") or "").strip() or DEFAULT_LOCATION
-    default_reg_type = (
-        (settings.get("default_registration_type") or "").strip().upper() or "TICKETS"
-    )
-    default_tax_name = (settings.get("default_tax_name") or "").strip() or DEFAULT_TAX_NAME
-    default_tax_rate = (settings.get("default_tax_rate") or "").strip() or DEFAULT_TAX_RATE
-    default_tax_type = (settings.get("default_tax_type") or "").strip() or DEFAULT_TAX_TYPE
-    default_fee_type = (settings.get("default_fee_type") or "").strip() or DEFAULT_FEE_TYPE
-    try:
-        default_capacity = int(float(settings.get("default_capacity", "")))
-    except (TypeError, ValueError):
-        default_capacity = DEFAULT_CAPACITY
 
-    # Categories: merge row + template categories. The rope/class baseline
-    # tags only apply to class templates — event templates (jams, parties,
-    # shows) carry exactly their own tags.
-    is_class_template = (
-        klass is not None
-        and (klass.get("type") or TEMPLATE_TYPE_CLASS) == TEMPLATE_TYPE_CLASS
-    )
+def _fill_categories(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+    """Merge row + template categories. The rope/class baseline tags only
+    apply to class templates — event templates (jams, parties, shows) carry
+    exactly their own tags."""
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
+    if not klass:
+        return props, changes
+
     row_cats = [
         c.strip() for c in (row.get("categories") or "").split(";") if c.strip()
     ]
-    if klass:
-        baseline = _BASELINE_TAGS if is_class_template else []
-        merged: List[str] = []
-        seen: Set[str] = set()
-        for raw in row_cats + (klass.get("categories") or []) + baseline:
-            tag = _slugify_category(raw)
-            if tag and tag not in seen:
-                seen.add(tag)
-                merged.append(tag)
-        if merged != row_cats:
-            props[EventProps.CATEGORIES] = p_multi_select(merged)
-            changes.append("categories")
-            row_cats = merged
-            row["categories"] = "; ".join(merged)
+    baseline = _BASELINE_TAGS if _is_class_template(klass) else []
+    merged: List[str] = []
+    seen: Set[str] = set()
+    for raw in row_cats + (klass.get("categories") or []) + baseline:
+        tag = _slugify_category(raw)
+        if tag and tag not in seen:
+            seen.add(tag)
+            merged.append(tag)
+    if merged != row_cats:
+        props[EventProps.CATEGORIES] = p_multi_select(merged)
+        changes.append("categories")
+        row["categories"] = "; ".join(merged)
+    return props, changes
 
+
+def _fill_venue_and_registration(row: Dict[str, Any], defaults: _Defaults) -> tuple:
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
     if not (row.get("location") or "").strip():
-        props[EventProps.LOCATION] = p_rich_text(default_location)
+        props[EventProps.LOCATION] = p_rich_text(defaults.location)
         changes.append("location")
-        row["location"] = default_location
+        row["location"] = defaults.location
 
     if not (row.get("registration_type") or "").strip():
-        props[EventProps.REGISTRATION_TYPE] = p_select(default_reg_type)
+        props[EventProps.REGISTRATION_TYPE] = p_select(defaults.registration_type)
         changes.append("registration type")
-        row["registration_type"] = default_reg_type
+        row["registration_type"] = defaults.registration_type
+    return props, changes
 
+
+def _fill_capacity(
+    row: Dict[str, Any], klass: Optional[Dict[str, Any]], defaults: _Defaults
+) -> tuple:
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
     if not (row.get("capacity") or "").strip():
         capacity = None
         if klass and klass.get("default_capacity"):
             capacity = int(klass["default_capacity"])
-        props[EventProps.CAPACITY] = p_number(capacity or default_capacity)
+        props[EventProps.CAPACITY] = p_number(capacity or defaults.capacity)
         changes.append("capacity")
-        row["capacity"] = str(capacity or default_capacity)
+        row["capacity"] = str(capacity or defaults.capacity)
+    return props, changes
 
-    if not (row.get("ticket_price") or "").strip():
-        price: Optional[float] = None
-        # `is not None` (not truthiness) so a $0 override — free events like
-        # Bound Together — is honored.
-        if klass and klass.get("price_override") is not None:
-            price = float(klass["price_override"])
-        if price is None:
-            for tag in row_cats:
-                if tag in _BASELINE_TAGS:
-                    continue
-                price = _lookup_price_for_category(tag)
-                if price is not None:
-                    break
-        if price is None and is_class_template:
-            price = 30.0  # class rows always get a price (default $30)
-        if price is not None:
-            props[EventProps.TICKET_PRICE] = p_number(price)
-            changes.append(f"price ${price:g}")
-            row["ticket_price"] = f"{price:g}"
 
+def _fill_pricing(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+    """Price Override wins (a $0 override is honored — free events like Bound
+    Together), then CATEGORY_PRICING by tag, then the $30 class floor."""
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
+    if (row.get("ticket_price") or "").strip():
+        return props, changes
+
+    price: Optional[float] = None
+    if klass and klass.get("price_override") is not None:
+        price = float(klass["price_override"])
+    if price is None:
+        row_cats = [
+            c.strip() for c in (row.get("categories") or "").split(";") if c.strip()
+        ]
+        for tag in row_cats:
+            if tag in _BASELINE_TAGS:
+                continue
+            price = _lookup_price_for_category(tag)
+            if price is not None:
+                break
+    if price is None and _is_class_template(klass):
+        price = 30.0  # class rows always get a price (default $30)
+    if price is not None:
+        props[EventProps.TICKET_PRICE] = p_number(price)
+        changes.append(f"price ${price:g}")
+        row["ticket_price"] = f"{price:g}"
+    return props, changes
+
+
+def _fill_descriptions(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
     if not (row.get("short_description") or "").strip() and klass:
         tagline = (klass.get("tagline") or "").strip()
         if tagline:
@@ -848,42 +905,93 @@ def _apply_row_defaults(
             props[EventProps.DESCRIPTION] = p_rich_text(description)
             changes.append("description")
             row["detailed_description"] = description
+    return props, changes
 
+
+def _fill_image(
+    row: Dict[str, Any], klass: Optional[Dict[str, Any]], defaults: _Defaults
+) -> tuple:
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
     if not (row.get("image_url") or "").strip():
         image = ""
         if klass:
             image = (klass.get("image_url") or "").strip()
-        image = image or default_image
+        image = image or defaults.image
         if image:
             props[EventProps.IMAGE_URL] = p_url(image)
             changes.append("image")
             row["image_url"] = image
+    return props, changes
 
+
+def _fill_tax_and_fees(row: Dict[str, Any], defaults: _Defaults) -> tuple:
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
     is_ticketed = (row.get("registration_type") or "").strip().upper() in {
         "TICKETS", "TICKETING",
     }
+    if not is_ticketed:
+        return props, changes
 
     if (
-        is_ticketed
-        and not (row.get("tax_name") or "").strip()
+        not (row.get("tax_name") or "").strip()
         and not (row.get("tax_rate") or "").strip()
     ):
-        props[EventProps.TAX_NAME] = p_rich_text(default_tax_name)
-        try:
-            props[EventProps.TAX_RATE] = p_number(float(default_tax_rate))
-        except ValueError:
-            props[EventProps.TAX_RATE] = p_number(float(DEFAULT_TAX_RATE))
-            default_tax_rate = DEFAULT_TAX_RATE
-        props[EventProps.TAX_TYPE] = p_rich_text(default_tax_type)
+        props[EventProps.TAX_NAME] = p_rich_text(defaults.tax_name)
+        props[EventProps.TAX_RATE] = p_number(float(defaults.tax_rate))
+        props[EventProps.TAX_TYPE] = p_rich_text(defaults.tax_type)
         changes.append("tax")
-        row["tax_name"] = default_tax_name
-        row["tax_rate"] = default_tax_rate
-        row["tax_type"] = default_tax_type
+        row["tax_name"] = defaults.tax_name
+        row["tax_rate"] = defaults.tax_rate
+        row["tax_type"] = defaults.tax_type
 
-    if is_ticketed and not (row.get("fee_type") or "").strip():
-        props[EventProps.FEE_TYPE] = p_rich_text(default_fee_type)
+    if not (row.get("fee_type") or "").strip():
+        props[EventProps.FEE_TYPE] = p_rich_text(defaults.fee_type)
         changes.append("fee type")
-        row["fee_type"] = default_fee_type
+        row["fee_type"] = defaults.fee_type
+    return props, changes
+
+
+def _apply_row_defaults(
+    row: Dict[str, Any],
+    klass: Optional[Dict[str, Any]],
+    settings: Dict[str, str],
+    tz_name: str = "America/Toronto",
+) -> tuple:
+    """Fill blank fields on an Events row from its template and the Settings DB.
+
+    Only empty fields are touched — anything a human typed stays as-is.
+    Settings ``default_*`` rows win over the constants fallbacks. Mutates
+    ``row`` in place and returns ``(props, changes)``: the Notion property
+    payload to write and human-readable change labels. Rows without a name
+    are ignored (returns empty).
+    """
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
+
+    if not (row.get("event_name") or "").strip():
+        return props, changes
+
+    defaults = _Defaults.from_settings(settings)
+
+    # Fill order matters: instructor before descriptions (which prepend the
+    # "Instructors: ..." line), categories before pricing (tags drive the
+    # CATEGORY_PRICING lookup), registration before tax/fees (only ticketed
+    # rows get them).
+    for frag_props, frag_changes in (
+        _fill_schedule(row, klass, settings, tz_name),
+        _fill_instructor(row, klass),
+        _fill_categories(row, klass),
+        _fill_venue_and_registration(row, defaults),
+        _fill_capacity(row, klass, defaults),
+        _fill_pricing(row, klass),
+        _fill_descriptions(row, klass),
+        _fill_image(row, klass, defaults),
+        _fill_tax_and_fees(row, defaults),
+    ):
+        props.update(frag_props)
+        changes.extend(frag_changes)
 
     return props, changes
 
