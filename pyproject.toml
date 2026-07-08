@@ -10,3 +10,6 @@ select = ["E4", "E7", "E9", "F"]
 # Only collect from tests/ — the repo root and scripts/ hold manual dev tools
 # (some hit live APIs) that must never run under `pytest` / `make unit`.
 testpaths = ["tests"]
+# Bare `pytest` (CI) must find the event_sync package: the root-level test
+# files whose collection used to put the repo root on sys.path are gone.
+pythonpath = ["."]
