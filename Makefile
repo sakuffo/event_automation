@@ -2,7 +2,7 @@
 
 # Default target
 help:
-	@echo "Wix Events + Google Sheets Sync - Available Commands:"
+	@echo "Wix Events + Notion Sync - Available Commands:"
 	@echo ""
 	@echo "Production Commands:"
 	@echo "  make setup      - Complete setup (create venv, install deps, create .env)"
