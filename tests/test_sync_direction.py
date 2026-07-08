@@ -124,6 +124,7 @@ def make_runtime(store: StoreStub) -> SimpleNamespace:
         },
         get_notion_store=lambda: store,
         get_wix_client=lambda: ClientStub(),
+        get_ticket_policy_text=lambda: "",
     )
 
 

@@ -174,11 +174,14 @@ def test_event_template_zero_override_is_honored():
     assert row["ticket_price"] == "0"
 
 
-def test_event_template_without_override_leaves_price_blank():
+def test_event_template_without_override_falls_back_to_default_price():
+    # Before the guaranteed-ticket-defaults change this stayed blank and the
+    # event published with no tickets at all; ticketed rows now land on the
+    # global default_ticket_price instead.
     row = event_row()
     props, _ = _apply_row_defaults(row, template(), {})
-    assert row["ticket_price"] == ""
-    assert EventProps.TICKET_PRICE not in props
+    assert row["ticket_price"] == "30"
+    assert props[EventProps.TICKET_PRICE] == {"number": 30.0}
 
 
 def test_class_template_keeps_30_dollar_fallback():

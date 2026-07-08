@@ -32,9 +32,11 @@ scheduled, plus what's being ideated on and yet to be scheduled. Replaces the
 | Categories | multi-select | humans + enrich | Wix category tags; enrich adds template tags (+ `rope`/`class` baseline for class templates only) |
 | Location | rich text | enrich (default) or humans | |
 | Registration Type | select | enrich (default TICKETS) or humans | TICKETS / RSVP / EXTERNAL / NO_REGISTRATION |
-| Capacity | number | enrich or humans | |
-| Ticket Price | number | enrich (pricing table) or humans | Single-ticket price |
-| Ticket Names / Ticket Prices / Ticket Capacities | rich text | humans | Semicolon-separated for multi-ticket events (`Regular; Student`) |
+| Capacity | number | enrich or humans | Total sellable tickets (inventory), **not** a per-order limit |
+| Ticket Price | number | enrich (pricing table → `default_ticket_price`) or humans | Single-ticket price; an explicit `0` creates a free ticket. Ticketed rows never stay blank — the global `default_ticket_price` (seeded 30) is the last-resort fill |
+| Ticket Names / Ticket Prices / Ticket Capacities | rich text | enrich (template ticket defaults) or humans | Semicolon-separated for multi-ticket events (`Regular; Student`); each capacity is that ticket type's inventory (blank entries inherit the row Capacity). Enrich fills blanks from the template's `Default Ticket Names/Prices/Capacities` |
+| Ticket Limit Per Order | number | enrich (default 4) or humans | Max tickets one buyer can purchase in a single checkout (1–50). Blank = Wix's own default of 20. Event-level Wix setting — the per-ticket `limitPerCheckout` is read-only in the Wix API |
+| Checkout Form | select | enrich (from `default_checkout_form`) or humans | `PER_TICKET` = every attendee fills their own registration form; `PER_ORDER` = one form per checkout. Blank = not managed (the Wix dashboard setting is left alone). Maps to Wix `guestsAssignedSeparately` |
 | Fee Type, Sale Start, Sale End | rich text | humans (optional) | Ticket definition extras |
 | Tax Name / Tax Rate / Tax Type | rich text / number / rich text | enrich (HST 13) or humans | Per-event ticket tax |
 | Instructor / Model | rich text | humans | Prepended to the description as "Instructors: …" |
@@ -45,6 +47,7 @@ scheduled, plus what's being ideated on and yet to be scheduled. Replaces the
 | Last Synced | date | **code only** | |
 | Synced Hash | rich text | **code only** | Hash of the last-synced payload (either direction); drives change detection |
 | Sync Error | rich text | **code only** | Why a row failed or what's missing; empty = healthy |
+| Ticket Policy Status | rich text | **code only** | Do the live tickets carry the Settings `default_ticket_policy`? Blank = policy off or no tickets; `OK (3 tickets)` = all match; `2 of 3 tickets missing policy` = drift (flip to Update, or wait for the next sync, to converge) |
 | Source | select | **code only** | `manual` / `wix` / `gcal` (future Google Calendar importer) |
 | External Ref | rich text | **code only** | Reserved for external importers |
 
@@ -68,8 +71,14 @@ Shared columns: `Template` (title; the Name-match key), `Categories`,
 `Tagline`, `Description`, `Image URL`, optional `Price Override`,
 `Default Capacity`, `Default Start Time` / `Default End Time` (HH:MM, e.g.
 `19:00` — applied when a row's Date has no time, so a date-only Date is
-enough), and `Default Instructor` (applied when a row's Instructor is blank;
-it lands in the description as "Instructors: …").
+enough), `Default Instructor` (applied when a row's Instructor is blank;
+it lands in the description as "Instructors: …"), and
+`Default Ticket Names` / `Default Ticket Prices` / `Default Ticket
+Capacities` (semicolon-separated like the Event Scheduling columns; filled
+onto blank ticketed rows so a template can define its full ticket lineup —
+e.g. `Regular; Student` / `35; 25` / `20; 4`. Template ticket defaults beat
+the global `default_ticket_price`; prices/capacities only apply when ticket
+names end up on the row, since the trio is keyed by names).
 
 Seeded via `import-classes` (classes, from the old sheet) and
 `import-event-templates` (event templates, from the annotated events export
@@ -90,7 +99,11 @@ Replaces the `defaults` tab, and holds the pipeline defaults (seeded by
 | `default_tax_rate` | 13 | Percent (13 = 13%) |
 | `default_tax_type` | ADDED_AT_CHECKOUT | Or INCLUDED_IN_PRICE |
 | `default_fee_type` | FEE_ADDED_AT_CHECKOUT | Wix service fee handling on tickets |
+| `default_ticket_limit_per_order` | 4 | Max tickets per checkout on TICKETS events (1–50; Wix's own default is 20 when a row is left blank) |
+| `default_ticket_price` | 30 | Last-resort single-ticket price for TICKETS rows still blank after the template/category pricing chain — a priceless TICKETING event would publish with no tickets at all ("Tickets are not on sale") |
+| `default_checkout_form` | (blank) | `PER_TICKET` (each ticket needs its own registration form) or `PER_ORDER` (one form per checkout) for TICKETS rows without a Checkout Form value. Blank = not managed — rows stay blank and the Wix dashboard setting wins |
 | `default_duration_hours` | 2 | End time = start + this many hours when a row has no end time (template Default End Time wins when set) |
+| `default_ticket_policy` | (blank) | Policy blurb printed on every ticket of every event (Wix `policyText`, max 1000 chars) — e.g. the insurance notice that must accompany each ticket sold. Blank = off. Applied to every ticket the pipeline creates, and converged onto existing tickets when an event is diffed (Ready-match or Update flip); run `scripts/apply_ticket_policy.py --apply` to backfill events already live in Wix |
 
 ### Site Config — tax by location
 
@@ -209,6 +222,7 @@ template once (about 3 minutes):
    - Registration Type: `TICKETS`
    - Location: `1233R Queen St W, Toronto, ON M6K 1L5, Canada`
    - Capacity: `24`
+   - Ticket Limit Per Order: `4`
    - Tax Name: `HST`, Tax Rate: `13`, Tax Type: `ADDED_AT_CHECKOUT`
    - Fee Type: `FEE_ADDED_AT_CHECKOUT`
 3. Back in the template dropdown, hover over `New Event` → `⋯` →

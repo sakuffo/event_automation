@@ -41,6 +41,16 @@ CATEGORY_PRICING = {
 DEFAULT_LOCATION = "1233R Queen St W, Toronto, ON M6K 1L5, Canada"
 DEFAULT_CAPACITY = 24
 
+# Last-resort ticket price for ticketed rows whose price is still blank after
+# the template / category-pricing fills — a TICKETING event published without
+# a price gets no ticket definition and shows "Tickets are not on sale".
+DEFAULT_TICKET_PRICE = 30.0
+
+# Max tickets per checkout order (event-level Wix ticketLimitPerOrder).
+# Wix defaults to 20 when the field is left unset — far more than one buyer
+# ever needs here — so ticketed rows are filled with this instead.
+DEFAULT_TICKET_LIMIT_PER_ORDER = 4
+
 # Tax applied at checkout (Ontario HST)
 DEFAULT_TAX_NAME = "HST"
 DEFAULT_TAX_RATE = "13"

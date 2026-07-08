@@ -34,6 +34,8 @@ def bare_row(**overrides) -> Dict[str, Any]:
         "detailed_description": "",
         "ticket_name": "",
         "ticket_capacity": "",
+        "ticket_limit_per_order": "",
+        "checkout_form": "",
         "fee_type": "",
         "sale_start": "",
         "sale_end": "",
@@ -61,6 +63,9 @@ def sample_class(**overrides) -> Dict[str, Any]:
         "image_url": "https://drive.google.com/file/d/abc/view",
         "price_override": None,
         "default_capacity": None,
+        "default_ticket_names": "",
+        "default_ticket_prices": "",
+        "default_ticket_capacities": "",
     }
     klass.update(overrides)
     return klass
@@ -74,14 +79,18 @@ class TestApplyRowDefaults:
         assert row["location"]  # constants default
         assert row["registration_type"] == "TICKETS"
         assert row["capacity"] == "24"
+        assert row["ticket_price"] == "30"  # global default price
         assert row["tax_name"] == "HST"
         assert row["tax_rate"] == "13"
         assert row["tax_type"] == "ADDED_AT_CHECKOUT"
         assert row["fee_type"] == "FEE_ADDED_AT_CHECKOUT"
+        assert row["ticket_limit_per_order"] == "4"
         assert "tax" in changes and "fee type" in changes
         assert EventProps.TAX_RATE in props
         assert props[EventProps.TAX_RATE]["number"] == 13.0
+        assert props[EventProps.TICKET_PRICE]["number"] == 30.0
         assert EventProps.FEE_TYPE in props
+        assert props[EventProps.TICKET_LIMIT_PER_ORDER]["number"] == 4
 
     def test_settings_values_win_over_constants(self):
         settings = {
@@ -89,6 +98,7 @@ class TestApplyRowDefaults:
             "default_capacity": "18",
             "default_tax_rate": "15",
             "default_fee_type": "NO_FEE",
+            "default_ticket_limit_per_order": "6",
         }
         row = bare_row()
         _apply_row_defaults(row, None, settings)
@@ -97,6 +107,7 @@ class TestApplyRowDefaults:
         assert row["capacity"] == "18"
         assert row["tax_rate"] == "15"
         assert row["fee_type"] == "NO_FEE"
+        assert row["ticket_limit_per_order"] == "6"
 
     def test_existing_values_are_never_overwritten(self):
         row = bare_row(
@@ -119,8 +130,62 @@ class TestApplyRowDefaults:
 
         assert row["tax_name"] == ""
         assert row["fee_type"] == ""
+        assert row["ticket_limit_per_order"] == ""
         assert EventProps.TAX_NAME not in props
         assert EventProps.FEE_TYPE not in props
+        assert EventProps.TICKET_LIMIT_PER_ORDER not in props
+
+    def test_typed_ticket_limit_is_never_overwritten(self):
+        row = bare_row(ticket_limit_per_order="2")
+        props, _ = _apply_row_defaults(row, None, {})
+
+        assert row["ticket_limit_per_order"] == "2"
+        assert EventProps.TICKET_LIMIT_PER_ORDER not in props
+
+    def test_out_of_range_limit_setting_falls_back_to_constant(self):
+        row = bare_row()
+        _apply_row_defaults(row, None, {"default_ticket_limit_per_order": "80"})
+        assert row["ticket_limit_per_order"] == "4"
+
+    def test_checkout_form_not_filled_when_setting_blank(self):
+        # Blank default = not managed: rows stay blank, Wix keeps its own.
+        row = bare_row()
+        props, _ = _apply_row_defaults(row, None, {})
+        assert row["checkout_form"] == ""
+        assert EventProps.CHECKOUT_FORM not in props
+
+    def test_checkout_form_filled_from_setting_on_ticketed_rows(self):
+        row = bare_row()
+        props, changes = _apply_row_defaults(
+            row, None, {"default_checkout_form": "per_ticket"}
+        )
+        assert row["checkout_form"] == "PER_TICKET"
+        assert props[EventProps.CHECKOUT_FORM]["select"]["name"] == "PER_TICKET"
+        assert "checkout form PER_TICKET" in changes
+
+    def test_checkout_form_not_filled_on_rsvp_rows(self):
+        row = bare_row(registration_type="RSVP")
+        props, _ = _apply_row_defaults(
+            row, None, {"default_checkout_form": "PER_TICKET"}
+        )
+        assert row["checkout_form"] == ""
+        assert EventProps.CHECKOUT_FORM not in props
+
+    def test_typed_checkout_form_is_never_overwritten(self):
+        row = bare_row(checkout_form="PER_ORDER")
+        props, _ = _apply_row_defaults(
+            row, None, {"default_checkout_form": "PER_TICKET"}
+        )
+        assert row["checkout_form"] == "PER_ORDER"
+        assert EventProps.CHECKOUT_FORM not in props
+
+    def test_invalid_checkout_form_setting_is_ignored(self):
+        row = bare_row()
+        props, _ = _apply_row_defaults(
+            row, None, {"default_checkout_form": "SOMETIMES"}
+        )
+        assert row["checkout_form"] == ""
+        assert EventProps.CHECKOUT_FORM not in props
 
     def test_class_fills_categories_price_and_content(self):
         row = bare_row()
@@ -159,10 +224,34 @@ class TestApplyRowDefaults:
         assert changes == []
         assert row["location"] == ""
 
-    def test_no_price_for_classless_uncategorized_row(self):
+    def test_ticketed_row_without_template_gets_default_price(self):
+        # A priceless TICKETING event would publish with no tickets at all,
+        # so the global default price is the last-resort fallback.
         row = bare_row()
         _apply_row_defaults(row, None, {})
+        assert row["ticket_price"] == "30"
+
+    def test_default_price_setting_wins_over_constant(self):
+        row = bare_row()
+        _apply_row_defaults(row, None, {"default_ticket_price": "45"})
+        assert row["ticket_price"] == "45"
+
+    def test_invalid_default_price_setting_falls_back_to_constant(self):
+        row = bare_row()
+        _apply_row_defaults(row, None, {"default_ticket_price": "lots"})
+        assert row["ticket_price"] == "30"
+
+    def test_no_price_for_rsvp_row(self):
+        row = bare_row(registration_type="RSVP")
+        props, _ = _apply_row_defaults(row, None, {})
         assert row["ticket_price"] == ""
+        assert EventProps.TICKET_PRICE not in props
+
+    def test_typed_price_is_never_overwritten(self):
+        row = bare_row(ticket_price="12")
+        props, _ = _apply_row_defaults(row, None, {})
+        assert row["ticket_price"] == "12"
+        assert EventProps.TICKET_PRICE not in props
 
     def test_bad_settings_rate_falls_back_to_constant(self):
         row = bare_row()
@@ -179,7 +268,96 @@ class TestApplyRowDefaults:
             "default_tax_rate",
             "default_tax_type",
             "default_fee_type",
+            "default_ticket_limit_per_order",
+            "default_ticket_price",
+            "default_checkout_form",
+            "default_ticket_policy",
         } <= seeded_keys
+
+
+class TestTemplateTicketDefaults:
+    """Template Default Ticket Names/Prices/Capacities land on ticketed rows."""
+
+    def _klass(self, **overrides):
+        defaults = {
+            "default_ticket_names": "GA; VIP",
+            "default_ticket_prices": "25; 50",
+            "default_ticket_capacities": "20; 4",
+        }
+        defaults.update(overrides)
+        return sample_class(**defaults)
+
+    def test_fills_ticket_trio_from_template(self):
+        row = bare_row()
+        props, changes = _apply_row_defaults(row, self._klass(), {})
+
+        assert row["ticket_name"] == "GA; VIP"
+        assert row["ticket_price"] == "25; 50"
+        assert row["ticket_capacity"] == "20; 4"
+        assert (
+            props[EventProps.TICKET_NAMES]["rich_text"][0]["text"]["content"]
+            == "GA; VIP"
+        )
+        # A semicolon price list routes to the Ticket Prices text property,
+        # not the single-price number.
+        assert (
+            props[EventProps.TICKET_PRICES]["rich_text"][0]["text"]["content"]
+            == "25; 50"
+        )
+        assert EventProps.TICKET_PRICE not in props
+        assert "ticket names" in changes
+        assert "ticket prices" in changes
+        assert "ticket capacities" in changes
+
+    def test_template_trio_beats_global_default_price(self):
+        row = bare_row()
+        _apply_row_defaults(row, self._klass(), {"default_ticket_price": "45"})
+        assert row["ticket_price"] == "25; 50"
+
+    def test_typed_ticket_fields_are_never_overwritten(self):
+        row = bare_row(
+            ticket_name="Members", ticket_price="15", ticket_capacity="10"
+        )
+        props, _ = _apply_row_defaults(row, self._klass(), {})
+
+        assert row["ticket_name"] == "Members"
+        assert row["ticket_price"] == "15"
+        assert row["ticket_capacity"] == "10"
+        assert EventProps.TICKET_NAMES not in props
+        assert EventProps.TICKET_PRICES not in props
+        assert EventProps.TICKET_CAPACITIES not in props
+
+    def test_typed_names_still_get_template_prices(self):
+        row = bare_row(ticket_name="Members")
+        _apply_row_defaults(row, self._klass(), {})
+        assert row["ticket_name"] == "Members"
+        assert row["ticket_price"] == "25; 50"
+        assert row["ticket_capacity"] == "20; 4"
+
+    def test_price_list_without_names_is_not_applied(self):
+        # Prices/capacities are keyed by names — without names they would
+        # produce no tickets, so the normal pricing chain runs instead.
+        row = bare_row()
+        klass = self._klass(default_ticket_names="")
+        _apply_row_defaults(row, klass, {})
+
+        assert row["ticket_name"] == ""
+        assert row["ticket_capacity"] == ""
+        # "The Body in Flight" category price from the template's tags.
+        assert row["ticket_price"] == "40"
+
+    def test_rsvp_row_gets_no_ticket_trio(self):
+        row = bare_row(registration_type="RSVP")
+        props, _ = _apply_row_defaults(row, self._klass(), {})
+
+        assert row["ticket_name"] == ""
+        assert row["ticket_capacity"] == ""
+        assert EventProps.TICKET_NAMES not in props
+        assert EventProps.TICKET_CAPACITIES not in props
+        # The template price list is skipped too; the price comes from the
+        # pre-existing category chain ("The Body in Flight" = $40), which
+        # has never been gated on registration type.
+        assert row["ticket_price"] == "40"
 
 
 class TestTemplateScheduleDefaults:

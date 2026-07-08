@@ -19,7 +19,9 @@ from .models import EventRecord, parse_tickets
 from .runtime import SyncRuntime
 from .wix_mapping import (
     build_wix_event_payload,
+    checkout_form_to_guests_assigned,
     diff_event_fields,
+    guests_assigned_to_checkout_form,
     log_event_diff,
     rates_equal,
     wix_event_match_key,
@@ -245,16 +247,35 @@ def _assign_categories(client, event_id: str, event: EventRecord) -> None:
 # ---------------------------------------------------------------------------
 
 
+def has_explicit_zero_price(event: EventRecord) -> bool:
+    """True when a human (or template) deliberately priced the event at $0.
+
+    A single explicit ``0`` in the price column means a free event that still
+    needs a ticket definition so people can register. A genuinely blank price
+    (``ticket_price_raw`` unset) or a semicolon multi-price list is not an
+    explicit zero.
+    """
+    raw = (event.ticket_price_raw or "").strip()
+    if not raw or ";" in raw:
+        return False
+    try:
+        return float(raw) == 0.0
+    except ValueError:
+        return False
+
+
 def ensure_ticket_definition(
     client,
     event_id: str,
     event: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
+    policy_text: Optional[str] = None,
 ) -> bool:
     """Create a ticket definition if one doesn't already exist. Returns True on success.
 
     ``existing_defs`` lets callers that already fetched the event's ticket
-    definitions (e.g. via an update plan) skip the re-query.
+    definitions (e.g. via an update plan) skip the re-query. ``policy_text``
+    is the global blurb printed on every ticket (Wix ``policyText``).
     """
     existing = (
         existing_defs if existing_defs is not None
@@ -272,6 +293,7 @@ def ensure_ticket_definition(
             ticket_name="Single Ticket",
             price=event.ticket_price,
             capacity=event.capacity,
+            policy_text=policy_text,
         )
         actual = result.get("initialLimit") or result.get("actualLimit")
         logger.info(
@@ -295,12 +317,14 @@ def create_tickets_from_config(
     event_id: str,
     event: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
+    policy_text: Optional[str] = None,
 ) -> bool:
     """Create ticket definitions from the multi-ticket fields.
 
     Skips creation if the event already has ticket definitions to avoid
     duplicates that could confuse customers. ``existing_defs`` lets callers
-    that already fetched them skip the re-query.
+    that already fetched them skip the re-query. ``policy_text`` is the
+    global blurb printed on every ticket (Wix ``policyText``).
     """
     from .constants import DEFAULT_FEE_TYPE
 
@@ -318,6 +342,9 @@ def create_tickets_from_config(
         ticket_name=event.ticket_name,
         ticket_price=event.ticket_price_raw or event.ticket_price,
         ticket_capacity=event.ticket_capacity,
+        # Entries without an explicit capacity inherit the row capacity
+        # (template Default Capacity -> default_capacity Setting).
+        default_capacity=event.capacity,
     )
     if not specs:
         return True
@@ -331,10 +358,10 @@ def create_tickets_from_config(
                 ticket_name=spec.name,
                 price=spec.price,
                 capacity=spec.capacity,
-                limit_per_checkout=spec.limit_per_checkout,
                 fee_type=fee,
                 sale_start=event.sale_start,
                 sale_end=event.sale_end,
+                policy_text=policy_text,
             )
             actual = result.get("initialLimit") or result.get("actualLimit")
             logger.info(
@@ -352,20 +379,25 @@ def ensure_event_tickets(
     event_id: str,
     record: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
+    policy_text: Optional[str] = None,
 ) -> bool:
     """Create whatever tickets the record calls for.
 
-    Named multi-ticket specs win over the single-price definition; a record
-    with neither is a no-op. Call-site guards (TICKETING registration,
-    auto-create flags, draft status) stay with the callers.
+    Named multi-ticket specs win over the single-price definition. The
+    single-price path also fires for an explicit $0 price (free events still
+    need a ticket so people can register); only a genuinely blank price is a
+    no-op. Call-site guards (TICKETING registration, auto-create flags,
+    draft status) stay with the callers.
     """
     if record.ticket_name:
         return create_tickets_from_config(
-            client, event_id, record, existing_defs=existing_defs
+            client, event_id, record,
+            existing_defs=existing_defs, policy_text=policy_text,
         )
-    if record.ticket_price > 0:
+    if record.ticket_price > 0 or has_explicit_zero_price(record):
         return ensure_ticket_definition(
-            client, event_id, record, existing_defs=existing_defs
+            client, event_id, record,
+            existing_defs=existing_defs, policy_text=policy_text,
         )
     return True
 
@@ -375,9 +407,12 @@ def _repair_missing_tickets(
     event_id: str,
     event: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
+    policy_text: Optional[str] = None,
 ) -> None:
     """Check for missing ticket definitions and create one if needed."""
-    if event.registration_type != "TICKETING" or event.ticket_price <= 0:
+    if event.registration_type != "TICKETING":
+        return
+    if event.ticket_price <= 0 and not has_explicit_zero_price(event):
         return
 
     if existing_defs is None:
@@ -386,7 +421,9 @@ def _repair_missing_tickets(
         return
 
     logger.info("   🔧 No ticket definitions found — repairing...")
-    ensure_ticket_definition(client, event_id, event, existing_defs=[])
+    ensure_ticket_definition(
+        client, event_id, event, existing_defs=[], policy_text=policy_text
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +439,7 @@ def create_wix_event(
 ) -> Optional[str]:
     """Create a Wix event. Returns the new event id on success, None on failure."""
     runtime.last_image_failure = None
+    runtime.last_ticket_failure = None
     file_descriptor = None
     if event.image_url:
         file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
@@ -431,7 +469,11 @@ def create_wix_event(
             logger.info("   ℹ️  Tickets deferred until the draft is published")
         elif event.registration_type == "TICKETING" and auto_create_tickets:
             # A just-created event has no ticket definitions — skip the check.
-            ensure_event_tickets(client, event_id, event, existing_defs=[])
+            if not ensure_event_tickets(
+                client, event_id, event, existing_defs=[],
+                policy_text=runtime.get_ticket_policy_text(),
+            ):
+                runtime.last_ticket_failure = event.name
         elif event.registration_type == "TICKETING" and not auto_create_tickets:
             logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
 
@@ -493,6 +535,7 @@ def update_wix_event(
             _repair_missing_tickets(
                 client, existing_event_id, event,
                 existing_defs=existing_ticket_defs,
+                policy_text=runtime.get_ticket_policy_text(),
             )
 
         return True
@@ -533,7 +576,8 @@ def compute_event_update_plan(
 
     # Tax settings (per-event ticket tax)
     wix_reg = wix_event.get("registration", {})
-    wix_tax = (wix_reg.get("tickets") or {}).get("taxSettings", {})
+    wix_tickets_reg = wix_reg.get("tickets") or {}
+    wix_tax = wix_tickets_reg.get("taxSettings", {})
     desired_tax_name = event.tax_name or ""
     desired_tax_rate = event.tax_rate or ""
     desired_tax_type = event.tax_type or ""
@@ -549,6 +593,35 @@ def compute_event_update_plan(
         or (desired_tax_name != (wix_tax.get("name") or ""))
         or not rate_matches
         or (desired_tax_type != (wix_tax.get("type") or ""))
+    )
+
+    # Ticket limit per order (event-level checkout limit). A blank Notion
+    # value means "not managed" — never diffed, so events configured by hand
+    # in the dashboard are left alone. Wix omits the field for non-ticketed
+    # events; no live value also means nothing to diff against.
+    desired_ticket_limit = event.ticket_limit_per_order
+    wix_ticket_limit = wix_tickets_reg.get("ticketLimitPerOrder")
+    limit_changed = (
+        desired_ticket_limit is not None
+        and wix_ticket_limit is not None
+        and desired_ticket_limit != wix_ticket_limit
+    )
+
+    # Checkout form (guestsAssignedSeparately). Blank Notion value = not
+    # managed, never diffed. Wix omits false booleans, so any non-empty
+    # tickets object implies a known live value.
+    desired_guests_assigned = checkout_form_to_guests_assigned(
+        event.checkout_form
+    )
+    wix_guests_assigned = (
+        bool(wix_tickets_reg.get("guestsAssignedSeparately"))
+        if wix_tickets_reg
+        else None
+    )
+    form_changed = (
+        desired_guests_assigned is not None
+        and wix_guests_assigned is not None
+        and desired_guests_assigned != wix_guests_assigned
     )
 
     # Ticket price/capacity (with sales data for safety)
@@ -588,8 +661,36 @@ def compute_event_update_plan(
                         "old_price": wix_price,
                         "old_capacity": wix_cap,
                         "sold": sold,
+                        "new_policy": None,
                     })
                 break
+
+    # Ticket policy blurb (Settings `default_ticket_policy`, applied to every
+    # ticket on every event). A blank setting means "not managed" — never
+    # diffed — so hand-written policies in the dashboard are left alone.
+    desired_policy = (runtime.get_ticket_policy_text() or "").strip()
+    if desired_policy:
+        updates_by_id = {tu["id"]: tu for tu in ticket_updates}
+        for td in wix_ticket_defs:
+            if (td.get("policyText") or "").strip() == desired_policy:
+                continue
+            tickets_changed = True
+            tu = updates_by_id.get(td["id"])
+            if tu is None:
+                tu = {
+                    "id": td["id"],
+                    "revision": td["revision"],
+                    "name": td.get("name", ""),
+                    "new_price": None,
+                    "new_capacity": None,
+                    "old_price": None,
+                    "old_capacity": None,
+                    "sold": (td.get("salesDetails") or {}).get("soldCount", 0),
+                    "new_policy": None,
+                }
+                ticket_updates.append(tu)
+                updates_by_id[td["id"]] = tu
+            tu["new_policy"] = desired_policy
 
     changes = []
     if event_changed:
@@ -598,6 +699,10 @@ def compute_event_update_plan(
         changes.append("categories")
     if tax_changed:
         changes.append("tax")
+    if limit_changed:
+        changes.append("ticket limit per order")
+    if form_changed:
+        changes.append("checkout form")
     if tickets_changed:
         changes.append("tickets")
 
@@ -615,6 +720,12 @@ def compute_event_update_plan(
         "desired_tax_name": desired_tax_name,
         "desired_tax_rate": desired_tax_rate,
         "desired_tax_type": desired_tax_type,
+        "limit_changed": limit_changed,
+        "desired_ticket_limit": desired_ticket_limit,
+        "wix_ticket_limit": wix_ticket_limit,
+        "form_changed": form_changed,
+        "desired_guests_assigned": desired_guests_assigned,
+        "wix_guests_assigned": wix_guests_assigned,
         "tickets_changed": tickets_changed,
         "ticket_updates": ticket_updates,
         "any_changes": bool(changes),
@@ -630,12 +741,25 @@ def log_update_plan_dry_run(event: EventRecord, plan: Dict[str, Any]) -> None:
     )
     if plan["event_changed"]:
         log_event_diff(event_name, plan["event_diffs"])
+    if plan.get("limit_changed"):
+        logger.info(
+            "    🛒 ticket limit per order %s -> %s",
+            plan["wix_ticket_limit"], plan["desired_ticket_limit"],
+        )
+    if plan.get("form_changed"):
+        logger.info(
+            "    📋 checkout form %s -> %s",
+            guests_assigned_to_checkout_form(plan["wix_guests_assigned"]),
+            guests_assigned_to_checkout_form(plan["desired_guests_assigned"]),
+        )
     for tu in plan["ticket_updates"]:
         parts = []
         if tu["new_price"] is not None:
             parts.append(f"price ${tu['old_price']:.2f} -> ${tu['new_price']:.2f}")
         if tu["new_capacity"] is not None:
             parts.append(f"capacity {tu['old_capacity']} -> {tu['new_capacity']}")
+        if tu.get("new_policy") is not None:
+            parts.append("policy text")
         logger.info("    🎫 %s: %s", tu["name"], ", ".join(parts))
 
 
@@ -685,6 +809,39 @@ def apply_event_update_plan(
             except Exception as exc:
                 logger.warning("   ⚠️  Failed to update tax: %s", exc)
 
+    if plan.get("limit_changed"):
+        try:
+            client.update_event(event_id, {
+                "registration": {
+                    "tickets": {
+                        "ticketLimitPerOrder": plan["desired_ticket_limit"],
+                    }
+                }
+            })
+            logger.info(
+                "   🛒 Ticket limit per order: %s -> %s",
+                plan["wix_ticket_limit"], plan["desired_ticket_limit"],
+            )
+        except Exception as exc:
+            logger.warning("   ⚠️  Failed to update ticket limit per order: %s", exc)
+
+    if plan.get("form_changed"):
+        try:
+            client.update_event(event_id, {
+                "registration": {
+                    "tickets": {
+                        "guestsAssignedSeparately": plan["desired_guests_assigned"],
+                    }
+                }
+            })
+            logger.info(
+                "   📋 Checkout form: %s -> %s",
+                guests_assigned_to_checkout_form(plan["wix_guests_assigned"]),
+                guests_assigned_to_checkout_form(plan["desired_guests_assigned"]),
+            )
+        except Exception as exc:
+            logger.warning("   ⚠️  Failed to update checkout form: %s", exc)
+
     if plan["tickets_changed"]:
         for tu in plan["ticket_updates"]:
             try:
@@ -693,12 +850,15 @@ def apply_event_update_plan(
                     tu["revision"],
                     price=tu["new_price"],
                     capacity=tu["new_capacity"],
+                    policy_text=tu.get("new_policy"),
                 )
                 parts = []
                 if tu["new_price"] is not None:
                     parts.append(f"price -> ${tu['new_price']:.2f}")
                 if tu["new_capacity"] is not None:
                     parts.append(f"capacity -> {tu['new_capacity']}")
+                if tu.get("new_policy") is not None:
+                    parts.append("policy text")
                 logger.info("   🎫 Updated '%s': %s", tu["name"], ", ".join(parts))
             except Exception as exc:
                 logger.warning("   ⚠️  Failed to update ticket '%s': %s", tu["name"], exc)

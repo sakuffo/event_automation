@@ -202,38 +202,52 @@ As of the latest update, this project **automatically creates tickets** for TICK
 
 ### How It Works
 
-When you sync events from Google Sheets:
+When sync pushes a Ready/Update row from the Event Scheduling DB:
 
 1. **Event Created** → TICKETING event with `initialType: "TICKETING"`
-2. **Ticket Auto-Created** → "General Admission" ticket with price and capacity from spreadsheet
-3. **Tickets On Sale** → Immediately available for purchase
+2. **Tickets Auto-Created** → named tickets from `Ticket Names/Prices/Capacities`
+   when set, otherwise a single "Single Ticket" from `Ticket Price`/`Capacity`
+3. **Tickets On Sale** → immediately available for purchase
 
 ### Ticket Creation Controls
 
 Automatic ticketing only fires when **all** of these conditions are true:
 
-1. `registration_type` (Column K) resolves to `TICKETING` (`TICKETS` is auto-normalised).
-2. `ticket_price` (Column I) parses to a value greater than zero.
+1. `Registration Type` resolves to `TICKETING` (`TICKETS` is auto-normalised).
+2. The row has `Ticket Names` (multi-ticket path) **or** a non-blank
+   `Ticket Price` — including an explicit `0`, which creates a **free ticket**
+   (Wix accepts a `fixedPrice` of `0` and marks the ticket free) so people
+   can still register for free events. Only a genuinely blank price creates
+   nothing.
 3. You run `python sync_events.py sync` **without** the `--no-tickets` flag.
 
-If any condition fails, the sync logs:
+In practice a ticketed row can no longer reach sync with a blank price: the
+enrich pass guarantees one via the fill hierarchy — template
+`Default Ticket Names/Prices/Capacities` → template `Price Override` →
+`CATEGORY_PRICING` by tag → the `default_ticket_price` Setting (seeded 30).
+Blank ticket-entry capacities inherit the row `Capacity` (template
+`Default Capacity` → `default_capacity` Setting).
 
-```
-ℹ️  Ticket creation skipped (--no-tickets flag set)
-💡 Re-run without --no-tickets to enable automatic tickets or add them manually via Wix Dashboard
-```
+If ticket creation fails anyway (API error), the event still publishes but
+the row gets a **Sync Error** note ("Published but ticket creation failed —
+no tickets are on sale…") instead of failing silently — fix the row and flip
+Status to `Update` to retry.
 
 #### Skip Ticket Creation
 
-- **Per event:** leave Column I empty or set it to `0`. The event is still created; tickets can be added manually in Wix.
+- **Per event:** rows pulled from Wix with no tickets keep a blank price and
+  create nothing when flipped to `Update`. For a new row, use an RSVP
+  registration type or `--no-tickets` — an explicit `0` price now means
+  "create a free ticket", not "skip".
 - **Entire run:** call `python sync_events.py sync --no-tickets`. The log will remind you to rerun without the flag when you are ready.
 
-#### Mixed Sheets Example
+#### Mixed Rows Example
 
 | Title | Price | Capacity | Registration | Auto tickets? |
 |-------|-------|----------|--------------|----------------|
 | Workshop A | `25.00` | `50` | `TICKETS` | ✅ Yes |
-| Workshop B | `0` | `50` | `TICKETS` | ❌ No (price = 0) |
+| Community Jam | `0` | `50` | `TICKETS` | ✅ Yes — free ticket |
+| Wix-pulled row | *(blank)* | `50` | `TICKETS` | ❌ No (no price at all) |
 | Webinar C | `15` | `200` | `RSVP` | ❌ No (registration) |
 
 #### Command Reference
@@ -245,16 +259,6 @@ python sync_events.py sync
 # Skip ticket creation for this run
 python sync_events.py sync --no-tickets
 ```
-
-#### Spreadsheet Column Refresher
-
-| Column | Field | Required for tickets? | Notes |
-|--------|-------|-----------------------|-------|
-| I | Ticket Price | ✅ | Must be > 0 to auto-create tickets |
-| J | Capacity | ✅ | Optional but recommended (defaults to spreadsheet value) |
-| K | Registration Type | ✅ | `TICKETS` becomes `TICKETING` for REST API |
-
-This section replaces the standalone `TICKET_CONTROL_GUIDE.md`, giving operators a single home for ticket automation guidance.
 
 ### Implementation
 
@@ -291,7 +295,6 @@ ticket_data = {
     "ticketDefinition": {
         "eventId": event_id,  # Required in body (not query param)
         "name": "General Admission",
-        "limitPerCheckout": 10,  # Max tickets per order
         "pricingMethod": {  # Object format (not string)
             "fixedPrice": {
                 "value": "25.00",
@@ -299,10 +302,90 @@ ticket_data = {
             }
         },
         "feeType": "FEE_ADDED_AT_CHECKOUT",  # Buyer pays fees
-        "capacity": 50  # Optional: total tickets available
+        "initialLimit": 50  # Optional: total sellable tickets (inventory)
     }
 }
 ```
+
+### Global Ticket Policy Blurb (`policyText`)
+
+Each ticket definition has a writable `policyText` field (max 1000 chars) —
+the policy text shown with the ticket a buyer receives. Wix only offers it
+per ticket per event, but the pipeline treats it as **one global setting**:
+the `default_ticket_policy` row in the Notion Settings DB (seeded blank by
+`setup-notion`).
+
+- **New tickets**: every ticket definition the pipeline creates (single-price
+  and multi-ticket alike) carries the blurb.
+- **Existing tickets**: the update plan diffs `policyText` on an event's live
+  ticket definitions whenever the event is diffed (a Ready row matching a
+  live event, or a row flipped to `Update`) and patches any that drift.
+- **Blank setting = not managed**: nothing is sent and hand-written policies
+  in the dashboard are never touched (same semantics as a blank
+  `Ticket Limit Per Order`).
+- **Backfill**: `python scripts/apply_ticket_policy.py` previews (dry run by
+  default) and `--apply` patches the blurb onto every ticket of every
+  upcoming event — use it once after first setting the policy so tickets
+  already on sale get it immediately.
+
+#### Ticket Policy Status (read-only column)
+
+The Event Scheduling DB has a code-owned **`Ticket Policy Status`** column
+showing whether an event's live tickets carry the `default_ticket_policy`.
+Humans never edit it; sync (Published refresh, Update/Ready pushes) and
+`pull` write it:
+
+- Blank — the Settings policy is blank (feature off) or the event has no
+  tickets.
+- `OK (3 tickets)` — every ticket definition's `policyText` matches.
+- `2 of 3 tickets missing policy` / `1 of 2 tickets different policy` —
+  drift, e.g. a ticket added or edited in the Wix dashboard. Flip the row to
+  `Update` (or just wait for the next daily sync's diff) to converge it.
+
+The status is not part of the row content hash, so dashboard-side policy
+drift alone still gets written on the next refresh even when nothing else
+changed.
+
+### Checkout Limits: The Two `limit` Fields
+
+Easy to confuse — only one of them is writable:
+
+| Field | Where | Writable? | Meaning |
+|-------|-------|-----------|---------|
+| `registration.tickets.ticketLimitPerOrder` | Event (create/update event) | ✅ Yes (0–50) | Max tickets a buyer can purchase in one checkout. **Wix defaults it to 20 when never set.** |
+| `limitPerCheckout` | Ticket definition | ❌ Read-only | Derived by Wix from remaining stock and the event-level limit. Sending it in a create request is silently ignored. |
+
+The pipeline exposes the writable one as the **`Ticket Limit Per Order`**
+column in the Event Scheduling DB (enrich fills blanks from the
+`default_ticket_limit_per_order` setting, seeded at 4). It is sent inside
+`registration.tickets` at event-creation time and patched via update-event
+when an `Update` row changes it. A ticket definition's `initialLimit`
+(the `Capacity` / `Ticket Capacities` columns) is total inventory, not a
+per-order limit.
+
+### Checkout Form: One Form Per Ticket or Per Order
+
+Wix's `registration.tickets.guestsAssignedSeparately` boolean controls
+whether the registration form must be filled out separately for **each
+ticket** in an order (true) or once **per order** (false, the Wix default).
+The pipeline exposes it as the **`Checkout Form`** select column in the
+Event Scheduling DB:
+
+| Select value | Wix `guestsAssignedSeparately` | Meaning |
+|--------------|--------------------------------|---------|
+| `PER_TICKET` | `true` | Every attendee fills their own form (per-ticket check-in) |
+| `PER_ORDER` | `false` | One form for the whole order |
+| *(blank)* | *(not sent)* | Not managed — the Wix dashboard setting is left alone |
+
+Semantics mirror `Ticket Limit Per Order` exactly:
+
+- **Create**: a non-blank value is sent inside `registration.tickets`.
+- **Update**: the plan diffs it only when the row value is non-blank and
+  patches via the same `registration.tickets` update.
+- **Pull / Published refresh**: the live value is read back into the row
+  (`PER_TICKET`/`PER_ORDER`), so Wix stays authoritative for Published rows.
+- **Default**: the `default_checkout_form` Settings row (seeded blank = not
+  managed). When set, enrich fills blank `Checkout Form` on ticketed rows.
 
 ### Key Discoveries
 
@@ -330,7 +413,11 @@ If ticket creation fails, the event is still created successfully:
    💡 You can add tickets manually via Wix Dashboard
 ```
 
-This ensures your events are never lost due to ticket creation issues.
+This ensures your events are never lost due to ticket creation issues. The
+failure is also surfaced on the Notion row as a **Sync Error** note
+("Published but ticket creation failed — no tickets are on sale. Check the
+sync logs, then set Status to Update to retry."), so a published-but-unsellable
+event is always visible in the Event Scheduling DB.
 
 ### Manual Ticket Creation (Still Supported)
 

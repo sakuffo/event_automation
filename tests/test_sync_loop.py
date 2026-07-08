@@ -169,6 +169,7 @@ def make_runtime(store: StoreStub, client: Optional[ClientStub] = None) -> Simpl
         },
         get_notion_store=lambda: store,
         get_wix_client=lambda: client or ClientStub(),
+        get_ticket_policy_text=lambda: "",
     )
 
 
@@ -213,7 +214,9 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
     monkeypatch.setattr(
         notion_orchestrator,
         "ensure_event_tickets",
-        lambda c, wix_id, record, **kw: ensured.append((wix_id, record.ticket_price)),
+        lambda c, wix_id, record, **kw: ensured.append(
+            (wix_id, record.ticket_price)
+        ) or True,
     )
 
     assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
@@ -252,21 +255,25 @@ def test_ensure_event_tickets_branches_on_named_specs(monkeypatch):
     calls: List[str] = []
     monkeypatch.setattr(
         wix_flows, "create_tickets_from_config",
-        lambda c, eid, rec, existing_defs=None: calls.append("config") or True,
+        lambda c, eid, rec, existing_defs=None, policy_text=None: calls.append("config") or True,
     )
     monkeypatch.setattr(
         wix_flows, "ensure_ticket_definition",
-        lambda c, eid, rec, existing_defs=None: calls.append("single") or True,
+        lambda c, eid, rec, existing_defs=None, policy_text=None: calls.append("single") or True,
     )
 
     named = row_to_event_record(make_row("Ready", ticket_name="GA", ticket_price="25"))
     single = row_to_event_record(make_row("Ready"))
+    # An explicit $0 is a free event that still needs a ticket definition so
+    # people can register; only a genuinely blank price is a no-op.
     free = row_to_event_record(make_row("Ready", ticket_price="0"))
+    blank = row_to_event_record(make_row("Ready", ticket_price=""))
 
     assert wix_flows.ensure_event_tickets(None, "e1", named) is True
     assert wix_flows.ensure_event_tickets(None, "e1", single) is True
     assert wix_flows.ensure_event_tickets(None, "e1", free) is True
-    assert calls == ["config", "single"]
+    assert wix_flows.ensure_event_tickets(None, "e1", blank) is True
+    assert calls == ["config", "single", "single"]
 
 
 def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
@@ -286,7 +293,7 @@ def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
     monkeypatch.setattr(
         notion_orchestrator,
         "ensure_event_tickets",
-        lambda c, wix_id, record, **kw: ensured.append(wix_id),
+        lambda c, wix_id, record, **kw: ensured.append(wix_id) or True,
     )
 
     assert notion_sync_events(make_runtime(store), run_enrich=False) is True
@@ -316,7 +323,7 @@ def test_ready_row_matches_by_title_date_time_when_id_missing(monkeypatch):
         lambda *a, **k: pytest.fail("matched by key; must not create"),
     )
     monkeypatch.setattr(
-        notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: None
+        notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: True
     )
 
     assert notion_sync_events(make_runtime(store), run_enrich=False) is True
@@ -732,7 +739,10 @@ def test_enrich_writes_error_note_and_keeps_idea_status():
 def test_enrich_skips_noop_draft_rows_entirely():
     # A complete Draft row with nothing to fill and no stale error costs
     # zero Notion writes.
-    store = StoreStub([make_row("Draft", fee_type="FEE_ADDED_AT_CHECKOUT")])
+    store = StoreStub([
+        make_row("Draft", fee_type="FEE_ADDED_AT_CHECKOUT",
+                 ticket_limit_per_order="4"),
+    ])
     assert enrich_events(make_enrich_runtime(store)) is True
     assert store.field_updates == []
 
@@ -754,7 +764,8 @@ def test_enrich_skips_rewrite_of_unchanged_error_note():
     # An incomplete row whose note is already up to date is not rewritten.
     store = StoreStub([
         make_row("Draft", start_date="", start_time="",
-                 fee_type="FEE_ADDED_AT_CHECKOUT"),
+                 fee_type="FEE_ADDED_AT_CHECKOUT",
+                 ticket_limit_per_order="4"),
     ])
     assert enrich_events(make_enrich_runtime(store)) is True
     assert len(store.field_updates) == 1
@@ -763,7 +774,8 @@ def test_enrich_skips_rewrite_of_unchanged_error_note():
 
     # Second pass with the note already stored on the row: no write.
     row = make_row("Draft", start_date="", start_time="",
-                   fee_type="FEE_ADDED_AT_CHECKOUT", sync_error=note)
+                   fee_type="FEE_ADDED_AT_CHECKOUT",
+                   ticket_limit_per_order="4", sync_error=note)
     store2 = StoreStub([row])
     assert enrich_events(make_enrich_runtime(store2)) is True
     assert store2.field_updates == []
@@ -867,6 +879,65 @@ def test_create_with_failed_image_upload_gets_sync_error_note(monkeypatch):
     assert kwargs["status"] == "Published"
     assert "upload failed" in kwargs["error"]
     assert DRIVE_URL in kwargs["error"]
+
+
+# ---------------------------------------------------------------------------
+# Ticket-creation failures surface as Sync Error (never silently Published)
+# ---------------------------------------------------------------------------
+
+
+def test_create_with_failed_tickets_gets_sync_error_note(monkeypatch):
+    store = StoreStub([make_row("Ready", wix_event_id="")])
+    patch_index(monkeypatch)
+
+    def fake_create(record, *, runtime, **kwargs):
+        runtime.last_ticket_failure = record.name
+        return "new-wix-id"
+
+    monkeypatch.setattr(notion_orchestrator, "create_wix_event", fake_create)
+
+    runtime = make_runtime(store)
+    assert notion_sync_events(runtime, run_enrich=False) is True
+    _, kwargs = store.sync_results[0]
+    assert kwargs["status"] == "Published"
+    assert "ticket creation failed" in kwargs["error"]
+    # No tickets exist, so the policy column stays blank.
+    assert kwargs["ticket_policy_status"] == ""
+
+
+def test_publish_draft_with_failed_tickets_writes_note(monkeypatch):
+    store = StoreStub([make_row("Ready")])
+    client = ClientStub()
+    patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "DRAFT"}})
+    monkeypatch.setattr(
+        notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: False
+    )
+
+    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert client.published == ["wix-1"]
+    _, kwargs = store.sync_results[0]
+    assert kwargs["status"] == "Published"
+    assert "ticket creation failed" in kwargs["error"]
+    assert kwargs["ticket_policy_status"] == ""
+
+
+def test_matched_live_row_with_failed_tickets_writes_note(monkeypatch):
+    store = StoreStub([make_row("Ready")])
+    patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "compute_event_update_plan",
+        lambda *a: stub_plan(any_changes=False),
+    )
+    monkeypatch.setattr(
+        notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: False
+    )
+
+    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    _, kwargs = store.sync_results[0]
+    assert kwargs["status"] == "Published"
+    assert "ticket creation failed" in kwargs["error"]
+    assert kwargs["ticket_policy_status"] == ""
 
 
 # ---------------------------------------------------------------------------

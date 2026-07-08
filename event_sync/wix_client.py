@@ -405,17 +405,25 @@ class WixClient:
         ticket_name: str,
         price: float,
         capacity: Optional[int] = None,
-        limit_per_checkout: int = 4,
         currency: str = "CAD",
         fee_type: str = "FEE_ADDED_AT_CHECKOUT",
         sale_start: Optional[str] = None,
         sale_end: Optional[str] = None,
+        policy_text: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create a ticket definition for a TICKETING event."""
+        """Create a ticket definition for a TICKETING event.
+
+        ``policy_text`` becomes the definition's ``policyText`` — the policy
+        blurb printed on the ticket the buyer receives (max 1000 chars).
+
+        Note: the definition's ``limitPerCheckout`` is read-only — Wix derives
+        it from remaining stock and the event-level
+        ``registration.tickets.ticketLimitPerOrder`` (set via create/update
+        event), so it cannot be sent here.
+        """
         definition: Dict[str, Any] = {
             "eventId": event_id,
             "name": ticket_name,
-            "limitPerCheckout": limit_per_checkout,
             "pricingMethod": {
                 "fixedPrice": {
                     "value": str(price),
@@ -427,6 +435,9 @@ class WixClient:
 
         if capacity is not None and capacity > 0:
             definition["initialLimit"] = capacity
+
+        if policy_text:
+            definition["policyText"] = policy_text
 
         if sale_start or sale_end:
             sale_period: Dict[str, Any] = {}
@@ -462,8 +473,9 @@ class WixClient:
         price: Optional[float] = None,
         capacity: Optional[int] = None,
         currency: str = "CAD",
+        policy_text: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Update an existing ticket definition's price and/or capacity."""
+        """Update an existing ticket definition's price/capacity/policy text."""
         update: Dict[str, Any] = {
             "id": ticket_def_id,
             "revision": revision,
@@ -474,6 +486,8 @@ class WixClient:
             }
         if capacity is not None and capacity > 0:
             update["initialLimit"] = capacity
+        if policy_text is not None:
+            update["policyText"] = policy_text
 
         response = self._request(
             'PATCH',

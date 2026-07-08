@@ -127,6 +127,11 @@ class EventProps:
     TICKET_NAMES = "Ticket Names"
     TICKET_PRICES = "Ticket Prices"
     TICKET_CAPACITIES = "Ticket Capacities"
+    # Event-level max tickets per checkout (Wix ticketLimitPerOrder, 1-50).
+    TICKET_LIMIT_PER_ORDER = "Ticket Limit Per Order"
+    # PER_TICKET / PER_ORDER (Wix guestsAssignedSeparately); blank = not
+    # managed, the Wix dashboard setting is left alone.
+    CHECKOUT_FORM = "Checkout Form"
     FEE_TYPE = "Fee Type"
     SALE_START = "Sale Start"
     SALE_END = "Sale End"
@@ -143,6 +148,9 @@ class EventProps:
     LAST_SYNCED = "Last Synced"
     SYNCED_HASH = "Synced Hash"
     SYNC_ERROR = "Sync Error"
+    # Read-only: does the live event's tickets carry the Settings
+    # default_ticket_policy? Written by sync/pull, never by humans.
+    TICKET_POLICY_STATUS = "Ticket Policy Status"
     SOURCE = "Source"
     EXTERNAL_REF = "External Ref"
 
@@ -161,6 +169,11 @@ class TemplateProps:
     DEFAULT_START_TIME = "Default Start Time"
     DEFAULT_END_TIME = "Default End Time"
     DEFAULT_INSTRUCTOR = "Default Instructor"
+    # Semicolon-separated ticket defaults mirroring the Event Scheduling
+    # Ticket Names/Prices/Capacities columns; filled onto blank ticketed rows.
+    DEFAULT_TICKET_NAMES = "Default Ticket Names"
+    DEFAULT_TICKET_PRICES = "Default Ticket Prices"
+    DEFAULT_TICKET_CAPACITIES = "Default Ticket Capacities"
 
 
 class SettingProps:
@@ -185,6 +198,9 @@ class SiteConfigProps:
 # Human-facing select value; EventRecord normalizes TICKETS -> TICKETING.
 REGISTRATION_TYPE_OPTIONS = ["TICKETS", "RSVP", "EXTERNAL", "NO_REGISTRATION"]
 
+# Checkout Form select values (Wix guestsAssignedSeparately: true/false).
+CHECKOUT_FORM_OPTIONS = ["PER_TICKET", "PER_ORDER"]
+
 
 def _events_db_properties(catalog_data_source_id: Optional[str]) -> Dict[str, Any]:
     """Schema for the Events database."""
@@ -204,6 +220,12 @@ def _events_db_properties(catalog_data_source_id: Optional[str]) -> Dict[str, An
         EventProps.TICKET_NAMES: {"rich_text": {}},
         EventProps.TICKET_PRICES: {"rich_text": {}},
         EventProps.TICKET_CAPACITIES: {"rich_text": {}},
+        EventProps.TICKET_LIMIT_PER_ORDER: {"number": {"format": "number"}},
+        EventProps.CHECKOUT_FORM: {
+            "select": {
+                "options": [{"name": name} for name in CHECKOUT_FORM_OPTIONS]
+            }
+        },
         EventProps.FEE_TYPE: {"rich_text": {}},
         EventProps.SALE_START: {"rich_text": {}},
         EventProps.SALE_END: {"rich_text": {}},
@@ -219,6 +241,7 @@ def _events_db_properties(catalog_data_source_id: Optional[str]) -> Dict[str, An
         EventProps.LAST_SYNCED: {"date": {}},
         EventProps.SYNCED_HASH: {"rich_text": {}},
         EventProps.SYNC_ERROR: {"rich_text": {}},
+        EventProps.TICKET_POLICY_STATUS: {"rich_text": {}},
         EventProps.SOURCE: {
             "select": {
                 "options": [
@@ -257,6 +280,9 @@ def _catalog_db_properties() -> Dict[str, Any]:
         TemplateProps.DEFAULT_START_TIME: {"rich_text": {}},
         TemplateProps.DEFAULT_END_TIME: {"rich_text": {}},
         TemplateProps.DEFAULT_INSTRUCTOR: {"rich_text": {}},
+        TemplateProps.DEFAULT_TICKET_NAMES: {"rich_text": {}},
+        TemplateProps.DEFAULT_TICKET_PRICES: {"rich_text": {}},
+        TemplateProps.DEFAULT_TICKET_CAPACITIES: {"rich_text": {}},
     }
 
 
@@ -544,8 +570,29 @@ def event_property_for_field(
         if number is not None and number == int(number):
             number = int(number)
         return EventProps.CAPACITY, p_number(number)
+    if field == "ticket_limit_per_order":
+        number = _float_or_none(row.get("ticket_limit_per_order"))
+        if number is not None and number == int(number):
+            number = int(number)
+        return EventProps.TICKET_LIMIT_PER_ORDER, p_number(number)
+    if field == "checkout_form":
+        return EventProps.CHECKOUT_FORM, p_select(
+            row.get("checkout_form") or None
+        )
+    if field == "ticket_name":
+        return EventProps.TICKET_NAMES, p_rich_text(row.get("ticket_name") or "")
+    if field == "ticket_capacity":
+        return EventProps.TICKET_CAPACITIES, p_rich_text(
+            row.get("ticket_capacity") or ""
+        )
     if field == "ticket_price":
-        return EventProps.TICKET_PRICE, p_number(_float_or_none(row.get("ticket_price")))
+        # The row field merges the Ticket Price number and the Ticket Prices
+        # text (see event_page_to_row): a semicolon list routes back to the
+        # rich-text property, a single value to the number property.
+        price_number, multi_price = split_price(row.get("ticket_price"))
+        if multi_price:
+            return EventProps.TICKET_PRICES, p_rich_text(multi_price)
+        return EventProps.TICKET_PRICE, p_number(price_number)
     if field == "tax_rate":
         return EventProps.TAX_RATE, p_number(_float_or_none(row.get("tax_rate")))
     if field == "image_url":
@@ -583,6 +630,10 @@ def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, str]:
         "location": v_plain_text(page, EventProps.LOCATION).strip(),
         "registration_type": v_select(page, EventProps.REGISTRATION_TYPE),
         "capacity": _format_number(v_number(page, EventProps.CAPACITY)),
+        "ticket_limit_per_order": _format_number(
+            v_number(page, EventProps.TICKET_LIMIT_PER_ORDER)
+        ),
+        "checkout_form": v_select(page, EventProps.CHECKOUT_FORM),
         "ticket_price": ticket_prices_text or _format_number(price_number),
         "image_url": v_url(page, EventProps.IMAGE_URL),
         "short_description": v_plain_text(page, EventProps.TEASER),
@@ -600,6 +651,9 @@ def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, str]:
         "wix_event_id": v_plain_text(page, EventProps.WIX_EVENT_ID).strip(),
         "synced_hash": v_plain_text(page, EventProps.SYNCED_HASH).strip(),
         "sync_error": v_plain_text(page, EventProps.SYNC_ERROR).strip(),
+        "ticket_policy_status": v_plain_text(
+            page, EventProps.TICKET_POLICY_STATUS
+        ).strip(),
         "template_relation_ids": v_relation_ids(page, EventProps.TEMPLATE),
     }
     return row
@@ -635,6 +689,8 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
         location=row.get("location") or "",
         ticket_price=ticket_price,
         capacity=capacity,
+        ticket_limit_per_order=row.get("ticket_limit_per_order") or None,
+        checkout_form=row.get("checkout_form") or None,
         registration_type=reg_type,
         image_url=row.get("image_url") or "",
         teaser=row.get("short_description") or "",
@@ -667,6 +723,8 @@ def _event_content_props(
     multi_price_text: str,
     ticket_name: Optional[str],
     ticket_capacity: Optional[str],
+    ticket_limit_per_order: Optional[float],
+    checkout_form: Optional[str],
     fee_type: Optional[str],
     sale_start: Optional[str],
     sale_end: Optional[str],
@@ -697,6 +755,8 @@ def _event_content_props(
         EventProps.TICKET_NAMES: p_rich_text(ticket_name),
         EventProps.TICKET_PRICES: p_rich_text(multi_price_text),
         EventProps.TICKET_CAPACITIES: p_rich_text(ticket_capacity),
+        EventProps.TICKET_LIMIT_PER_ORDER: p_number(ticket_limit_per_order),
+        EventProps.CHECKOUT_FORM: p_select(checkout_form or None),
         EventProps.FEE_TYPE: p_rich_text(fee_type),
         EventProps.SALE_START: p_rich_text(sale_start),
         EventProps.SALE_END: p_rich_text(sale_end),
@@ -751,6 +811,8 @@ def event_properties_from_raw_row(row: Dict[str, Any], tz_name: str) -> Dict[str
         multi_price_text=multi_price,
         ticket_name=row.get("ticket_name") or "",
         ticket_capacity=row.get("ticket_capacity") or "",
+        ticket_limit_per_order=_float_or_none(row.get("ticket_limit_per_order")),
+        checkout_form=(row.get("checkout_form") or "").strip(),
         fee_type=row.get("fee_type") or "",
         sale_start=row.get("sale_start") or "",
         sale_end=row.get("sale_end") or "",
@@ -792,6 +854,8 @@ def event_properties_from_record(
         multi_price_text=multi_price,
         ticket_name=record.ticket_name,
         ticket_capacity=record.ticket_capacity,
+        ticket_limit_per_order=record.ticket_limit_per_order,
+        checkout_form=record.checkout_form,
         fee_type=record.fee_type,
         sale_start=record.sale_start,
         sale_end=record.sale_end,
@@ -806,6 +870,9 @@ def event_properties_from_record(
     if include_bookkeeping:
         props[EventProps.WIX_EVENT_ID] = p_rich_text(record.wix_event_id)
         props[EventProps.SYNCED_HASH] = p_rich_text(record.synced_hash)
+        props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
+            record.ticket_policy_status
+        )
         if record.status:
             props[EventProps.STATUS] = p_select(record.status)
 
@@ -1249,10 +1316,13 @@ class NotionStore:
         synced_hash: Optional[str] = None,
         error: Optional[str] = None,
         source: Optional[str] = None,
+        ticket_policy_status: Optional[str] = None,
     ) -> None:
         """Write sync bookkeeping back onto an Events row.
 
         ``error=None`` clears the Sync Error property; pass a message to set it.
+        ``ticket_policy_status=None`` leaves the column untouched; pass ``""``
+        to clear it.
         """
         props: Dict[str, Any] = {
             EventProps.LAST_SYNCED: _last_synced_prop(),
@@ -1266,6 +1336,10 @@ class NotionStore:
             props[EventProps.SYNCED_HASH] = p_rich_text(synced_hash)
         if source:
             props[EventProps.SOURCE] = p_select(source)
+        if ticket_policy_status is not None:
+            props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
+                ticket_policy_status
+            )
         self.update_page(page_id, props)
 
     def update_event_fields(self, page_id: str, props: Dict[str, Any]) -> None:
@@ -1298,14 +1372,20 @@ class NotionStore:
         wix_event_id: str = "",
         error: str = "",
         page_id: Optional[str] = None,
+        ticket_policy_status: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create/refresh an Events row from raw strings, skipping validation.
 
         Lets ``pull`` land incomplete Wix events (no date, no location) in
         Notion with a Sync Error note instead of dropping them.
+        ``ticket_policy_status=None`` leaves that column untouched.
         """
         props = event_properties_from_raw_row(row, self.config.timezone)
         props[EventProps.WIX_EVENT_ID] = p_rich_text(wix_event_id)
+        if ticket_policy_status is not None:
+            props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
+                ticket_policy_status
+            )
         return self._stamp_and_write_event(
             props, status=status, source=source, error=error, page_id=page_id
         )
@@ -1362,6 +1442,15 @@ class NotionStore:
                 "default_instructor": v_plain_text(
                     page, TemplateProps.DEFAULT_INSTRUCTOR
                 ).strip(),
+                "default_ticket_names": v_plain_text(
+                    page, TemplateProps.DEFAULT_TICKET_NAMES
+                ).strip(),
+                "default_ticket_prices": v_plain_text(
+                    page, TemplateProps.DEFAULT_TICKET_PRICES
+                ).strip(),
+                "default_ticket_capacities": v_plain_text(
+                    page, TemplateProps.DEFAULT_TICKET_CAPACITIES
+                ).strip(),
             }
         logger.info("Fetched %d class definition(s) from Notion", len(classes))
         return classes
@@ -1380,6 +1469,9 @@ class NotionStore:
         default_start_time: Optional[str] = None,
         default_end_time: Optional[str] = None,
         default_instructor: Optional[str] = None,
+        default_ticket_names: Optional[str] = None,
+        default_ticket_prices: Optional[str] = None,
+        default_ticket_capacities: Optional[str] = None,
         existing_page_id: Optional[str] = None,
     ) -> str:
         """Create or update a catalog row (class or event template).
@@ -1406,6 +1498,14 @@ class NotionStore:
             props[TemplateProps.DEFAULT_END_TIME] = p_rich_text(default_end_time)
         if default_instructor is not None:
             props[TemplateProps.DEFAULT_INSTRUCTOR] = p_rich_text(default_instructor)
+        if default_ticket_names is not None:
+            props[TemplateProps.DEFAULT_TICKET_NAMES] = p_rich_text(default_ticket_names)
+        if default_ticket_prices is not None:
+            props[TemplateProps.DEFAULT_TICKET_PRICES] = p_rich_text(default_ticket_prices)
+        if default_ticket_capacities is not None:
+            props[TemplateProps.DEFAULT_TICKET_CAPACITIES] = p_rich_text(
+                default_ticket_capacities
+            )
         if existing_page_id:
             self.update_page(existing_page_id, props)
             return existing_page_id
@@ -1416,14 +1516,20 @@ class NotionStore:
     # -- settings --------------------------------------------------------------
 
     def fetch_settings(self) -> Dict[str, str]:
-        """Return Settings rows as a lowercase key -> value dict."""
+        """Return Settings rows as a lowercase key -> value dict.
+
+        Rows with a blank Value are kept (as ``""``) — callers treat blank
+        and missing the same, and dropping them would make the setup-notion
+        seeder re-create deliberately-blank rows (e.g. an unset
+        ``default_ticket_policy``) on every run.
+        """
         db_id = self._require_db(self.config.notion_settings_db_id, "NOTION_SETTINGS_DB_ID")
 
         settings: Dict[str, str] = {}
         for page in self.iter_pages(db_id):
             key = v_plain_text(page, SettingProps.KEY).strip().lower()
             value = v_plain_text(page, SettingProps.VALUE).strip()
-            if key and value:
+            if key:
                 settings[key] = value
         logger.info("Fetched %d setting(s) from Notion", len(settings))
         return settings

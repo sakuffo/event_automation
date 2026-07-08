@@ -21,6 +21,13 @@ from .utils import convert_date_to_iso
 
 VALID_REGISTRATION_TYPES = {"RSVP", "TICKETING", "EXTERNAL", "NO_REGISTRATION"}
 
+# Checkout Form values: does every ticket need its own registration form
+# (Wix `registration.tickets.guestsAssignedSeparately` = true) or one form
+# per order (false)? Blank/None = not managed, Wix dashboard setting wins.
+CHECKOUT_FORM_PER_TICKET = "PER_TICKET"
+CHECKOUT_FORM_PER_ORDER = "PER_ORDER"
+VALID_CHECKOUT_FORMS = {CHECKOUT_FORM_PER_TICKET, CHECKOUT_FORM_PER_ORDER}
+
 
 class EventRecord(BaseModel):
     name: str = Field(..., min_length=1)
@@ -33,6 +40,15 @@ class EventRecord(BaseModel):
     location: str = Field(..., min_length=1)
     ticket_price: float = 0.0
     capacity: int = 24
+    # Max tickets a buyer can purchase in one checkout — the Wix event-level
+    # `registration.tickets.ticketLimitPerOrder` (Wix defaults it to 20 when
+    # unset). The per-ticket-definition `limitPerCheckout` is read-only in the
+    # Wix API, so this is the only writable knob.
+    ticket_limit_per_order: Optional[int] = None
+    # PER_TICKET (each ticket needs its own registration form) or PER_ORDER
+    # (one form per checkout) — Wix `guestsAssignedSeparately`. None = not
+    # managed: the Wix dashboard setting is left alone.
+    checkout_form: Optional[str] = None
     registration_type: str = "RSVP"
     image_url: Optional[str] = None
     teaser: Optional[str] = None
@@ -55,6 +71,10 @@ class EventRecord(BaseModel):
     wix_event_id: Optional[str] = None
     status: Optional[str] = None
     synced_hash: Optional[str] = None
+    # Read-only drift indicator (code-owned Notion column): whether the live
+    # event's ticket definitions carry the Settings `default_ticket_policy`.
+    # Bookkeeping like synced_hash — never hashed, never pushed to Wix.
+    ticket_policy_status: Optional[str] = None
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -122,6 +142,48 @@ class EventRecord(BaseModel):
             raise ValueError("capacity must be greater than zero")
         return value_int
 
+    @field_validator("ticket_limit_per_order", mode="before")
+    @classmethod
+    def normalize_ticket_limit(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                value = float(stripped)
+            except ValueError as exc:
+                raise ValueError(
+                    "Ticket Limit Per Order must be a number"
+                ) from exc
+        return int(value)
+
+    @field_validator("ticket_limit_per_order")
+    @classmethod
+    def ensure_ticket_limit_in_range(cls, value: Optional[int]) -> Optional[int]:
+        if value is None:
+            return None
+        if not 1 <= value <= 50:
+            raise ValueError(
+                "Ticket Limit Per Order must be between 1 and 50 (Wix limit)"
+            )
+        return value
+
+    @field_validator("checkout_form", mode="before")
+    @classmethod
+    def normalize_checkout_form(cls, value):
+        if value is None:
+            return None
+        normalized = str(value).strip().upper().replace(" ", "_").replace("-", "_")
+        if not normalized:
+            return None
+        if normalized not in VALID_CHECKOUT_FORMS:
+            raise ValueError(
+                "Checkout Form must be PER_TICKET or PER_ORDER"
+            )
+        return normalized
+
     @field_validator(
         "image_url", "teaser", "description", "event_type", "category",
         "ticket_name", "ticket_price_raw", "ticket_capacity",
@@ -153,6 +215,8 @@ class EventRecord(BaseModel):
         "location",
         "ticket_price",
         "capacity",
+        "ticket_limit_per_order",
+        "checkout_form",
         "registration_type",
         "image_url",
         "teaser",
@@ -223,11 +287,16 @@ class EventRecord(BaseModel):
 
 @dataclass
 class TicketSpec:
-    """Parsed ticket definition from the tickets column."""
+    """Parsed ticket definition from the tickets column.
+
+    ``capacity`` is the definition's total sellable inventory (Wix
+    ``initialLimit``). The per-order checkout limit is an event-level
+    setting (``EventRecord.ticket_limit_per_order``), not a per-ticket one —
+    the ticket definition's ``limitPerCheckout`` is read-only in the Wix API.
+    """
     name: str
     price: float
     capacity: int = 24
-    limit_per_checkout: int = 4
 
 
 def parse_tickets(
@@ -275,6 +344,14 @@ def parse_tickets(
     return specs
 
 
-__all__ = ["EventRecord", "TicketSpec", "parse_tickets", "ValidationError"]
+__all__ = [
+    "EventRecord",
+    "TicketSpec",
+    "parse_tickets",
+    "ValidationError",
+    "CHECKOUT_FORM_PER_TICKET",
+    "CHECKOUT_FORM_PER_ORDER",
+    "VALID_CHECKOUT_FORMS",
+]
 
 

@@ -44,3 +44,26 @@ def test_event_record_capacity_must_be_positive():
         EventRecord(**build_event(capacity=0))
 
 
+def test_ticket_limit_parses_strings_and_blank():
+    assert EventRecord(**build_event(ticket_limit_per_order="4")).ticket_limit_per_order == 4
+    assert EventRecord(**build_event(ticket_limit_per_order="")).ticket_limit_per_order is None
+    assert EventRecord(**build_event()).ticket_limit_per_order is None
+
+
+def test_ticket_limit_must_be_within_wix_bounds():
+    with pytest.raises(ValidationError, match="between 1 and 50"):
+        EventRecord(**build_event(ticket_limit_per_order=0))
+    with pytest.raises(ValidationError, match="between 1 and 50"):
+        EventRecord(**build_event(ticket_limit_per_order=51))
+    with pytest.raises(ValidationError, match="must be a number"):
+        EventRecord(**build_event(ticket_limit_per_order="lots"))
+
+
+def test_ticket_limit_changes_content_hash():
+    a = EventRecord(**build_event(ticket_limit_per_order=4))
+    b = EventRecord(**build_event(ticket_limit_per_order=10))
+    blank = EventRecord(**build_event())
+    assert a.content_hash() != b.content_hash()
+    assert a.content_hash() != blank.content_hash()
+
+

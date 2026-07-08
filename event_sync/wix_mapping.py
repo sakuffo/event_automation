@@ -32,7 +32,11 @@ from .constants import (
     tax_rate_decimal_to_percent,
 )
 from .logging_utils import get_logger
-from .models import EventRecord
+from .models import (
+    CHECKOUT_FORM_PER_ORDER,
+    CHECKOUT_FORM_PER_TICKET,
+    EventRecord,
+)
 from .utils import convert_date_to_iso
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -404,13 +408,26 @@ def build_wix_event_payload(
             "initialType": event.registration_type,
         }
         if event.registration_type == "TICKETING":
-            event_data["registration"]["tickets"] = {
+            tickets_settings: Dict[str, Any] = {
                 "taxSettings": {
                     "type": event.tax_type or DEFAULT_TAX_TYPE,
                     "name": event.tax_name or DEFAULT_TAX_NAME,
                     "rate": event.tax_rate or DEFAULT_TAX_RATE,
                 }
             }
+            # Max tickets per checkout — without this Wix defaults to 20.
+            if event.ticket_limit_per_order:
+                tickets_settings["ticketLimitPerOrder"] = (
+                    event.ticket_limit_per_order
+                )
+            # One registration form per ticket vs per order; omitted when
+            # blank so the Wix default (per order) applies.
+            guests_assigned = checkout_form_to_guests_assigned(
+                event.checkout_form
+            )
+            if guests_assigned is not None:
+                tickets_settings["guestsAssignedSeparately"] = guests_assigned
+            event_data["registration"]["tickets"] = tickets_settings
 
     teaser = event.teaser.strip() if event.teaser else ""
     if teaser:
@@ -524,6 +541,30 @@ def log_event_diff(event_name: str, diffs: List[EventDiff]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Checkout Form <-> Wix guestsAssignedSeparately converters
+# ---------------------------------------------------------------------------
+
+
+def checkout_form_to_guests_assigned(
+    checkout_form: Optional[str],
+) -> Optional[bool]:
+    """``PER_TICKET`` -> True, ``PER_ORDER`` -> False, blank -> None (not managed)."""
+    value = (checkout_form or "").strip().upper()
+    if not value:
+        return None
+    return value == CHECKOUT_FORM_PER_TICKET
+
+
+def guests_assigned_to_checkout_form(
+    guests_assigned: Optional[bool],
+) -> str:
+    """Wix ``guestsAssignedSeparately`` -> the Checkout Form select value."""
+    if guests_assigned is None:
+        return ""
+    return CHECKOUT_FORM_PER_TICKET if guests_assigned else CHECKOUT_FORM_PER_ORDER
+
+
+# ---------------------------------------------------------------------------
 # Wix event -> config row (the read side of "Wix is authoritative")
 # ---------------------------------------------------------------------------
 
@@ -539,7 +580,18 @@ def wix_event_to_config_row(
     address = (location.get("address") or {}).get("formattedAddress", "")
     registration = wix_event.get("registration", {})
     reg_type = registration.get("initialType") or registration.get("type", "")
-    tax = (registration.get("tickets") or {}).get("taxSettings", {})
+    tickets_reg = registration.get("tickets") or {}
+    tax = tickets_reg.get("taxSettings", {})
+    ticket_limit = tickets_reg.get("ticketLimitPerOrder")
+    # Wix omits false booleans, so any non-empty tickets object implies a
+    # known value; an absent/empty one (RSVP events) stays blank.
+    checkout_form = (
+        guests_assigned_to_checkout_form(
+            bool(tickets_reg.get("guestsAssignedSeparately"))
+        )
+        if tickets_reg
+        else ""
+    )
 
     # Extract category names from the CATEGORIES fieldset
     cat_data = wix_event.get("categories", {})
@@ -601,6 +653,8 @@ def wix_event_to_config_row(
         "end_time": end_time,
         "location": address,
         "registration_type": reg_type,
+        "ticket_limit_per_order": str(ticket_limit) if ticket_limit else "",
+        "checkout_form": checkout_form,
         "short_description": wix_event.get("shortDescription", ""),
         "detailed_description": wix_event.get("detailedDescription", ""),
         "image_url": image_url,
@@ -614,6 +668,47 @@ def wix_event_to_config_row(
         "tax_rate": tax.get("rate", DEFAULT_TAX_RATE),
         "tax_type": tax.get("type", DEFAULT_TAX_TYPE),
     }
+
+
+# ---------------------------------------------------------------------------
+# Ticket policy status (read-only drift indicator for the Notion column)
+# ---------------------------------------------------------------------------
+
+
+def ticket_policy_status(
+    ticket_defs: List[Dict[str, Any]], desired_policy: Optional[str]
+) -> str:
+    """Human-readable policy state of an event's live ticket definitions.
+
+    The single owner of the wording written to the read-only
+    ``Ticket Policy Status`` column. Blank when the Settings policy is blank
+    (feature off) or the event has no tickets; ``OK (n tickets)`` when every
+    definition's ``policyText`` matches; otherwise a drift note like
+    ``2 of 3 tickets missing policy``.
+    """
+    desired = (desired_policy or "").strip()
+    if not desired or not ticket_defs:
+        return ""
+
+    total = len(ticket_defs)
+    plural = "s" if total != 1 else ""
+    mismatched = [
+        td for td in ticket_defs
+        if (td.get("policyText") or "").strip() != desired
+    ]
+    if not mismatched:
+        return f"OK ({total} ticket{plural})"
+
+    missing = sum(
+        1 for td in mismatched if not (td.get("policyText") or "").strip()
+    )
+    if missing == len(mismatched):
+        kind = "missing"
+    elif missing == 0:
+        kind = "different"
+    else:
+        kind = "missing/different"
+    return f"{len(mismatched)} of {total} ticket{plural} {kind} policy"
 
 
 # ---------------------------------------------------------------------------

@@ -90,6 +90,68 @@ def test_list_events_respects_limit(monkeypatch):
     assert len(events) == 1
 
 
+def test_create_ticket_definition_never_sends_limit_per_checkout(monkeypatch):
+    """limitPerCheckout is read-only in the Wix API — sending it is a no-op
+    that only misleads readers into thinking the checkout limit is set. The
+    real knob is the event-level registration.tickets.ticketLimitPerOrder."""
+    client = make_client()
+    sent = {}
+
+    def fake_request(method, endpoint, **kwargs):
+        sent["method"] = method
+        sent["endpoint"] = endpoint
+        sent["body"] = kwargs["json"]
+        return DummyResponse({"ticketDefinition": {"initialLimit": 24, "limited": True}})
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    client.create_ticket_definition(
+        event_id="evt-1", ticket_name="Single Ticket", price=35.0, capacity=24,
+    )
+
+    definition = sent["body"]["ticketDefinition"]
+    assert "limitPerCheckout" not in definition
+    assert definition["initialLimit"] == 24
+    assert definition["pricingMethod"]["fixedPrice"]["value"] == "35.0"
+
+
+def test_create_ticket_definition_policy_text(monkeypatch):
+    """policyText (the on-ticket policy blurb) is sent when given and omitted
+    when blank — an empty string must not blank a dashboard-managed policy."""
+    client = make_client()
+    bodies = []
+
+    def fake_request(method, endpoint, **kwargs):
+        bodies.append(kwargs["json"])
+        return DummyResponse({"ticketDefinition": {}})
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    client.create_ticket_definition(
+        event_id="evt-1", ticket_name="GA", price=25.0, policy_text="No refunds.",
+    )
+    client.create_ticket_definition(
+        event_id="evt-1", ticket_name="GA", price=25.0,
+    )
+
+    assert bodies[0]["ticketDefinition"]["policyText"] == "No refunds."
+    assert "policyText" not in bodies[1]["ticketDefinition"]
+
+
+def test_update_ticket_definition_policy_text(monkeypatch):
+    client = make_client()
+    bodies = []
+
+    def fake_request(method, endpoint, **kwargs):
+        bodies.append(kwargs["json"])
+        return DummyResponse({"ticketDefinition": {}})
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    client.update_ticket_definition("td-1", "3", policy_text="No refunds.")
+    client.update_ticket_definition("td-1", "3", price=40.0)
+
+    assert bodies[0]["ticketDefinition"]["policyText"] == "No refunds."
+    assert "policyText" not in bodies[1]["ticketDefinition"]
+
+
 
 # ---------------------------------------------------------------------------
 # Transport retry matrix (Session-level)

@@ -6,10 +6,16 @@ import json
 from typing import Any, Dict, Optional, Tuple
 
 from .config import AppConfig, ConfigError
+from .logging_utils import get_logger
 from .wix_client import WixClient
 
 
+logger = get_logger(__name__)
+
 CacheEntry = Tuple[Optional[bytes], Optional[str], Optional[str]]
+
+# Wix caps a ticket definition's policyText at 1000 characters.
+MAX_TICKET_POLICY_CHARS = 1000
 
 
 class SyncRuntime:
@@ -28,6 +34,12 @@ class SyncRuntime:
         # Set by create_wix_event when an image upload fails (the event is
         # still created); sync surfaces it as a Sync Error note on the row.
         self.last_image_failure: Optional[str] = None
+        # Set by create_wix_event when ticket creation fails after the event
+        # was created (event live, nothing on sale); sync surfaces it as a
+        # Sync Error note on the row.
+        self.last_ticket_failure: Optional[str] = None
+        # Lazily-resolved global ticket policy blurb (None = not fetched yet).
+        self._ticket_policy_text: Optional[str] = None
         self.cache_stats = {
             "drive_hits": 0,
             "drive_misses": 0,
@@ -80,6 +92,35 @@ class SyncRuntime:
                 raise ConfigError("NOTION_ACCESS_TOKEN is missing")
             self._notion_store = NotionStore(self.config)
         return self._notion_store
+
+    def get_ticket_policy_text(self) -> str:
+        """Global policy blurb attached to every ticket the pipeline creates.
+
+        Read once per run from the Settings DB row ``default_ticket_policy``
+        and applied as the ticket definition's ``policyText`` (the text
+        printed on the ticket a buyer receives). Returns ``""`` — feature
+        off — when the setting is blank or the Settings DB can't be read;
+        a missing blurb is recoverable, a crashed sync is not.
+        """
+        if self._ticket_policy_text is None:
+            text = ""
+            try:
+                settings = self.get_notion_store().fetch_settings()
+                text = (settings.get("default_ticket_policy") or "").strip()
+            except Exception as exc:
+                logger.warning(
+                    "⚠️  Could not read default_ticket_policy from Settings "
+                    "— tickets will be created without a policy blurb: %s", exc,
+                )
+            if len(text) > MAX_TICKET_POLICY_CHARS:
+                logger.warning(
+                    "⚠️  default_ticket_policy is %d chars — Wix caps "
+                    "policyText at %d; truncating",
+                    len(text), MAX_TICKET_POLICY_CHARS,
+                )
+                text = text[:MAX_TICKET_POLICY_CHARS]
+            self._ticket_policy_text = text
+        return self._ticket_policy_text
 
     # -------------------------
     # Caching helpers

@@ -10,10 +10,13 @@ from event_sync.models import EventRecord
 from event_sync.notion_store import (
     EventProps,
     NotionStore,
+    SettingProps,
     event_page_to_row,
     event_properties_from_record,
     normalize_rate_string,
     p_date,
+    p_rich_text,
+    p_title,
     row_to_event_record,
 )
 
@@ -39,6 +42,7 @@ def build_record(**overrides) -> EventRecord:
         "ticket_name": "Regular; Student",
         "ticket_price_raw": "35; 25",
         "ticket_capacity": "20; 4",
+        "ticket_limit_per_order": 4,
         "tax_name": "HST",
         "tax_rate": "13",
         "tax_type": "ADDED_AT_CHECKOUT",
@@ -104,6 +108,7 @@ class TestPropertyRoundTrip:
         assert rebuilt.image_url == record.image_url
         assert rebuilt.ticket_name == record.ticket_name
         assert rebuilt.ticket_capacity == record.ticket_capacity
+        assert rebuilt.ticket_limit_per_order == record.ticket_limit_per_order
         assert rebuilt.tax_name == record.tax_name
         assert rebuilt.tax_rate == record.tax_rate
         assert rebuilt.tax_type == record.tax_type
@@ -133,6 +138,38 @@ class TestPropertyRoundTrip:
         assert row["ticket_price"] == "35"
         rebuilt = row_to_event_record(row)
         assert rebuilt.ticket_price == 35.0
+
+    def test_ticket_limit_lands_in_number_property(self):
+        record = build_record(ticket_limit_per_order=6)
+        props = event_properties_from_record(record, TZ)
+        assert props[EventProps.TICKET_LIMIT_PER_ORDER]["number"] == 6
+        row = event_page_to_row(properties_to_page(props), TZ)
+        assert row["ticket_limit_per_order"] == "6"
+        assert row_to_event_record(row).ticket_limit_per_order == 6
+
+    def test_blank_ticket_limit_stays_unset(self):
+        record = build_record(ticket_limit_per_order=None)
+        props = event_properties_from_record(record, TZ)
+        assert props[EventProps.TICKET_LIMIT_PER_ORDER]["number"] is None
+        row = event_page_to_row(properties_to_page(props), TZ)
+        assert row["ticket_limit_per_order"] == ""
+        assert row_to_event_record(row).ticket_limit_per_order is None
+
+    def test_checkout_form_lands_in_select_property(self):
+        record = build_record(checkout_form="PER_TICKET")
+        props = event_properties_from_record(record, TZ)
+        assert props[EventProps.CHECKOUT_FORM]["select"]["name"] == "PER_TICKET"
+        row = event_page_to_row(properties_to_page(props), TZ)
+        assert row["checkout_form"] == "PER_TICKET"
+        assert row_to_event_record(row).checkout_form == "PER_TICKET"
+
+    def test_blank_checkout_form_stays_unset(self):
+        record = build_record(checkout_form=None)
+        props = event_properties_from_record(record, TZ)
+        assert props[EventProps.CHECKOUT_FORM]["select"] is None
+        row = event_page_to_row(properties_to_page(props), TZ)
+        assert row["checkout_form"] == ""
+        assert row_to_event_record(row).checkout_form is None
 
     def test_long_description_is_chunked_and_rejoined(self):
         long_text = "x" * 4500
@@ -210,7 +247,13 @@ class TestContentHash:
         b.wix_event_id = "some-wix-id"
         b.status = "Published"
         b.synced_hash = "deadbeef"
+        b.ticket_policy_status = "2 of 3 tickets missing policy"
         assert a.content_hash() == b.content_hash()
+
+    def test_hash_includes_checkout_form(self):
+        a = build_record(checkout_form=None)
+        b = build_record(checkout_form="PER_TICKET")
+        assert a.content_hash() != b.content_hash()
 
 
 class TestNormalizers:
@@ -354,6 +397,36 @@ class TestNotionStoreQueries:
             "property": EventProps.STATUS,
             "select": {"is_empty": True},
         } in filter_["or"]
+
+
+class TestSettingsFetch:
+    def test_blank_valued_settings_rows_are_kept(self, fake_store):
+        """A deliberately-blank row (e.g. an unset default_ticket_policy)
+        must surface as "" so the setup-notion seeder sees the key exists
+        and doesn't re-create it on every run."""
+        pages = [
+            properties_to_page(
+                {
+                    SettingProps.KEY: p_title("default_ticket_policy"),
+                    SettingProps.VALUE: p_rich_text(""),
+                },
+                page_id="s-1",
+            ),
+            properties_to_page(
+                {
+                    SettingProps.KEY: p_title("default_capacity"),
+                    SettingProps.VALUE: p_rich_text("24"),
+                },
+                page_id="s-2",
+            ),
+        ]
+        store = fake_store(
+            [{"results": pages, "has_more": False, "next_cursor": None}]
+        )
+        assert store.fetch_settings() == {
+            "default_ticket_policy": "",
+            "default_capacity": "24",
+        }
 
 
 class TestStatusLifecycle:

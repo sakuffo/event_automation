@@ -21,9 +21,16 @@ from .constants import (
     DEFAULT_TAX_NAME,
     DEFAULT_TAX_RATE,
     DEFAULT_TAX_TYPE,
+    DEFAULT_TICKET_LIMIT_PER_ORDER,
+    DEFAULT_TICKET_PRICE,
 )
 from .logging_utils import get_logger
-from .models import EventRecord, ValidationError
+from .models import (
+    VALID_CHECKOUT_FORMS,
+    EventRecord,
+    ValidationError,
+    parse_tickets,
+)
 from .notion_store import (
     EventProps,
     NotionStore,
@@ -51,6 +58,7 @@ from .wix_flows import (
     compute_event_update_plan,
     create_wix_event,
     ensure_event_tickets,
+    has_explicit_zero_price,
     index_events_by_id_and_key,
     log_update_plan_dry_run,
     process_site_config_rows,
@@ -63,6 +71,7 @@ from .wix_mapping import (
     select_default_tax_group_id,
     site_config_row_sort_key,
     tax_mapping_to_site_row,
+    ticket_policy_status,
     wix_event_to_config_row,
 )
 from .runtime import SyncRuntime
@@ -83,7 +92,11 @@ DEFAULT_SETTINGS_SEED: List[tuple] = [
     ("default_tax_rate", DEFAULT_TAX_RATE, "Ticket tax rate as a percent (13 = 13%)"),
     ("default_tax_type", DEFAULT_TAX_TYPE, "ADDED_AT_CHECKOUT or INCLUDED_IN_PRICE"),
     ("default_fee_type", DEFAULT_FEE_TYPE, "Wix service fee handling for tickets (FEE_ADDED_AT_CHECKOUT or NO_FEE)"),
+    ("default_ticket_limit_per_order", str(DEFAULT_TICKET_LIMIT_PER_ORDER), "Max tickets one buyer can purchase per checkout (1-50; Wix defaults to 20 when a row has no value)"),
+    ("default_ticket_price", f"{DEFAULT_TICKET_PRICE:g}", "Last-resort ticket price for ticketed rows still blank after template/category pricing (a priceless TICKETING event gets no ticket at all)"),
+    ("default_checkout_form", "", "Checkout Form for ticketed rows: PER_TICKET (each ticket needs its own registration form) or PER_ORDER (one form per checkout). Leave blank to keep the Wix dashboard setting."),
     ("default_duration_hours", "2", "End time = start + this many hours when a row has no end time"),
+    ("default_ticket_policy", "", "Policy blurb printed on every ticket of every event (e.g. insurance notice). Max 1000 characters; leave blank to disable. Run scripts/apply_ticket_policy.py to backfill tickets that already exist in Wix."),
 ]
 
 
@@ -443,6 +456,7 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
         store: NotionStore = runtime.get_notion_store()
         client = runtime.get_wix_client()
         tz_name = runtime.config.timezone
+        policy_text = runtime.get_ticket_policy_text()
 
         # scope=upcoming filters server-side ($in on status); the client-side
         # guard stays as belt and braces.
@@ -501,7 +515,9 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                 # Key matching needs the localized date/time from the config
                 # row, so the record is built here (one ticket-defs call).
                 record, config_row, target_status, invalid_note = (
-                    _wix_event_to_record(client, wix_event, tz_name)
+                    _wix_event_to_record(
+                        client, wix_event, tz_name, policy_text=policy_text
+                    )
                 )
                 record_built = True
                 if record is not None:
@@ -530,6 +546,9 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                             source=SOURCE_WIX,
                             wix_event_id=wix_id,
                             error=invalid_note,
+                            ticket_policy_status=(
+                                config_row.get("ticket_policy_status") or ""
+                            ),
                         )
                         logger.info("   ⚠️  %s", invalid_note)
                     results["created"].append(title)
@@ -559,7 +578,9 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                 # us defer it.
                 if not record_built:
                     record, config_row, target_status, invalid_note = (
-                        _wix_event_to_record(client, wix_event, tz_name)
+                        _wix_event_to_record(
+                            client, wix_event, tz_name, policy_text=policy_text
+                        )
                     )
 
                 # Refreshing a code-owned row: don't let an imageless Wix
@@ -575,15 +596,22 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                     except ValidationError:
                         row_hash = None
                     if row_hash == record.synced_hash and row_status == target_status:
+                        # Policy status isn't hashed — drift alone must still
+                        # trigger the bookkeeping write to become visible.
                         stale_bookkeeping = (
                             (existing.get("synced_hash") or "") != record.synced_hash
                             or (existing.get("wix_event_id") or "").strip() != wix_id
                             or bool((existing.get("sync_error") or "").strip())
+                            or (existing.get("ticket_policy_status") or "")
+                            != (record.ticket_policy_status or "")
                         )
                         if stale_bookkeeping:
                             store.write_sync_result(
                                 existing["page_id"], wix_event_id=wix_id,
                                 synced_hash=record.synced_hash, error=None,
+                                ticket_policy_status=(
+                                    record.ticket_policy_status or ""
+                                ),
                             )
                         results["skipped"].append(title)
                         logger.info("   ⏭️  Unchanged (matches Wix)")
@@ -604,6 +632,9 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                         wix_event_id=wix_id,
                         error=invalid_note,
                         page_id=existing["page_id"],
+                        ticket_policy_status=(
+                            config_row.get("ticket_policy_status") or ""
+                        ),
                     )
                     logger.info("   ⚠️  %s", invalid_note)
                 results["refreshed"].append(title)
@@ -737,6 +768,11 @@ class _Defaults:
     tax_type: str
     fee_type: str
     capacity: int
+    ticket_limit_per_order: int
+    # "" = not managed (no fill); otherwise PER_TICKET / PER_ORDER.
+    checkout_form: str
+    # Last-resort price for ticketed rows the other pricing sources missed.
+    ticket_price: float
 
     @classmethod
     def from_settings(cls, settings: Dict[str, str]) -> "_Defaults":
@@ -744,11 +780,32 @@ class _Defaults:
             capacity = int(float(settings.get("default_capacity", "")))
         except (TypeError, ValueError):
             capacity = DEFAULT_CAPACITY
+        try:
+            ticket_price = float(settings.get("default_ticket_price", ""))
+        except (TypeError, ValueError):
+            ticket_price = DEFAULT_TICKET_PRICE
+        if ticket_price < 0:
+            ticket_price = DEFAULT_TICKET_PRICE
+        try:
+            ticket_limit = int(float(settings.get("default_ticket_limit_per_order", "")))
+        except (TypeError, ValueError):
+            ticket_limit = DEFAULT_TICKET_LIMIT_PER_ORDER
+        if not 1 <= ticket_limit <= 50:  # Wix bounds
+            ticket_limit = DEFAULT_TICKET_LIMIT_PER_ORDER
         tax_rate = (settings.get("default_tax_rate") or "").strip() or DEFAULT_TAX_RATE
         try:
             float(tax_rate)
         except ValueError:
             tax_rate = DEFAULT_TAX_RATE
+        checkout_form = (
+            (settings.get("default_checkout_form") or "").strip().upper()
+        )
+        if checkout_form and checkout_form not in VALID_CHECKOUT_FORMS:
+            logger.warning(
+                "  ⚠️  Ignoring default_checkout_form %r — "
+                "must be PER_TICKET or PER_ORDER", checkout_form,
+            )
+            checkout_form = ""
         return cls(
             image=(settings.get("default_img") or "").strip(),
             location=(settings.get("default_location") or "").strip()
@@ -765,6 +822,9 @@ class _Defaults:
             fee_type=(settings.get("default_fee_type") or "").strip()
             or DEFAULT_FEE_TYPE,
             capacity=capacity,
+            ticket_limit_per_order=ticket_limit,
+            checkout_form=checkout_form,
+            ticket_price=ticket_price,
         )
 
 
@@ -914,9 +974,51 @@ def _fill_capacity(
     return props, changes
 
 
-def _fill_pricing(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+def _is_ticketed_row(row: Dict[str, Any]) -> bool:
+    return (row.get("registration_type") or "").strip().upper() in {
+        "TICKETS", "TICKETING",
+    }
+
+
+def _fill_tickets(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+    """Template ticket defaults (names/prices/capacities) for ticketed rows.
+
+    Names fill first; prices and capacities only fill when the row ends up
+    with ticket names — the multi-ticket fields are a trio keyed by names,
+    and a price list without names would produce no tickets at all (single
+    prices belong in Price Override / the pricing fill instead).
+    """
+    props: Dict[str, Any] = {}
+    changes: List[str] = []
+    if not klass or not _is_ticketed_row(row):
+        return props, changes
+
+    tpl_names = (klass.get("default_ticket_names") or "").strip()
+    if tpl_names and not (row.get("ticket_name") or "").strip():
+        _set_field(row, props, changes, "ticket_name", tpl_names, "ticket names")
+
+    if not (row.get("ticket_name") or "").strip():
+        return props, changes
+
+    tpl_prices = (klass.get("default_ticket_prices") or "").strip()
+    if tpl_prices and not (row.get("ticket_price") or "").strip():
+        _set_field(row, props, changes, "ticket_price", tpl_prices, "ticket prices")
+
+    tpl_caps = (klass.get("default_ticket_capacities") or "").strip()
+    if tpl_caps and not (row.get("ticket_capacity") or "").strip():
+        _set_field(
+            row, props, changes, "ticket_capacity", tpl_caps, "ticket capacities",
+        )
+    return props, changes
+
+
+def _fill_pricing(
+    row: Dict[str, Any], klass: Optional[Dict[str, Any]], defaults: _Defaults
+) -> tuple:
     """Price Override wins (a $0 override is honored — free events like Bound
-    Together), then CATEGORY_PRICING by tag, then the $30 class floor."""
+    Together), then CATEGORY_PRICING by tag, then the $30 class floor, then
+    the global default_ticket_price for any still-priceless ticketed row (a
+    priceless TICKETING event would otherwise publish with no tickets)."""
     props: Dict[str, Any] = {}
     changes: List[str] = []
     if (row.get("ticket_price") or "").strip():
@@ -937,6 +1039,8 @@ def _fill_pricing(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple
                 break
     if price is None and _is_class_template(klass):
         price = 30.0  # class rows always get a price (default $30)
+    if price is None and _is_ticketed_row(row):
+        price = float(defaults.ticket_price)
     if price is not None:
         _set_field(
             row, props, changes,
@@ -986,12 +1090,11 @@ def _fill_image(
 
 
 def _fill_tax_and_fees(row: Dict[str, Any], defaults: _Defaults) -> tuple:
+    """Ticketed-rows-only commerce defaults: tax trio, fee type, and the
+    per-checkout ticket limit (without which Wix defaults to 20 per order)."""
     props: Dict[str, Any] = {}
     changes: List[str] = []
-    is_ticketed = (row.get("registration_type") or "").strip().upper() in {
-        "TICKETS", "TICKETING",
-    }
-    if not is_ticketed:
+    if not _is_ticketed_row(row):
         return props, changes
 
     if (
@@ -1004,6 +1107,22 @@ def _fill_tax_and_fees(row: Dict[str, Any], defaults: _Defaults) -> tuple:
 
     if not (row.get("fee_type") or "").strip():
         _set_field(row, props, changes, "fee_type", defaults.fee_type, "fee type")
+
+    if not (row.get("ticket_limit_per_order") or "").strip():
+        _set_field(
+            row, props, changes,
+            "ticket_limit_per_order", str(defaults.ticket_limit_per_order),
+            f"ticket limit {defaults.ticket_limit_per_order}/order",
+        )
+
+    # Blank default = not managed: rows stay blank and Wix keeps its own
+    # setting, mirroring the ticket-limit semantics.
+    if defaults.checkout_form and not (row.get("checkout_form") or "").strip():
+        _set_field(
+            row, props, changes,
+            "checkout_form", defaults.checkout_form,
+            f"checkout form {defaults.checkout_form}",
+        )
     return props, changes
 
 
@@ -1031,15 +1150,17 @@ def _apply_row_defaults(
 
     # Fill order matters: instructor before descriptions (which prepend the
     # "Instructors: ..." line), categories before pricing (tags drive the
-    # CATEGORY_PRICING lookup), registration before tax/fees (only ticketed
-    # rows get them).
+    # CATEGORY_PRICING lookup), registration before tickets/pricing/tax
+    # (only ticketed rows get them), template ticket defaults before pricing
+    # (a template price list must win over the single-price fallback).
     for frag_props, frag_changes in (
         _fill_schedule(row, klass, settings, tz_name),
         _fill_instructor(row, klass),
         _fill_categories(row, klass),
         _fill_venue_and_registration(row, defaults),
         _fill_capacity(row, klass, defaults),
-        _fill_pricing(row, klass),
+        _fill_tickets(row, klass),
+        _fill_pricing(row, klass, defaults),
         _fill_descriptions(row, klass),
         _fill_image(row, klass, defaults),
         _fill_tax_and_fees(row, defaults),
@@ -1247,6 +1368,14 @@ def _converge_hosted_image(
 # Pacing between Wix mutations to stay friendly with rate limits.
 WIX_MUTATION_PACING_SECONDS = 1.0
 
+# Sync Error note when an event went live but its tickets could not be
+# created — without it the row lands on Published with nothing on sale and
+# no visible signal.
+_TICKET_FAILURE_NOTE = (
+    "Published but ticket creation failed — no tickets are on sale. "
+    "Check the sync logs, then set Status to Update to retry."
+)
+
 
 @dataclass
 class _SyncContext:
@@ -1303,14 +1432,18 @@ def _match_wix_event(
     return wix_event, wix_id
 
 
-def _wix_event_to_record(client, wix_event: Dict[str, Any], tz_name: str) -> tuple:
+def _wix_event_to_record(
+    client, wix_event: Dict[str, Any], tz_name: str, policy_text: str = ""
+) -> tuple:
     """Build the Notion-side view of a live Wix event.
 
     The shared read path of "Wix is authoritative", used by both ``pull`` and
     the sync Published refresh. Returns ``(record_or_None, config_row,
     target_status, invalid_note)`` — ``record`` is None when the Wix event is
     too incomplete to validate (the raw ``config_row`` still lands in Notion,
-    flagged with the note).
+    flagged with the note). ``policy_text`` (Settings
+    ``default_ticket_policy``) drives the read-only Ticket Policy Status —
+    computed here from the ticket definitions already fetched for the row.
     """
     wix_id = wix_event.get("id", "")
     # Wix CANCELED events land as Cancelled rows, everything else
@@ -1322,6 +1455,8 @@ def _wix_event_to_record(client, wix_event: Dict[str, Any], tz_name: str) -> tup
     )
     ticket_defs = client.get_ticket_definitions(wix_id)
     config_row = wix_event_to_config_row(wix_event, ticket_defs, tz_name=tz_name)
+    policy_status = ticket_policy_status(ticket_defs, policy_text)
+    config_row["ticket_policy_status"] = policy_status
 
     record: Optional[EventRecord] = None
     invalid_note = ""
@@ -1334,8 +1469,44 @@ def _wix_event_to_record(client, wix_event: Dict[str, Any], tz_name: str) -> tup
         )
     if record is not None:
         record.wix_event_id = wix_id
+        record.ticket_policy_status = policy_status
         record.synced_hash = record.content_hash()
     return record, config_row, target_status, invalid_note
+
+
+def _expected_policy_status(
+    ctx: "_SyncContext",
+    record: EventRecord,
+    existing_defs: Optional[List[Dict[str, Any]]] = None,
+    include_record_tickets: bool = True,
+) -> str:
+    """Ticket Policy Status to stamp right after a successful push.
+
+    The push paths converge the policy onto every ticket (the update plan
+    patches drift, creation passes ``policy_text`` through), so the expected
+    state is "all tickets carry the policy". The count comes from the live
+    definitions when the plan fetched them, else from the record's own ticket
+    spec. Optimistic on partial ticket-patch failures — the next Published
+    refresh recomputes from Wix.
+    """
+    desired = (ctx.runtime.get_ticket_policy_text() or "").strip()
+    if not desired or record.registration_type != "TICKETING":
+        return ""
+    count = len(existing_defs or [])
+    if count == 0 and include_record_tickets:
+        specs = parse_tickets(
+            ticket_name=record.ticket_name,
+            ticket_price=record.ticket_price_raw or record.ticket_price,
+            ticket_capacity=record.ticket_capacity,
+        )
+        count = len(specs) if specs else (
+            1
+            if (record.ticket_price or 0) > 0 or has_explicit_zero_price(record)
+            else 0
+        )
+    if count == 0:
+        return ""
+    return ticket_policy_status([{"policyText": desired}] * count, desired)
 
 
 def _apply_image_preservation(
@@ -1499,7 +1670,8 @@ def _refresh_published_row(
         return
 
     wix_record, config_row, target_status, invalid_note = _wix_event_to_record(
-        ctx.client, wix_event, ctx.runtime.config.timezone
+        ctx.client, wix_event, ctx.runtime.config.timezone,
+        policy_text=ctx.runtime.get_ticket_policy_text(),
     )
     _apply_image_preservation(wix_record, config_row, row)
 
@@ -1513,6 +1685,7 @@ def _refresh_published_row(
         ctx.store.upsert_event_from_raw_row(
             config_row, status=target_status, source=SOURCE_WIX,
             wix_event_id=wix_id, error=invalid_note, page_id=page_id,
+            ticket_policy_status=config_row.get("ticket_policy_status") or "",
         )
         logger.warning("  ⚠️  %s: %s", name, invalid_note)
         ctx.results["incomplete"].append(name)
@@ -1526,15 +1699,20 @@ def _refresh_published_row(
 
     row_status = row.get("status") or ""
     if row_hash == wix_record.synced_hash and row_status == target_status:
+        # Policy status isn't hashed, so drift alone (a dashboard-side policy
+        # edit) must count as stale bookkeeping or it would stay invisible.
         stale_bookkeeping = (
             (row.get("synced_hash") or "") != wix_record.synced_hash
             or (row.get("wix_event_id") or "").strip() != wix_id
             or bool((row.get("sync_error") or "").strip())
+            or (row.get("ticket_policy_status") or "")
+            != (wix_record.ticket_policy_status or "")
         )
         if stale_bookkeeping:
             _write_row_result(
                 ctx, page_id, wix_event_id=wix_id,
                 synced_hash=wix_record.synced_hash, error=None,
+                ticket_policy_status=wix_record.ticket_policy_status or "",
             )
         logger.info("  ⏭️  %s (matches Wix)", name)
         ctx.results["skipped"].append(name)
@@ -1599,12 +1777,19 @@ def _push_update_row(
         return
 
     plan = compute_event_update_plan(ctx.client, ctx.runtime, record, wix_id, wix_event)
+    # The plan converges policy onto the fetched ticket defs, so a successful
+    # apply (or a no-change plan) leaves every ticket carrying the policy.
+    policy_status = _expected_policy_status(
+        ctx, record, existing_defs=plan.get("wix_ticket_defs"),
+        include_record_tickets=False,
+    )
     if not plan["any_changes"]:
         logger.info("  ⏭️  %s (Wix already matches) — back to Published", name)
         ctx.results["skipped"].append(name)
         _write_row_result(
             ctx, page_id, status=STATUS_PUBLISHED, wix_event_id=wix_id,
             synced_hash=record.content_hash(), error=None,
+            ticket_policy_status=policy_status,
         )
         return
 
@@ -1626,6 +1811,7 @@ def _push_update_row(
         _write_row_result(
             ctx, page_id, status=STATUS_PUBLISHED, wix_event_id=wix_id,
             synced_hash=record.content_hash(), error=None,
+            ticket_policy_status=policy_status,
         )
     else:
         ctx.results["failed"].append(name)
@@ -1664,12 +1850,21 @@ def _push_matched_ready_row(
                 error=f"Publish failed: {exc}",
             )
             return
+        tickets_ok = True
         if ctx.auto_create_tickets and record.registration_type == "TICKETING":
-            ensure_event_tickets(ctx.client, wix_id, record)
+            tickets_ok = bool(ensure_event_tickets(
+                ctx.client, wix_id, record,
+                policy_text=ctx.runtime.get_ticket_policy_text(),
+            ))
         ctx.results["published"].append(name)
         _write_row_result(
             ctx, page_id, status=STATUS_PUBLISHED, wix_event_id=wix_id,
-            synced_hash=record.content_hash(), error=None,
+            synced_hash=record.content_hash(),
+            error=None if tickets_ok else _TICKET_FAILURE_NOTE,
+            ticket_policy_status=(
+                ("" if not tickets_ok else _expected_policy_status(ctx, record))
+                if ctx.auto_create_tickets else None
+            ),
         )
         _pace_wix(ctx)
         return
@@ -1694,19 +1889,35 @@ def _push_matched_ready_row(
     else:
         logger.info("  🔗 %s already in Wix — linking row", name)
 
+    tickets_ok = True
     if ok and ctx.auto_create_tickets and record.registration_type == "TICKETING" and wix_status != "DRAFT":
         # The plan already fetched this event's ticket definitions.
-        ensure_event_tickets(
-            ctx.client, wix_id, record, existing_defs=plan.get("wix_ticket_defs")
-        )
+        tickets_ok = bool(ensure_event_tickets(
+            ctx.client, wix_id, record,
+            existing_defs=plan.get("wix_ticket_defs"),
+            policy_text=ctx.runtime.get_ticket_policy_text(),
+        ))
 
     new_status = STATUS_READY if wix_status == "DRAFT" else STATUS_PUBLISHED
     if ok:
         ctx.results["updated"].append(name)
         _converge_hosted_image(ctx.store, ctx.runtime, record, page_id)
+        # A draft in --draft mode keeps its tickets deferred: leave the
+        # policy column untouched until the real publish. Failed ticket
+        # creation means no tickets exist — blank policy column.
+        policy_status = (
+            None if wix_status == "DRAFT"
+            else "" if not tickets_ok
+            else _expected_policy_status(
+                ctx, record, existing_defs=plan.get("wix_ticket_defs"),
+                include_record_tickets=ctx.auto_create_tickets,
+            )
+        )
         _write_row_result(
             ctx, page_id, status=new_status, wix_event_id=wix_id,
-            synced_hash=record.content_hash(), error=None,
+            synced_hash=record.content_hash(),
+            error=None if tickets_ok else _TICKET_FAILURE_NOTE,
+            ticket_policy_status=policy_status,
         )
     else:
         ctx.results["failed"].append(name)
@@ -1738,22 +1949,33 @@ def _create_new_event(
         ctx.results["created"].append(name)
         _converge_hosted_image(ctx.store, ctx.runtime, record, page_id)
         failed_image = getattr(ctx.runtime, "last_image_failure", None)
+        failed_tickets = getattr(ctx.runtime, "last_ticket_failure", None)
         if ctx.draft:
             note = "Created as Wix draft — run sync without --draft to publish"
-        elif failed_image:
-            note = (
-                "Created without image — upload failed for "
-                f"{failed_image}. Fix the link and set Status to "
-                "Update to retry."
-            )
         else:
-            note = None
+            notes = []
+            if failed_image:
+                notes.append(
+                    "Created without image — upload failed for "
+                    f"{failed_image}. Fix the link and set Status to "
+                    "Update to retry."
+                )
+            if failed_tickets:
+                notes.append(_TICKET_FAILURE_NOTE)
+            note = " ".join(notes) or None
         _write_row_result(
             ctx, page_id,
             status=STATUS_READY if ctx.draft else STATUS_PUBLISHED,
             wix_event_id=new_id,
             synced_hash=record.content_hash(),
             error=note,
+            # Draft creates / --no-tickets runs / failed ticket creation
+            # leave no tickets, so the policy column stays blank until
+            # they exist.
+            ticket_policy_status=(
+                "" if (ctx.draft or not ctx.auto_create_tickets or failed_tickets)
+                else _expected_policy_status(ctx, record)
+            ),
         )
     else:
         ctx.results["failed"].append(name)
