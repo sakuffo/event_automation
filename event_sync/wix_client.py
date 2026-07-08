@@ -57,6 +57,10 @@ class WixClient:
         if not all([self.api_key, self.site_id]):
             raise ValueError("WIX_API_KEY and WIX_SITE_ID are required")
 
+        # Keep-alive connection pool: a sync makes dozens of calls to the
+        # same host, and a fresh TLS handshake per call adds real seconds.
+        self._session = requests.Session()
+
         logger.info("Wix Client initialized in %s mode", self.mode.upper())
 
     def _headers(self, content_type: str = 'application/json') -> Dict[str, str]:
@@ -74,6 +78,18 @@ class WixClient:
 
         return headers
 
+    @staticmethod
+    def _retry_safe(method: str, endpoint: str) -> bool:
+        """Whether a transient 5xx may be retried without duplication risk.
+
+        Reads and idempotent writes are safe; POST is only safe for the
+        read-only ``/query`` endpoints — retrying a create after Wix already
+        processed it could duplicate an event or ticket definition.
+        """
+        if method.upper() in {'GET', 'DELETE', 'PATCH', 'PUT'}:
+            return True
+        return method.upper() == 'POST' and endpoint.rstrip('/').endswith('/query')
+
     def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make a request to Wix API with retry logic and error handling"""
         url = f"{self.base_url}{endpoint}"
@@ -82,7 +98,7 @@ class WixClient:
 
         for attempt in range(max_retries):
             try:
-                response = requests.request(
+                response = self._session.request(
                     method,
                     url,
                     headers=self._headers(),
@@ -93,13 +109,24 @@ class WixClient:
                 return response
 
             except requests.exceptions.HTTPError as e:
-                # Handle rate limiting (429) with exponential backoff
-                if e.response is not None and e.response.status_code == 429:
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                        logger.warning("Rate limited. Retrying in %ds... (attempt %d/%d)", wait_time, attempt + 1, max_retries)
-                        time.sleep(wait_time)
-                        continue
+                status = e.response.status_code if e.response is not None else None
+                # Rate limiting (429): safe to retry anything — the request
+                # was rejected before processing.
+                if status == 429 and attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning("Rate limited. Retrying in %ds... (attempt %d/%d)", wait_time, attempt + 1, max_retries)
+                    time.sleep(wait_time)
+                    continue
+                # Transient gateway errors: retry only idempotent calls.
+                if (
+                    status in (502, 503, 504)
+                    and attempt < max_retries - 1
+                    and self._retry_safe(method, endpoint)
+                ):
+                    wait_time = 2 ** attempt
+                    logger.warning("Wix returned %s. Retrying in %ds... (attempt %d/%d)", status, wait_time, attempt + 1, max_retries)
+                    time.sleep(wait_time)
+                    continue
                 # Log detailed error for debugging
                 if e.response is not None:
                     try:
@@ -112,7 +139,9 @@ class WixClient:
 
             except requests.exceptions.Timeout:
                 if attempt < max_retries - 1:
-                    logger.warning("Request timeout. Retrying... (attempt %d/%d)", attempt + 1, max_retries)
+                    wait_time = 2 ** attempt
+                    logger.warning("Request timeout. Retrying in %ds... (attempt %d/%d)", wait_time, attempt + 1, max_retries)
+                    time.sleep(wait_time)
                     continue
                 raise
 
@@ -358,7 +387,7 @@ class WixClient:
         upload_url = upload_data.get('uploadUrl')
 
         # Upload file
-        upload_response = requests.put(
+        upload_response = self._session.put(
             upload_url,
             data=image_data,
             headers={'Content-Type': mime_type}
