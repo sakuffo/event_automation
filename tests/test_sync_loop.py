@@ -663,14 +663,44 @@ def test_enrich_writes_error_note_and_keeps_idea_status():
     assert note.startswith("Not ready to sync")
 
 
-def test_enrich_currently_writes_even_noop_draft_rows():
-    # Characterization of today's write amplification: a complete Draft row
-    # with nothing to fill still gets one PATCH (Sync Error cleared).
-    store = StoreStub([make_row("Draft")])
+def test_enrich_skips_noop_draft_rows_entirely():
+    # A complete Draft row with nothing to fill and no stale error costs
+    # zero Notion writes.
+    store = StoreStub([make_row("Draft", fee_type="FEE_ADDED_AT_CHECKOUT")])
+    assert enrich_events(make_enrich_runtime(store)) is True
+    assert store.field_updates == []
+
+
+def test_enrich_clears_stale_sync_error_on_clean_row():
+    # A human fixed the row but the old note is still there: one write,
+    # clearing Sync Error.
+    store = StoreStub([
+        make_row("Draft", fee_type="FEE_ADDED_AT_CHECKOUT",
+                 sync_error="Not ready to sync: old"),
+    ])
     assert enrich_events(make_enrich_runtime(store)) is True
     assert len(store.field_updates) == 1
     _, props = store.field_updates[0]
     assert props[EventProps.SYNC_ERROR] == {"rich_text": []}
+
+
+def test_enrich_skips_rewrite_of_unchanged_error_note():
+    # An incomplete row whose note is already up to date is not rewritten.
+    store = StoreStub([
+        make_row("Draft", start_date="", start_time="",
+                 fee_type="FEE_ADDED_AT_CHECKOUT"),
+    ])
+    assert enrich_events(make_enrich_runtime(store)) is True
+    assert len(store.field_updates) == 1
+    _, props = store.field_updates[0]
+    note = props[EventProps.SYNC_ERROR]["rich_text"][0]["text"]["content"]
+
+    # Second pass with the note already stored on the row: no write.
+    row = make_row("Draft", start_date="", start_time="",
+                   fee_type="FEE_ADDED_AT_CHECKOUT", sync_error=note)
+    store2 = StoreStub([row])
+    assert enrich_events(make_enrich_runtime(store2)) is True
+    assert store2.field_updates == []
 
 
 def test_enrich_skips_unnamed_row_without_template():

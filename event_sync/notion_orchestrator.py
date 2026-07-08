@@ -1085,14 +1085,18 @@ def enrich_events(
                 error_note = f"Not ready to sync: {parse_validation_error(exc)}"
 
             if error_note:
-                props[EventProps.SYNC_ERROR] = p_rich_text(error_note)
                 incomplete += 1
             elif row.get("status") == STATUS_IDEA:
                 props[EventProps.STATUS] = p_select(STATUS_DRAFT)
                 changes.append("Idea → Draft")
-                props[EventProps.SYNC_ERROR] = p_rich_text("")
-            else:
-                props[EventProps.SYNC_ERROR] = p_rich_text("")
+
+            # Write Sync Error only when it actually changes — combined with
+            # the empty-props guard below, rows with nothing to fill skip the
+            # Notion PATCH entirely (sync runs enrich daily, so this is N
+            # saved writes per steady-state run). Clearing a stale note after
+            # a human fixed the row still writes.
+            if (error_note or "") != (row.get("sync_error") or ""):
+                props[EventProps.SYNC_ERROR] = p_rich_text(error_note or "")
 
             if changes:
                 logger.info("  ✨ %s: %s", name, ", ".join(changes))
@@ -1103,7 +1107,8 @@ def enrich_events(
             if error_note:
                 logger.info("     ⚠️  %s", error_note)
 
-            store.update_event_fields(page_id, props)
+            if props:
+                store.update_event_fields(page_id, props)
 
         logger.info(
             "\n📊 Enrich complete: %d enriched, %d unchanged, %d still missing fields",
