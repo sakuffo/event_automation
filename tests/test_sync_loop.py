@@ -142,6 +142,7 @@ class ClientStub:
         return iter(self.events)
 
     def get_ticket_definitions(self, wix_id, include_sales=False):
+        self.ticket_def_calls = getattr(self, "ticket_def_calls", 0) + 1
         return []
 
     def publish_event(self, wix_id):
@@ -596,12 +597,50 @@ def test_pull_scope_upcoming_skips_ended_events(monkeypatch):
 def test_pull_refreshes_existing_published_row(monkeypatch):
     existing = make_row("Published", event_name="Rope Lab", wix_event_id="w1")
     store = StoreStub([existing])
-    patch_pull(monkeypatch)
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "wix_event_to_config_row",
+        lambda event, ticket_defs, tz_name=TZ: make_wix_config_row(
+            event_name=event["title"], short_description="edited on the website"
+        ),
+    )
 
     assert pull_events(make_pull_runtime(store, [wix_event("w1", "Rope Lab")])) is True
     assert len(store.upserts) == 1
     _, status, _, page_id = store.upserts[0]
     assert (status, page_id) == ("Published", "page-1")
+
+
+def test_pull_skips_unchanged_published_row(monkeypatch):
+    # Row content and bookkeeping already match the live event: zero writes.
+    config_row = make_wix_config_row()
+    matching_hash = row_to_event_record(config_row).content_hash()
+    existing = make_row(
+        "Published", event_name="Rope Lab", wix_event_id="w1",
+        synced_hash=matching_hash,
+    )
+    store = StoreStub([existing])
+    patch_pull(monkeypatch)
+
+    assert pull_events(make_pull_runtime(store, [wix_event("w1", "Rope Lab")])) is True
+    assert store.all_writes() == []
+
+
+def test_pull_refreshes_stale_bookkeeping_without_full_rewrite(monkeypatch):
+    # Content matches but the stored hash is stale: one bookkeeping write,
+    # no full page rewrite.
+    existing = make_row(
+        "Published", event_name="Rope Lab", wix_event_id="w1", synced_hash="",
+    )
+    store = StoreStub([existing])
+    patch_pull(monkeypatch)
+
+    assert pull_events(make_pull_runtime(store, [wix_event("w1", "Rope Lab")])) is True
+    assert store.upserts == []
+    assert len(store.sync_results) == 1
+    _, kwargs = store.sync_results[0]
+    assert kwargs["wix_event_id"] == "w1"
+    assert kwargs["synced_hash"]
 
 
 def test_pull_links_human_row_matched_by_key_without_touching_fields(monkeypatch):
@@ -625,9 +664,12 @@ def test_pull_skips_human_row_matched_by_wix_id(monkeypatch):
     existing = make_row("Update", event_name="Rope Lab", wix_event_id="w1")
     store = StoreStub([existing])
     patch_pull(monkeypatch)
+    client = ClientStub(events=[wix_event("w1", "Rope Lab")])
 
-    assert pull_events(make_pull_runtime(store, [wix_event("w1", "Rope Lab")])) is True
+    assert pull_events(make_runtime(store, client)) is True
     assert store.all_writes() == []
+    # Id-matched human rows must not pay the ticket-definitions fetch.
+    assert getattr(client, "ticket_def_calls", 0) == 0
 
 
 def test_pull_returns_false_when_no_events(monkeypatch):

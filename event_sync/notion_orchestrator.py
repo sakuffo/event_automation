@@ -477,24 +477,34 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
             wix_id = wix_event.get("id", "")
             logger.info("  %d/%d  %s", i, len(wix_events), title)
 
-            record, config_row, target_status, invalid_note = (
-                _wix_event_to_record(client, wix_event, tz_name)
-            )
-
-            if record is not None:
-                match_key = event_match_key(
-                    record.name, record.start_date, record.start_time
-                )
-            else:
-                match_key = event_match_key(
-                    config_row.get("event_name") or "",
-                    config_row.get("start_date", ""),
-                    config_row.get("start_time", ""),
-                )
-
+            # Match by Wix id before any per-event Wix calls — id-matched
+            # rows in human statuses skip the ticket-definitions fetch
+            # entirely.
             existing = by_wix_id.get(wix_id)
             matched_by_key = False
+            record_built = False
+            record: Optional[EventRecord] = None
+            config_row: Dict[str, Any] = {}
+            target_status = STATUS_PUBLISHED
+            invalid_note = ""
+
             if existing is None:
+                # Key matching needs the localized date/time from the config
+                # row, so the record is built here (one ticket-defs call).
+                record, config_row, target_status, invalid_note = (
+                    _wix_event_to_record(client, wix_event, tz_name)
+                )
+                record_built = True
+                if record is not None:
+                    match_key = event_match_key(
+                        record.name, record.start_date, record.start_time
+                    )
+                else:
+                    match_key = event_match_key(
+                        config_row.get("event_name") or "",
+                        config_row.get("start_date", ""),
+                        config_row.get("start_time", ""),
+                    )
                 existing = by_key.get(match_key)
                 matched_by_key = existing is not None
 
@@ -536,9 +546,39 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                     logger.info("   ⏭️  Skipped (row status is %s)", row_status)
                     continue
 
+                # Refresh path: build the record now if the id match let
+                # us defer it.
+                if not record_built:
+                    record, config_row, target_status, invalid_note = (
+                        _wix_event_to_record(client, wix_event, tz_name)
+                    )
+
                 # Refreshing a code-owned row: don't let an imageless Wix
                 # event wipe a human-entered image link.
                 _apply_image_preservation(record, config_row, existing)
+
+                # Hash short-circuit mirroring the sync Published refresh —
+                # an unchanged event costs no Notion write.
+                if record is not None:
+                    row_hash: Optional[str] = None
+                    try:
+                        row_hash = row_to_event_record(existing).content_hash()
+                    except ValidationError:
+                        row_hash = None
+                    if row_hash == record.synced_hash and row_status == target_status:
+                        stale_bookkeeping = (
+                            (existing.get("synced_hash") or "") != record.synced_hash
+                            or (existing.get("wix_event_id") or "").strip() != wix_id
+                            or bool((existing.get("sync_error") or "").strip())
+                        )
+                        if stale_bookkeeping:
+                            store.write_sync_result(
+                                existing["page_id"], wix_event_id=wix_id,
+                                synced_hash=record.synced_hash, error=None,
+                            )
+                        results["skipped"].append(title)
+                        logger.info("   ⏭️  Unchanged (matches Wix)")
+                        continue
 
                 if record is not None:
                     store.upsert_event_from_record(
