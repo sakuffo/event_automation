@@ -9,7 +9,6 @@ Wix with tickets, categories, and images.
 > The previous Google Sheets pipeline has been removed; it remains
 > recoverable from the `legacy-sheets-final` git tag. Google Drive is still
 > used to host event images.
-> Done for people
 
 ## What This Does
 
