@@ -42,12 +42,7 @@ from .notion_store import (
     TEMPLATE_TYPE_CLASS,
     TEMPLATE_TYPE_EVENT,
     event_page_to_row,
-    p_date,
-    p_multi_select,
-    p_number,
-    p_rich_text,
-    p_select,
-    p_title,
+    event_property_for_field,
     p_url,
     parse_validation_error,
     row_to_event_record,
@@ -710,6 +705,28 @@ def _resolve_class_for_row(
     return classes.get((row.get("event_name") or "").strip().lower())
 
 
+def _set_field(
+    row: Dict[str, Any],
+    props: Dict[str, Any],
+    changes: List[str],
+    field: str,
+    value: Any,
+    label: Optional[str],
+    tz_name: str = "America/Toronto",
+) -> None:
+    """Set a row field, its Notion payload, and the change label in one step.
+
+    The payload comes from the store's field mapping, so fillers never build
+    raw property dicts. ``label=None`` groups several field writes under one
+    already-appended label (the tax trio).
+    """
+    row[field] = value
+    prop_name, payload = event_property_for_field(row, field, tz_name)
+    props[prop_name] = payload
+    if label:
+        changes.append(label)
+
+
 @dataclass
 class _Defaults:
     """Settings-DB defaults with constants fallbacks, parsed once per fill."""
@@ -827,13 +844,8 @@ def _fill_schedule(
                 pass
 
     if changes:
-        props[EventProps.DATE] = p_date(
-            start_date_iso,
-            (row.get("start_time") or "").strip() or None,
-            (row.get("end_date") or "").strip() or None,
-            (row.get("end_time") or "").strip() or None,
-            tz_name=tz_name,
-        )
+        prop_name, payload = event_property_for_field(row, "start_date", tz_name)
+        props[prop_name] = payload
     return props, changes
 
 
@@ -845,9 +857,7 @@ def _fill_instructor(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tu
     if klass and not (row.get("instructor") or "").strip():
         tpl_instructor = (klass.get("default_instructor") or "").strip()
         if tpl_instructor:
-            props[EventProps.INSTRUCTOR] = p_rich_text(tpl_instructor)
-            changes.append("instructor")
-            row["instructor"] = tpl_instructor
+            _set_field(row, props, changes, "instructor", tpl_instructor, "instructor")
     return props, changes
 
 
@@ -872,9 +882,7 @@ def _fill_categories(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tu
             seen.add(tag)
             merged.append(tag)
     if merged != row_cats:
-        props[EventProps.CATEGORIES] = p_multi_select(merged)
-        changes.append("categories")
-        row["categories"] = "; ".join(merged)
+        _set_field(row, props, changes, "categories", "; ".join(merged), "categories")
     return props, changes
 
 
@@ -882,14 +890,13 @@ def _fill_venue_and_registration(row: Dict[str, Any], defaults: _Defaults) -> tu
     props: Dict[str, Any] = {}
     changes: List[str] = []
     if not (row.get("location") or "").strip():
-        props[EventProps.LOCATION] = p_rich_text(defaults.location)
-        changes.append("location")
-        row["location"] = defaults.location
+        _set_field(row, props, changes, "location", defaults.location, "location")
 
     if not (row.get("registration_type") or "").strip():
-        props[EventProps.REGISTRATION_TYPE] = p_select(defaults.registration_type)
-        changes.append("registration type")
-        row["registration_type"] = defaults.registration_type
+        _set_field(
+            row, props, changes,
+            "registration_type", defaults.registration_type, "registration type",
+        )
     return props, changes
 
 
@@ -902,9 +909,10 @@ def _fill_capacity(
         capacity = None
         if klass and klass.get("default_capacity"):
             capacity = int(klass["default_capacity"])
-        props[EventProps.CAPACITY] = p_number(capacity or defaults.capacity)
-        changes.append("capacity")
-        row["capacity"] = str(capacity or defaults.capacity)
+        _set_field(
+            row, props, changes,
+            "capacity", str(capacity or defaults.capacity), "capacity",
+        )
     return props, changes
 
 
@@ -932,9 +940,10 @@ def _fill_pricing(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple
     if price is None and _is_class_template(klass):
         price = 30.0  # class rows always get a price (default $30)
     if price is not None:
-        props[EventProps.TICKET_PRICE] = p_number(price)
-        changes.append(f"price ${price:g}")
-        row["ticket_price"] = f"{price:g}"
+        _set_field(
+            row, props, changes,
+            "ticket_price", f"{price:g}", f"price ${price:g}",
+        )
     return props, changes
 
 
@@ -944,9 +953,7 @@ def _fill_descriptions(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> 
     if not (row.get("short_description") or "").strip() and klass:
         tagline = (klass.get("tagline") or "").strip()
         if tagline:
-            props[EventProps.TEASER] = p_rich_text(tagline)
-            changes.append("teaser")
-            row["short_description"] = tagline
+            _set_field(row, props, changes, "short_description", tagline, "teaser")
 
     if not (row.get("detailed_description") or "").strip() and klass:
         description = (klass.get("description") or "").strip()
@@ -958,9 +965,10 @@ def _fill_descriptions(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> 
         elif team:
             description = f"Instructors: {team}"
         if description:
-            props[EventProps.DESCRIPTION] = p_rich_text(description)
-            changes.append("description")
-            row["detailed_description"] = description
+            _set_field(
+                row, props, changes,
+                "detailed_description", description, "description",
+            )
     return props, changes
 
 
@@ -975,9 +983,7 @@ def _fill_image(
             image = (klass.get("image_url") or "").strip()
         image = image or defaults.image
         if image:
-            props[EventProps.IMAGE_URL] = p_url(image)
-            changes.append("image")
-            row["image_url"] = image
+            _set_field(row, props, changes, "image_url", image, "image")
     return props, changes
 
 
@@ -994,18 +1000,12 @@ def _fill_tax_and_fees(row: Dict[str, Any], defaults: _Defaults) -> tuple:
         not (row.get("tax_name") or "").strip()
         and not (row.get("tax_rate") or "").strip()
     ):
-        props[EventProps.TAX_NAME] = p_rich_text(defaults.tax_name)
-        props[EventProps.TAX_RATE] = p_number(float(defaults.tax_rate))
-        props[EventProps.TAX_TYPE] = p_rich_text(defaults.tax_type)
-        changes.append("tax")
-        row["tax_name"] = defaults.tax_name
-        row["tax_rate"] = defaults.tax_rate
-        row["tax_type"] = defaults.tax_type
+        _set_field(row, props, changes, "tax_name", defaults.tax_name, "tax")
+        _set_field(row, props, changes, "tax_rate", defaults.tax_rate, None)
+        _set_field(row, props, changes, "tax_type", defaults.tax_type, None)
 
     if not (row.get("fee_type") or "").strip():
-        props[EventProps.FEE_TYPE] = p_rich_text(defaults.fee_type)
-        changes.append("fee type")
-        row["fee_type"] = defaults.fee_type
+        _set_field(row, props, changes, "fee_type", defaults.fee_type, "fee type")
     return props, changes
 
 
@@ -1112,14 +1112,18 @@ def enrich_events(
                         "  ⏭️  Skipping unnamed row (add a Name or link a Template first)"
                     )
                     continue
-                row["event_name"] = klass["class"]
-                bootstrap_props[EventProps.NAME] = p_title(klass["class"])
-                bootstrap_changes.append("name from template")
+                _set_field(
+                    row, bootstrap_props, bootstrap_changes,
+                    "event_name", klass["class"], "name from template",
+                    tz_name=runtime.config.timezone,
+                )
 
             if not (row.get("status") or "").strip():
-                row["status"] = STATUS_IDEA
-                bootstrap_props[EventProps.STATUS] = p_select(STATUS_IDEA)
-                bootstrap_changes.append("status Idea")
+                _set_field(
+                    row, bootstrap_props, bootstrap_changes,
+                    "status", STATUS_IDEA, "status Idea",
+                    tz_name=runtime.config.timezone,
+                )
 
             name = row["event_name"]
             page_id = row["page_id"]
@@ -1144,8 +1148,7 @@ def enrich_events(
             if error_note:
                 incomplete += 1
             elif row.get("status") == STATUS_IDEA:
-                props[EventProps.STATUS] = p_select(STATUS_DRAFT)
-                changes.append("Idea → Draft")
+                _set_field(row, props, changes, "status", STATUS_DRAFT, "Idea → Draft")
 
             # Write Sync Error only when it actually changes — combined with
             # the empty-props guard below, rows with nothing to fill skip the
@@ -1153,7 +1156,7 @@ def enrich_events(
             # saved writes per steady-state run). Clearing a stale note after
             # a human fixed the row still writes.
             if (error_note or "") != (row.get("sync_error") or ""):
-                props[EventProps.SYNC_ERROR] = p_rich_text(error_note or "")
+                _set_field(row, props, changes, "sync_error", error_note or "", None)
 
             if changes:
                 logger.info("  ✨ %s: %s", name, ", ".join(changes))

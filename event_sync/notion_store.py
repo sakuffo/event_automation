@@ -489,6 +489,71 @@ def split_price(raw: Any) -> Tuple[Optional[float], str]:
 
 
 # ---------------------------------------------------------------------------
+# Row-field -> property mapping (the write-side reverse of event_page_to_row)
+# ---------------------------------------------------------------------------
+
+
+_FIELD_TEXT_PROPS = {
+    "location": "Location",
+    "instructor": "Instructor",
+    "short_description": "Teaser",
+    "detailed_description": "Description",
+    "tax_name": "Tax Name",
+    "tax_type": "Tax Type",
+    "fee_type": "Fee Type",
+    "sync_error": "Sync Error",
+}
+
+_DATE_PART_FIELDS = frozenset({"start_date", "start_time", "end_date", "end_time"})
+
+
+def event_property_for_field(
+    row: Dict[str, Any], field: str, tz_name: str
+) -> Tuple[str, Dict[str, Any]]:
+    """Return ``(property name, payload)`` for one row field's current value.
+
+    Fill helpers set a plain row field and delegate the Notion payload here,
+    so field->property knowledge lives in this module alongside the read-side
+    ``event_page_to_row``. Any date-part field rebuilds the composite Date
+    property from all four parts of the row.
+    """
+    if field in _DATE_PART_FIELDS:
+        return EventProps.DATE, p_date(
+            (row.get("start_date") or "").strip(),
+            (row.get("start_time") or "").strip() or None,
+            (row.get("end_date") or "").strip() or None,
+            (row.get("end_time") or "").strip() or None,
+            tz_name=tz_name,
+        )
+    if field in _FIELD_TEXT_PROPS:
+        return _FIELD_TEXT_PROPS[field], p_rich_text(row.get(field) or "")
+    if field == "event_name":
+        return EventProps.NAME, p_title(row.get("event_name") or "")
+    if field == "status":
+        return EventProps.STATUS, p_select(row.get("status") or None)
+    if field == "registration_type":
+        return EventProps.REGISTRATION_TYPE, p_select(
+            row.get("registration_type") or None
+        )
+    if field == "categories":
+        return EventProps.CATEGORIES, p_multi_select(
+            [c.strip() for c in (row.get("categories") or "").split(";") if c.strip()]
+        )
+    if field == "capacity":
+        number = _float_or_none(row.get("capacity"))
+        if number is not None and number == int(number):
+            number = int(number)
+        return EventProps.CAPACITY, p_number(number)
+    if field == "ticket_price":
+        return EventProps.TICKET_PRICE, p_number(_float_or_none(row.get("ticket_price")))
+    if field == "tax_rate":
+        return EventProps.TAX_RATE, p_number(_float_or_none(row.get("tax_rate")))
+    if field == "image_url":
+        return EventProps.IMAGE_URL, p_url((row.get("image_url") or "").strip() or None)
+    raise KeyError(f"No Events property mapping for row field '{field}'")
+
+
+# ---------------------------------------------------------------------------
 # Row <-> EventRecord adapters
 # ---------------------------------------------------------------------------
 

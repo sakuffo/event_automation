@@ -414,7 +414,10 @@ class TestEnrichNameFill:
         updates = self._run_enrich([row], self._catalog())
 
         props = updates["page-1"]
-        assert row["status"] == "Idea"
+        # The promotion only fires for rows sitting on Idea, so landing at
+        # Draft proves the bootstrap happened; the row now mirrors the
+        # written state.
+        assert row["status"] == "Draft"
         assert props[EventProps.STATUS] == {"select": {"name": "Draft"}}
 
     def test_blank_status_on_incomplete_row_stays_idea(self):
