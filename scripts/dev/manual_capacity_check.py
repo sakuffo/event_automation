@@ -9,7 +9,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from event_sync.wix_client import WixClient
-from dev_events import create_test_event
 import json
 import sys
 from datetime import datetime, timedelta
@@ -106,18 +105,18 @@ def main():
         capacity_fields = {k: v for k, v in ticket_def.items()
                           if any(term in k.lower() for term in ['capacity', 'quantity', 'limit', 'total', 'available'])}
 
-        print(f"\nAll capacity-related fields:")
+        print("\nAll capacity-related fields:")
         print(json.dumps(capacity_fields, indent=2))
 
         # Verify fix worked
-        if ticket_def.get('limited') == True:
+        if ticket_def.get('limited') is True:
             print("\n✅ SUCCESS: 'limited' is set to True")
 
             if ticket_def.get('quantity') == 15:
                 print("✅ SUCCESS: 'quantity' is set to 15")
                 print("\n🎉 CAPACITY FIX WORKS!")
                 print(f"\nNext step: Check Wix Dashboard for event '{event_title}'")
-                print(f"It should show 'Limited number of tickets: 15'")
+                print("It should show 'Limited number of tickets: 15'")
             else:
                 print(f"⚠️  WARNING: 'quantity' field value is {ticket_def.get('quantity')} (expected 15)")
                 print("\nLet's check if capacity is stored in a different field...")

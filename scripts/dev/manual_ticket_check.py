@@ -64,7 +64,7 @@ def test_ticket_automation(keep_event: bool = False):
     try:
         created_event = client.create_event(event_data)
         event_id = created_event.get('id')
-        print(f"✅ Event created successfully!")
+        print("✅ Event created successfully!")
         print(f"   Event ID: {event_id}")
         print(f"   Title: {created_event.get('title')}")
         print()
@@ -85,8 +85,8 @@ def test_ticket_automation(keep_event: bool = False):
             price=ticket_price,
             capacity=ticket_capacity
         )
-        print(f"✅ Ticket created successfully!")
-        print(f"   Ticket Name: General Admission")
+        print("✅ Ticket created successfully!")
+        print("   Ticket Name: General Admission")
         print(f"   Price: ${ticket_price:.2f}")
         print(f"   Capacity: {ticket_capacity}")
         print(f"   Ticket ID: {ticket.get('id', 'N/A')}")
@@ -94,8 +94,8 @@ def test_ticket_automation(keep_event: bool = False):
     except Exception as e:
         print(f"❌ Failed to create ticket: {e}")
         print(f"   Event ID: {event_id}")
-        print(f"   Note: Event was created but ticket creation failed")
-        print(f"   You can add tickets manually via Wix Dashboard")
+        print("   Note: Event was created but ticket creation failed")
+        print("   You can add tickets manually via Wix Dashboard")
         return False
 
     # Step 3: Verify event exists
@@ -103,7 +103,7 @@ def test_ticket_automation(keep_event: bool = False):
     print("-" * 60)
     try:
         retrieved_event = client.get_event(event_id)
-        print(f"✅ Event retrieved successfully!")
+        print("✅ Event retrieved successfully!")
         print(f"   Title: {retrieved_event.get('title')}")
         print(f"   Status: {retrieved_event.get('status')}")
         print()

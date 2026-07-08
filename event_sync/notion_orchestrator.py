@@ -41,7 +41,6 @@ from .notion_store import (
     STATUS_UPDATE,
     TEMPLATE_TYPE_CLASS,
     TEMPLATE_TYPE_EVENT,
-    event_page_to_row,
     event_property_for_field,
     p_url,
     parse_validation_error,

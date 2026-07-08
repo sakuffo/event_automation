@@ -2,7 +2,6 @@
 
 from io import BytesIO
 
-import pytest
 from PIL import Image
 
 import event_sync.images as images

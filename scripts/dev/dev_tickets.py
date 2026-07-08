@@ -6,7 +6,7 @@ Automate RSVP and ticket purchases for testing without using live site
 
 import sys
 import json
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 # Allow running from anywhere: repo root holds wix_client.py
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -41,7 +41,7 @@ def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General A
             currency=currency,
             capacity = quantity
         )
-        print(f"✅ Ticket definition created successfully!")
+        print("✅ Ticket definition created successfully!")
         ticket_def = result.get('ticketDefinition', {})
         print(f"   Ticket ID: {ticket_def.get('id')}")
         print(f"   Name: {ticket_def.get('name')}")
@@ -52,7 +52,7 @@ def add_ticket_to_event(client: WixClient, event_id: str, name: str = "General A
             try:
                 error_detail = e.response.json() #type: ignore
                 print(f"   Error details: {json.dumps(error_detail, indent=2)}")
-            except:
+            except Exception:
                 print(f"   Response: {e.response.text}") #type: ignore
         return None
 
@@ -76,7 +76,7 @@ def create_test_ticket_order(client: WixClient, event_id: str, ticket_definition
             tickets=ticket_definitions,
             checkout_info=checkout_info
         )
-        print(f"✅ Ticket order created successfully!")
+        print("✅ Ticket order created successfully!")
         print(f"   Order ID: {result.get('order', {}).get('id')}")
         print(f"   Buyer: {buyer_name}")
         print(f"   Email: {buyer_email}")

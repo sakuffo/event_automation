@@ -1,7 +1,7 @@
 """Unit tests for the row default-fill helper used by enrich and sync."""
 
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 from pydantic import ValidationError

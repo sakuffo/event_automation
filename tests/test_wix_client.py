@@ -1,3 +1,6 @@
+import requests
+
+from event_sync import wix_client as wix_client_module
 from event_sync.wix_client import WixClient
 
 
@@ -91,10 +94,6 @@ def test_list_events_respects_limit(monkeypatch):
 # ---------------------------------------------------------------------------
 # Transport retry matrix (Session-level)
 # ---------------------------------------------------------------------------
-
-import requests
-
-from event_sync import wix_client as wix_client_module
 
 
 class FakeHttpResponse:

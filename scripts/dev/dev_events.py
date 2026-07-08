@@ -12,7 +12,6 @@ from typing import Dict, Any, Optional
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':
-    import codecs
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
 
@@ -118,7 +117,7 @@ def get_event_details(client: WixClient, event_id: str):
             print(f"Registration Current Type: {registration.get('type', 'N/A')}")
             print(f"Registration Status: {registration.get('status', 'N/A')}")
         else:
-            print(f"Registration: Not configured")
+            print("Registration: Not configured")
 
         print(f"Event Status: {event.get('status', 'UNKNOWN')}")
 
@@ -190,7 +189,7 @@ def create_test_event(client: WixClient, title: str, days_from_now: int = 7,
 
     try:
         result = client.create_event(event_data)
-        print(f"✅ Event created successfully!")
+        print("✅ Event created successfully!")
         print(f"   Title: {result.get('title')}")
         event_id = result.get('id')
         print(f"   ID: {event_id}")
@@ -206,12 +205,12 @@ def create_test_event(client: WixClient, title: str, days_from_now: int = 7,
 
         # Show next steps for ticketed events
         if create_tickets and event_id:
-            print(f"\n   ✅ Ticketed event created successfully!")
-            print(f"   📋 Next steps to add tickets:")
+            print("\n   ✅ Ticketed event created successfully!")
+            print("   📋 Next steps to add tickets:")
             print(f"      1. Open Wix Dashboard → Events → '{title}'")
-            print(f"      2. Click 'Manage Tickets' button")
-            print(f"      3. Add ticket types with pricing")
-            print(f"      4. Tickets will automatically go on sale when added")
+            print("      2. Click 'Manage Tickets' button")
+            print("      3. Add ticket types with pricing")
+            print("      4. Tickets will automatically go on sale when added")
 
         return result
     except Exception as e:
@@ -220,7 +219,7 @@ def create_test_event(client: WixClient, title: str, days_from_now: int = 7,
             try:
                 error_detail = e.response.json()
                 print(f"   Error details: {json.dumps(error_detail, indent=2)}")
-            except:
+            except Exception:
                 print(f"   Response text: {e.response.text}")
         return None
 
@@ -232,7 +231,7 @@ def update_event_title(client: WixClient, event_id: str, new_title: str):
     try:
         result = client.update_event(event_id, {'title': new_title})
 
-        print(f"✅ Event updated successfully!")
+        print("✅ Event updated successfully!")
         print(f"   New Title: {result.get('title')}")
         return result
     except Exception as e:
@@ -246,7 +245,7 @@ def publish_event(client: WixClient, event_id: str):
 
     try:
         result = client.publish_event(event_id)
-        print(f"✅ Event published successfully!")
+        print("✅ Event published successfully!")
         print(f"   Title: {result.get('title')}")
         print(f"   Status: {result.get('status', 'UNKNOWN')}")
         return result
@@ -267,9 +266,9 @@ def delete_event(client: WixClient, event_id: str, confirm: bool = False):
     try:
         success = client.delete_event(event_id)
         if success:
-            print(f"✅ Event deleted successfully!")
+            print("✅ Event deleted successfully!")
         else:
-            print(f"❌ Failed to delete event")
+            print("❌ Failed to delete event")
     except Exception as e:
         print(f"❌ Failed to delete event: {e}")
 
@@ -367,7 +366,7 @@ def delete_events_after_date(client: WixClient, cutoff_date: str, confirm: bool 
         from datetime import timezone
         cutoff = datetime.strptime(cutoff_date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
     except ValueError:
-        print(f"❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-01-01)")
+        print("❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-01-01)")
         return
 
     all_events = list(client.iter_events(page_size=200, include_drafts=True))

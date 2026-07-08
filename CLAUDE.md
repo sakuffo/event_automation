@@ -58,7 +58,7 @@ pytest tests/test_sync_loop.py -v    # Sync-loop status-lifecycle characterizati
 - `models.py` — Pydantic `EventRecord` (+ `content_hash()` for change detection, bookkeeping fields `notion_page_id`/`wix_event_id`/`status`/`synced_hash`); `TicketSpec`/`parse_tickets` for `;`-separated multi-ticket fields
 - `images.py` — image download (Google Drive API or plain HTTP for wixstatic URLs), Pillow resize, Wix Media upload
 - `wix_client.py` — Wix API client with retry/backoff — events CRUD, ticket definitions, categories, eCommerce tax (`billing/v1`), media upload
-- `constants.py` — pricing table (`CATEGORY_PRICING`), default location/capacity/tax, column mappings
+- `constants.py` — pricing table (`CATEGORY_PRICING`), default location/capacity/tax, tax-rate conversions
 
 **`scripts/`** — operational one-offs (`diag_hashes.py`, `set_event_status.py`, `export_events_csv.py`, `create_test_idea_row.py`); **`scripts/dev/`** — manual Wix dev tools (`dev_events.py`, `dev_tickets.py`, `manual_*_check.py`) that hit the live (dev) site and are deliberately outside pytest's `testpaths`.
 
