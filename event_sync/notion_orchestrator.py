@@ -1674,10 +1674,16 @@ def _push_matched_ready_row(
         logger.info("  🔗 %s already in Wix — linking row", name)
 
     if ok and ctx.auto_create_tickets and record.registration_type == "TICKETING" and wix_status != "DRAFT":
+        # The plan already fetched this event's ticket definitions.
+        plan_defs = plan.get("wix_ticket_defs")
         if record.ticket_name:
-            create_tickets_from_config(ctx.client, wix_id, record)
+            create_tickets_from_config(
+                ctx.client, wix_id, record, existing_defs=plan_defs
+            )
         elif record.ticket_price > 0:
-            ensure_ticket_definition(ctx.client, wix_id, record)
+            ensure_ticket_definition(
+                ctx.client, wix_id, record, existing_defs=plan_defs
+            )
 
     new_status = STATUS_READY if wix_status == "DRAFT" else STATUS_PUBLISHED
     if ok:

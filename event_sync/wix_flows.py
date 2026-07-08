@@ -249,9 +249,17 @@ def ensure_ticket_definition(
     client,
     event_id: str,
     event: EventRecord,
+    existing_defs: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
-    """Create a ticket definition if one doesn't already exist. Returns True on success."""
-    existing = client.get_ticket_definitions(event_id)
+    """Create a ticket definition if one doesn't already exist. Returns True on success.
+
+    ``existing_defs`` lets callers that already fetched the event's ticket
+    definitions (e.g. via an update plan) skip the re-query.
+    """
+    existing = (
+        existing_defs if existing_defs is not None
+        else client.get_ticket_definitions(event_id)
+    )
     if existing:
         names = [d.get("name", "") for d in existing]
         logger.info("   ℹ️  Tickets already exist (%s) — skipping", ", ".join(names))
@@ -282,15 +290,22 @@ def ensure_ticket_definition(
         return False
 
 
-def create_tickets_from_config(client, event_id: str, event: EventRecord) -> bool:
+def create_tickets_from_config(
+    client,
+    event_id: str,
+    event: EventRecord,
+    existing_defs: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     """Create ticket definitions from the multi-ticket fields.
 
     Skips creation if the event already has ticket definitions to avoid
-    duplicates that could confuse customers.
+    duplicates that could confuse customers. ``existing_defs`` lets callers
+    that already fetched them skip the re-query.
     """
     from .constants import DEFAULT_FEE_TYPE
 
-    existing_defs = client.get_ticket_definitions(event_id)
+    if existing_defs is None:
+        existing_defs = client.get_ticket_definitions(event_id)
     if existing_defs:
         existing_names = [d.get("name", "") for d in existing_defs]
         logger.info(
@@ -336,17 +351,19 @@ def _repair_missing_tickets(
     client,
     event_id: str,
     event: EventRecord,
+    existing_defs: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Check for missing ticket definitions and create one if needed."""
     if event.registration_type != "TICKETING" or event.ticket_price <= 0:
         return
 
-    existing_defs = client.get_ticket_definitions(event_id)
+    if existing_defs is None:
+        existing_defs = client.get_ticket_definitions(event_id)
     if existing_defs:
         return
 
     logger.info("   🔧 No ticket definitions found — repairing...")
-    ensure_ticket_definition(client, event_id, event)
+    ensure_ticket_definition(client, event_id, event, existing_defs=[])
 
 
 # ---------------------------------------------------------------------------
@@ -390,11 +407,12 @@ def create_wix_event(
         if draft:
             logger.info("   ℹ️  Tickets deferred until the draft is published")
         elif event.registration_type == "TICKETING" and auto_create_tickets:
+            # A just-created event has no ticket definitions — skip the check.
             if event.ticket_name:
                 # Multi-ticket specs (semicolon-separated names/prices/capacities)
-                create_tickets_from_config(client, event_id, event)
+                create_tickets_from_config(client, event_id, event, existing_defs=[])
             elif event.ticket_price > 0:
-                ensure_ticket_definition(client, event_id, event)
+                ensure_ticket_definition(client, event_id, event, existing_defs=[])
         elif event.registration_type == "TICKETING" and not auto_create_tickets:
             logger.info("   ℹ️  Ticket creation skipped (--no-tickets flag set)")
 
@@ -412,6 +430,7 @@ def update_wix_event(
     existing_event_id: str,
     existing_event: Dict[str, Any],
     auto_create_tickets: bool = True,
+    existing_ticket_defs: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     from .images import is_wix_media_url, normalize_wix_media_url
 
@@ -452,7 +471,10 @@ def update_wix_event(
         logger.info("♻️  Updated event: %s", event.name)
 
         if auto_create_tickets:
-            _repair_missing_tickets(client, existing_event_id, event)
+            _repair_missing_tickets(
+                client, existing_event_id, event,
+                existing_defs=existing_ticket_defs,
+            )
 
         return True
     except Exception as exc:
@@ -563,6 +585,7 @@ def compute_event_update_plan(
     return {
         "event_diffs": event_diffs,
         "event_changed": event_changed,
+        "wix_ticket_defs": wix_ticket_defs,
         "cats_changed": cats_changed,
         "wix_cat_names": wix_cat_names,
         "desired_cat_names": desired_cat_names,
@@ -610,7 +633,11 @@ def apply_event_update_plan(
     ok = True
 
     if plan["event_changed"]:
-        if not update_wix_event(event, runtime=runtime, existing_event_id=event_id, existing_event=wix_event):
+        if not update_wix_event(
+            event, runtime=runtime, existing_event_id=event_id,
+            existing_event=wix_event,
+            existing_ticket_defs=plan.get("wix_ticket_defs"),
+        ):
             ok = False
 
     if plan["tax_changed"]:

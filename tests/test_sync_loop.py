@@ -196,6 +196,7 @@ def stub_plan(any_changes=True, event_changed=False):
         "event_diffs": [],
         "change_desc": "stub",
         "ticket_updates": [],
+        "wix_ticket_defs": [],
     }
 
 
@@ -212,7 +213,7 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
     monkeypatch.setattr(
         notion_orchestrator,
         "ensure_ticket_definition",
-        lambda c, wix_id, record: ensured.append((wix_id, record.ticket_price)),
+        lambda c, wix_id, record, **kw: ensured.append((wix_id, record.ticket_price)),
     )
 
     assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
@@ -237,7 +238,7 @@ def test_ready_row_with_named_tickets_uses_config_ticket_creation(monkeypatch):
     monkeypatch.setattr(
         notion_orchestrator,
         "create_tickets_from_config",
-        lambda c, wix_id, record: created.append(wix_id) or True,
+        lambda c, wix_id, record, **kw: created.append(wix_id) or True,
     )
 
     assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
@@ -262,7 +263,7 @@ def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
     monkeypatch.setattr(
         notion_orchestrator,
         "ensure_ticket_definition",
-        lambda c, wix_id, record: ensured.append(wix_id),
+        lambda c, wix_id, record, **kw: ensured.append(wix_id),
     )
 
     assert notion_sync_events(make_runtime(store), run_enrich=False) is True
@@ -292,7 +293,7 @@ def test_ready_row_matches_by_title_date_time_when_id_missing(monkeypatch):
         lambda *a, **k: pytest.fail("matched by key; must not create"),
     )
     monkeypatch.setattr(
-        notion_orchestrator, "ensure_ticket_definition", lambda *a: None
+        notion_orchestrator, "ensure_ticket_definition", lambda *a, **kw: None
     )
 
     assert notion_sync_events(make_runtime(store), run_enrich=False) is True
