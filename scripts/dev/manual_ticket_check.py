@@ -18,8 +18,12 @@ if sys.platform == 'win32':
     sys.stderr.reconfigure(encoding='utf-8')
 
 
-def test_ticket_automation():
-    """Test creating a TICKETING event with automatic ticket creation"""
+def test_ticket_automation(keep_event: bool = False):
+    """Test creating a TICKETING event with automatic ticket creation.
+
+    The test event is deleted at the end unless ``--keep`` is passed for
+    manual inspection in the Wix Dashboard.
+    """
     print("🧪 Testing Ticket Automation\n")
     print("=" * 60)
 
@@ -107,18 +111,24 @@ def test_ticket_automation():
         print(f"⚠️  Could not retrieve event: {e}")
         print()
 
+    # Step 4: Clean up the test event (opt out with --keep)
+    if keep_event:
+        print("Step 4: Keeping test event for manual inspection (--keep)")
+        print(f"   Delete later: python scripts/dev/dev_events.py delete {event_id} --confirm")
+        print()
+    else:
+        print("Step 4: Cleaning up test event...")
+        print("-" * 60)
+        if client.delete_event(event_id, force=True):
+            print("✅ Test event deleted")
+        else:
+            print(f"⚠️  Could not delete test event — remove it manually (ID: {event_id})")
+            print(f"   python scripts/dev/dev_events.py delete {event_id} --confirm")
+        print()
+
     # Success summary
     print("=" * 60)
     print("✅ TEST PASSED - Ticket Automation Working!\n")
-    print("Next Steps:")
-    print("1. Open Wix Dashboard → Events")
-    print(f"2. Find event: 'Test Ticket Automation Event'")
-    print("3. Verify ticket 'General Admission' exists ($25.00)")
-    print("4. Try purchasing a ticket to confirm it works")
-    print(f"5. Delete test event when done (ID: {event_id})")
-    print()
-    print(f"Delete command: python dev_events.py delete {event_id} --confirm")
-    print()
 
     return True
 
@@ -126,7 +136,7 @@ def test_ticket_automation():
 def main():
     """Main entry point"""
     print()
-    success = test_ticket_automation()
+    success = test_ticket_automation(keep_event="--keep" in sys.argv)
     print()
 
     if success:
