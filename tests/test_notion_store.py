@@ -408,3 +408,69 @@ class TestStatusLifecycle:
 
         assert store.ensure_event_status_options() == 0
         assert fake.data_sources.update_calls == []
+
+
+class TestSiteConfigUpsertPrecedence:
+    """upsert_site_config_row matching: mapping_id wins; region+group only
+    matches pages that have no mapping_id; no match -> create."""
+
+    @staticmethod
+    def _site_page(page_id, mapping_id="", region_id="", group_id=""):
+        SC = notion_store.SiteConfigProps
+        return properties_to_page(
+            {
+                SC.NAME: notion_store.p_title("Ontario"),
+                SC.MAPPING_ID: notion_store.p_rich_text(mapping_id),
+                SC.REGION_ID: notion_store.p_rich_text(region_id),
+                SC.GROUP_ID: notion_store.p_rich_text(group_id),
+            },
+            page_id=page_id,
+        )
+
+    def _store_with_pages(self, fake_store, monkeypatch, pages):
+        store = fake_store([])
+        monkeypatch.setattr(store, "iter_pages", lambda db_id, filter_=None: iter(pages))
+        writes = {"updated": [], "created": []}
+        monkeypatch.setattr(
+            store, "update_page",
+            lambda page_id, props: writes["updated"].append(page_id),
+        )
+        monkeypatch.setattr(
+            store, "create_page",
+            lambda db_id, props: writes["created"].append(db_id),
+        )
+        return store, writes
+
+    def test_mapping_id_match_wins(self, fake_store, monkeypatch):
+        pages = [
+            self._site_page("p-map", mapping_id="m1", region_id="r1", group_id="g1"),
+            self._site_page("p-plain", region_id="r1", group_id="g1"),
+        ]
+        store, writes = self._store_with_pages(fake_store, monkeypatch, pages)
+        store.upsert_site_config_row(
+            {"mapping_id": "m1", "region_id": "r1", "group_id": "g1", "tax_rate": "13"}
+        )
+        assert writes["updated"] == ["p-map"]
+        assert writes["created"] == []
+
+    def test_region_group_only_matches_pages_without_mapping_id(
+        self, fake_store, monkeypatch
+    ):
+        pages = [
+            self._site_page("p-map", mapping_id="m1", region_id="r1", group_id="g1"),
+            self._site_page("p-plain", region_id="r1", group_id="g1"),
+        ]
+        store, writes = self._store_with_pages(fake_store, monkeypatch, pages)
+        store.upsert_site_config_row(
+            {"mapping_id": "", "region_id": "r1", "group_id": "g1", "tax_rate": "13"}
+        )
+        assert writes["updated"] == ["p-plain"]
+
+    def test_unmatched_row_creates_page(self, fake_store, monkeypatch):
+        pages = [self._site_page("p-map", mapping_id="m1")]
+        store, writes = self._store_with_pages(fake_store, monkeypatch, pages)
+        store.upsert_site_config_row(
+            {"mapping_id": "m2", "region_id": "r9", "group_id": "g9", "tax_rate": "5"}
+        )
+        assert writes["updated"] == []
+        assert writes["created"] == ["db-site"]
