@@ -32,7 +32,7 @@ help:
 	@echo "  make dev-clean-test   - Delete all events with 'Test' in title"
 	@echo "  make dev-clean-all    - Delete ALL events (use with caution!)"
 	@echo ""
-	@echo "See DEV_TOOLS.md for complete development tools documentation"
+	@echo "See docs/DEV_TOOLS.md for complete development tools documentation"
 	@echo ""
 
 # Setup environment
@@ -108,66 +108,66 @@ dev-help:
 	@echo "====================="
 	@echo ""
 	@echo "Event Operations:"
-	@echo "  python dev_events.py list                      - List all events"
-	@echo "  python dev_events.py get <event_id>            - Get event details"
-	@echo "  python dev_events.py create <title>            - Create test event"
-	@echo "  python dev_events.py create-samples [count]    - Create sample events"
-	@echo "  python dev_events.py search <query>            - Search events"
-	@echo "  python dev_events.py delete <event_id> --confirm - Delete event"
+	@echo "  python scripts/dev/dev_events.py list                      - List all events"
+	@echo "  python scripts/dev/dev_events.py get <event_id>            - Get event details"
+	@echo "  python scripts/dev/dev_events.py create <title>            - Create test event"
+	@echo "  python scripts/dev/dev_events.py create-samples [count]    - Create sample events"
+	@echo "  python scripts/dev/dev_events.py search <query>            - Search events"
+	@echo "  python scripts/dev/dev_events.py delete <event_id> --confirm - Delete event"
 	@echo ""
 	@echo "Ticket Operations:"
-	@echo "  python dev_tickets.py add-ticket <event_id> [name] [price] [currency] - Add ticket definition"
-	@echo "  python dev_tickets.py list-orders <event_id>   - List orders for event"
-	@echo "  python dev_tickets.py search-event <title>     - Search for event"
+	@echo "  python scripts/dev/dev_tickets.py add-ticket <event_id> [name] [price] [currency] - Add ticket definition"
+	@echo "  python scripts/dev/dev_tickets.py list-orders <event_id>   - List orders for event"
+	@echo "  python scripts/dev/dev_tickets.py search-event <title>     - Search for event"
 	@echo ""
-	@echo "See DEV_TOOLS.md for complete documentation"
+	@echo "See docs/DEV_TOOLS.md for complete documentation"
 
 dev-list:
-	@python dev_events.py list
+	@python scripts/dev/dev_events.py list
 
 dev-create:
-	@python dev_events.py create "Test RSVP Event $$(date +%Y%m%d-%H%M%S)" 7 true RSVP
+	@python scripts/dev/dev_events.py create "Test RSVP Event $$(date +%Y%m%d-%H%M%S)" 7 true RSVP
 	@echo ""
 	@echo "Created test RSVP event. Use 'make dev-list' to see all events."
 
 dev-create-ticket:
-	@python dev_events.py create "Test TICKETED Event $$(date +%Y%m%d-%H%M%S)" 7 true TICKETS
+	@python scripts/dev/dev_events.py create "Test TICKETED Event $$(date +%Y%m%d-%H%M%S)" 7 true TICKETS
 	@echo ""
 	@echo "Created ticketed event with General Admission ticket ($25.00)."
 	@echo "Use 'make dev-list' to see all events."
 
 dev-samples:
-	@python dev_events.py create-samples 5
+	@python scripts/dev/dev_events.py create-samples 5
 
 dev-add-ticket:
 ifndef EVENT_ID
 	@echo "Error: EVENT_ID required. Usage: make dev-add-ticket EVENT_ID=abc123"
 	@exit 1
 endif
-	@python dev_tickets.py add-ticket $(EVENT_ID)
+	@python scripts/dev/dev_tickets.py add-ticket $(EVENT_ID)
 
 dev-search:
 ifndef QUERY
 	@echo "Error: QUERY required. Usage: make dev-search QUERY='Workshop'"
 	@exit 1
 endif
-	@python dev_events.py search "$(QUERY)"
+	@python scripts/dev/dev_events.py search "$(QUERY)"
 
 # Cleanup commands
 dev-clean-drafts:
 	@echo "⚠️  This will delete ALL DRAFT events!"
 	@echo "Press Ctrl+C to cancel, or wait 3 seconds to continue..."
 	@sleep 3
-	@python dev_events.py delete-drafts --confirm
+	@python scripts/dev/dev_events.py delete-drafts --confirm
 
 dev-clean-test:
 	@echo "⚠️  This will delete ALL events with 'Test' in the title!"
 	@echo "Press Ctrl+C to cancel, or wait 3 seconds to continue..."
 	@sleep 3
-	@python dev_events.py delete-test --confirm
+	@python scripts/dev/dev_events.py delete-test --confirm
 
 dev-clean-all:
 	@echo "🚨 WARNING: This will delete ALL events in the system!"
 	@echo "Press Ctrl+C to cancel, or wait 5 seconds to continue..."
 	@sleep 5
-	@python dev_events.py delete-pattern "" --confirm
+	@python scripts/dev/dev_events.py delete-pattern "" --confirm

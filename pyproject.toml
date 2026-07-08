@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+# Only collect from tests/ — the repo root and scripts/ hold manual dev tools
+# (some hit live APIs) that must never run under `pytest` / `make unit`.
+testpaths = ["tests"]
