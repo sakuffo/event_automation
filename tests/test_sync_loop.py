@@ -871,3 +871,33 @@ def test_row_with_padded_name_still_matches_by_key(monkeypatch):
     matched, wix_id = _match_wix_event(row, {}, by_key)
     assert matched is wix
     assert wix_id == "w-1"
+
+
+# ---------------------------------------------------------------------------
+# One row's failed Notion write-back must not abort the batch
+# ---------------------------------------------------------------------------
+
+
+def test_failed_notion_write_does_not_abort_remaining_rows(monkeypatch):
+    from event_sync.notion_store import NotionStoreError
+
+    rows = [
+        make_row("Delete", page_id="p1", event_name="A", wix_event_id=""),
+        make_row("Delete", page_id="p2", event_name="B", wix_event_id=""),
+    ]
+    store = StoreStub(rows)
+    patch_index(monkeypatch)
+
+    original = store.write_sync_result
+    def flaky(page_id, **kwargs):
+        if page_id == "p1":
+            raise NotionStoreError("Notion page update p1 failed: 503")
+        original(page_id, **kwargs)
+    store.write_sync_result = flaky
+
+    assert notion_sync_events(make_runtime(store), run_enrich=False) is False
+    # Row B was still processed and marked Removed.
+    assert len(store.sync_results) == 1
+    page_id, kwargs = store.sync_results[0]
+    assert page_id == "p2"
+    assert kwargs["status"] == "Removed"

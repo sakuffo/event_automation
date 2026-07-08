@@ -27,6 +27,7 @@ from .models import EventRecord, ValidationError
 from .notion_store import (
     EventProps,
     NotionStore,
+    NotionStoreError,
     SOURCE_WIX,
     STATUS_CANCEL,
     STATUS_CANCELLED,
@@ -1078,6 +1079,7 @@ def enrich_events(
         enriched = 0
         skipped = 0
         incomplete = 0
+        write_failures = 0
 
         for row in rows:
             if not _row_in_months(row, allowed_months):
@@ -1149,13 +1151,19 @@ def enrich_events(
                 logger.info("     ⚠️  %s", error_note)
 
             if props:
-                store.update_event_fields(page_id, props)
+                try:
+                    store.update_event_fields(page_id, props)
+                except NotionStoreError as exc:
+                    logger.error("  ❌ %s: Notion write failed — %s", name, exc)
+                    write_failures += 1
 
         logger.info(
             "\n📊 Enrich complete: %d enriched, %d unchanged, %d still missing fields",
             enriched, skipped, incomplete,
         )
-        return True
+        if write_failures:
+            logger.error("❌ %d enrich write(s) failed — see above", write_failures)
+        return write_failures == 0
     except Exception as exc:
         logger.exception("Fatal error during enrich: %s", exc)
         return False
@@ -1750,6 +1758,68 @@ def _create_new_event(
     _pace_wix(ctx)
 
 
+def _sync_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
+    """Dispatch one row to its status handler.
+
+    The dispatch order is load-bearing — NOT a status->handler map.
+    Cancel/Delete/Published act before record validation so incomplete rows
+    can still be cancelled, deleted, or refreshed.
+    """
+    page_id = row["page_id"]
+    row_status = row.get("status") or ""
+
+    if row_status == STATUS_CANCEL:
+        _handle_cancel_row(ctx, row, name, page_id)
+        return
+    if row_status == STATUS_DELETE:
+        _handle_delete_row(ctx, row, name, page_id)
+        return
+    if row_status == STATUS_PUBLISHED:
+        _refresh_published_row(ctx, row, name, page_id)
+        return
+
+    if row_status == STATUS_READY and (row.get("event_name") or "").strip():
+        _default_fill_ready_row(ctx, row, name, page_id)
+
+    try:
+        record = row_to_event_record(row)
+    except ValidationError as exc:
+        message = parse_validation_error(exc)
+        logger.error("  ❌ %s: invalid row — %s", name, message)
+        ctx.results["failed"].append(name)
+        _write_row_result(
+            ctx, page_id, status=STATUS_ERROR,
+            error=f"Invalid row: {message}",
+        )
+        return
+
+    wix_event, wix_id = _match_wix_event(row, ctx.by_id, ctx.by_key)
+
+    # Wix events cancelled outside this pipeline can't be updated or
+    # recreated in place — reflect reality on the row and move on.
+    if wix_event is not None and (wix_event.get("status") or "") == "CANCELED":
+        logger.warning(
+            "  🚫 %s: event is cancelled in Wix — marking row Cancelled", name,
+        )
+        ctx.results["skipped"].append(name)
+        _write_row_result(
+            ctx, page_id, status=STATUS_CANCELLED, wix_event_id=wix_id,
+            error="Cancelled in Wix. Set Status to Delete to remove it, "
+            "or duplicate the row without the Wix Event ID to recreate.",
+        )
+        return
+
+    if row_status == STATUS_UPDATE:
+        _push_update_row(ctx, record, wix_event, wix_id, name, page_id)
+        return
+
+    if wix_event is not None:
+        _push_matched_ready_row(ctx, record, wix_event, wix_id, name, page_id)
+        return
+
+    _create_new_event(ctx, record, name, page_id)
+
+
 def _log_sync_summary(
     results: Dict[str, List[str]], dry_run: bool, cache_stats: Dict[str, int]
 ) -> None:
@@ -1908,62 +1978,13 @@ def notion_sync_events(
 
         for row in rows:
             name = row.get("event_name") or "(unnamed)"
-            page_id = row["page_id"]
-            row_status = row.get("status") or ""
-
-            # The dispatch order is load-bearing — NOT a status->handler map.
-            # Cancel/Delete/Published act before record validation so
-            # incomplete rows can still be cancelled, deleted, or refreshed.
-            if row_status == STATUS_CANCEL:
-                _handle_cancel_row(ctx, row, name, page_id)
-                continue
-            if row_status == STATUS_DELETE:
-                _handle_delete_row(ctx, row, name, page_id)
-                continue
-            if row_status == STATUS_PUBLISHED:
-                _refresh_published_row(ctx, row, name, page_id)
-                continue
-
-            if row_status == STATUS_READY and (row.get("event_name") or "").strip():
-                _default_fill_ready_row(ctx, row, name, page_id)
-
             try:
-                record = row_to_event_record(row)
-            except ValidationError as exc:
-                message = parse_validation_error(exc)
-                logger.error("  ❌ %s: invalid row — %s", name, message)
+                _sync_row(ctx, row, name)
+            except NotionStoreError as exc:
+                # One row's failed write-back must not abort the batch — the
+                # row keeps its status and is retried on the next run.
+                logger.error("  ❌ %s: Notion write failed — %s", name, exc)
                 ctx.results["failed"].append(name)
-                _write_row_result(
-                    ctx, page_id, status=STATUS_ERROR,
-                    error=f"Invalid row: {message}",
-                )
-                continue
-
-            wix_event, wix_id = _match_wix_event(row, by_id, by_key)
-
-            # Wix events cancelled outside this pipeline can't be updated or
-            # recreated in place — reflect reality on the row and move on.
-            if wix_event is not None and (wix_event.get("status") or "") == "CANCELED":
-                logger.warning(
-                    "  🚫 %s: event is cancelled in Wix — marking row Cancelled", name,
-                )
-                ctx.results["skipped"].append(name)
-                _write_row_result(
-                    ctx, page_id, status=STATUS_CANCELLED, wix_event_id=wix_id,
-                    error="Cancelled in Wix. Set Status to Delete to remove it, "
-                    "or duplicate the row without the Wix Event ID to recreate.",
-                )
-                continue
-
-            if row_status == STATUS_UPDATE:
-                _push_update_row(ctx, record, wix_event, wix_id, name, page_id)
-                continue
-
-            if wix_event is not None:
-                _push_matched_ready_row(ctx, record, wix_event, wix_id, name, page_id)
-                continue
-
-            _create_new_event(ctx, record, name, page_id)
 
         _log_sync_summary(ctx.results, dry_run, runtime.cache_stats)
         return len(ctx.results["failed"]) == 0

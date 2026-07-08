@@ -719,8 +719,24 @@ class NotionStoreError(RuntimeError):
     """Raised when a Notion operation fails in a way callers should surface."""
 
 
+def _is_transient_notion_error(exc: Exception) -> bool:
+    """Gateway hiccups and connection drops — worth one more try."""
+    status = getattr(exc, "status", None)
+    if status in (502, 503, 504):
+        return True
+    return type(exc).__name__ in {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ReadError",
+        "RemoteProtocolError",
+    }
+
+
 class NotionStore:
     """Thin, synchronous wrapper over the Notion API for our four databases."""
+
+    RETRY_ATTEMPTS = 3
 
     def __init__(self, config: AppConfig):
         if not config.notion_token:
@@ -734,6 +750,30 @@ class NotionStore:
 
     # -- plumbing ----------------------------------------------------------
 
+    def _api(self, description: str, call, *, retry: bool = True):
+        """Run one SDK call with transient-error retry and error context.
+
+        The SDK already retries 429s; this covers gateway 5xx and dropped
+        connections. ``retry=False`` for page creation — retrying a create
+        that actually landed server-side would duplicate the row. Failures
+        surface as :class:`NotionStoreError` so per-row callers can contain
+        them without catching bare ``Exception``.
+        """
+        attempts = self.RETRY_ATTEMPTS if retry else 1
+        for attempt in range(attempts):
+            try:
+                return call()
+            except Exception as exc:
+                if attempt < attempts - 1 and _is_transient_notion_error(exc):
+                    wait = 1.5 * (attempt + 1)
+                    logger.warning(
+                        "Notion %s failed transiently (%s) — retrying in %.1fs",
+                        description, exc, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise NotionStoreError(f"Notion {description} failed: {exc}") from exc
+
     def data_source_id(self, database_id: str) -> str:
         """Resolve (and cache) the data source id for a database id."""
         if not database_id:
@@ -742,7 +782,10 @@ class NotionStore:
         if cached:
             return cached
 
-        database = self.client.databases.retrieve(database_id=database_id)
+        database = self._api(
+            f"database retrieve {database_id}",
+            lambda: self.client.databases.retrieve(database_id=database_id),
+        )
         sources = database.get("data_sources") or []
         if not sources:
             raise NotionStoreError(
@@ -766,7 +809,10 @@ class NotionStore:
                 kwargs["filter"] = filter_
             if cursor:
                 kwargs["start_cursor"] = cursor
-            response = self.client.data_sources.query(**kwargs)
+            response = self._api(
+                "data source query",
+                lambda: self.client.data_sources.query(**kwargs),
+            )
             for page in response.get("results", []):
                 yield page
             if not response.get("has_more"):
@@ -777,15 +823,22 @@ class NotionStore:
         self, database_id: str, properties: Dict[str, Any]
     ) -> Dict[str, Any]:
         ds_id = self.data_source_id(database_id)
-        page = self.client.pages.create(
-            parent={"type": "data_source_id", "data_source_id": ds_id},
-            properties=properties,
+        page = self._api(
+            "page create",
+            lambda: self.client.pages.create(
+                parent={"type": "data_source_id", "data_source_id": ds_id},
+                properties=properties,
+            ),
+            retry=False,
         )
         time.sleep(WRITE_DELAY_SECONDS)
         return page
 
     def update_page(self, page_id: str, properties: Dict[str, Any]) -> Dict[str, Any]:
-        page = self.client.pages.update(page_id=page_id, properties=properties)
+        page = self._api(
+            f"page update {page_id}",
+            lambda: self.client.pages.update(page_id=page_id, properties=properties),
+        )
         time.sleep(WRITE_DELAY_SECONDS)
         return page
 
@@ -908,7 +961,10 @@ class NotionStore:
         self, database_id: str, old_title: str, new_title: str
     ) -> bool:
         """Rename a database title if it currently matches ``old_title``."""
-        database = self.client.databases.retrieve(database_id=database_id)
+        database = self._api(
+            f"database retrieve {database_id}",
+            lambda: self.client.databases.retrieve(database_id=database_id),
+        )
         title_text = "".join(
             t.get("plain_text", "") for t in database.get("title") or []
         ).strip()

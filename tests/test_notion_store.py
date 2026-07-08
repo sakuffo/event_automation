@@ -546,3 +546,51 @@ class TestSiteConfigUpsertEfficiency:
         assert store.upsert_site_config_row(row, page_index=index) == "updated"
         assert store.upsert_site_config_row(self._matching_row(), page_index=index) == "unchanged"
         assert writes["updated"] == ["p-1"]
+
+
+class _FakeTransientError(Exception):
+    def __init__(self, status=503):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
+class TestNotionApiRetry:
+    def test_transient_query_error_is_retried(self, fake_store, monkeypatch):
+        store = fake_store([{"results": [], "has_more": False, "next_cursor": None}])
+        monkeypatch.setattr(notion_store.time, "sleep", lambda s: None)
+        attempts = {"n": 0}
+
+        def flaky():
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise _FakeTransientError()
+            return {"ok": True}
+
+        assert store._api("test call", flaky) == {"ok": True}
+        assert attempts["n"] == 2
+
+    def test_page_create_is_never_retried(self, fake_store, monkeypatch):
+        store = fake_store([])
+        monkeypatch.setattr(notion_store.time, "sleep", lambda s: None)
+        attempts = {"n": 0}
+
+        def flaky():
+            attempts["n"] += 1
+            raise _FakeTransientError()
+
+        with pytest.raises(notion_store.NotionStoreError):
+            store._api("page create", flaky, retry=False)
+        assert attempts["n"] == 1
+
+    def test_non_transient_error_is_not_retried(self, fake_store, monkeypatch):
+        store = fake_store([])
+        monkeypatch.setattr(notion_store.time, "sleep", lambda s: None)
+        attempts = {"n": 0}
+
+        def bad_request():
+            attempts["n"] += 1
+            raise ValueError("400 validation error")
+
+        with pytest.raises(notion_store.NotionStoreError):
+            store._api("page update", bad_request)
+        assert attempts["n"] == 1
