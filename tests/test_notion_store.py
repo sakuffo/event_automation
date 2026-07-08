@@ -473,3 +473,76 @@ class TestSiteConfigUpsertPrecedence:
         )
         assert writes["updated"] == []
         assert writes["created"] == ["db-site"]
+
+
+class TestSiteConfigUpsertEfficiency:
+    @staticmethod
+    def _full_page(page_id="p-1"):
+        SC = notion_store.SiteConfigProps
+        return properties_to_page(
+            {
+                SC.NAME: notion_store.p_title("Ontario"),
+                SC.SETTING_TYPE: notion_store.p_select("tax_location"),
+                SC.REGION: notion_store.p_rich_text("CA / ON"),
+                SC.TAX_NAME: notion_store.p_rich_text("HST"),
+                SC.TAX_TYPE: notion_store.p_rich_text(""),
+                SC.TAX_RATE: notion_store.p_number(13.0),
+                SC.REGION_ID: notion_store.p_rich_text("r1"),
+                SC.GROUP_ID: notion_store.p_rich_text("g1"),
+                SC.MAPPING_ID: notion_store.p_rich_text("m1"),
+                SC.REVISION: notion_store.p_rich_text("3"),
+            },
+            page_id=page_id,
+        )
+
+    @staticmethod
+    def _matching_row():
+        return {
+            "setting_type": "tax_location",
+            "jurisdiction": "Ontario",
+            "region": "CA / ON",
+            "tax_name": "HST",
+            "tax_type": "",
+            "tax_rate": "13",
+            "region_id": "r1",
+            "group_id": "g1",
+            "mapping_id": "m1",
+            "revision": "3",
+        }
+
+    def _store(self, fake_store, monkeypatch, pages):
+        store = fake_store([])
+        monkeypatch.setattr(store, "iter_pages", lambda db_id, filter_=None: iter(pages))
+        writes = {"updated": [], "created": []}
+        monkeypatch.setattr(
+            store, "update_page", lambda page_id, props: writes["updated"].append(page_id)
+        )
+        monkeypatch.setattr(
+            store, "create_page", lambda db_id, props: writes["created"].append(db_id)
+        )
+        return store, writes
+
+    def test_unchanged_row_is_not_rewritten(self, fake_store, monkeypatch):
+        store, writes = self._store(fake_store, monkeypatch, [self._full_page()])
+        outcome = store.upsert_site_config_row(self._matching_row())
+        assert outcome == "unchanged"
+        assert writes == {"updated": [], "created": []}
+
+    def test_changed_rate_still_updates(self, fake_store, monkeypatch):
+        store, writes = self._store(fake_store, monkeypatch, [self._full_page()])
+        row = dict(self._matching_row(), tax_rate="15")
+        assert store.upsert_site_config_row(row) == "updated"
+        assert writes["updated"] == ["p-1"]
+
+    def test_prebuilt_index_avoids_per_row_scans(self, fake_store, monkeypatch):
+        store, writes = self._store(fake_store, monkeypatch, [self._full_page()])
+        index = store.index_site_config_pages()
+
+        def boom(db_id, filter_=None):
+            raise AssertionError("iter_pages must not run per row")
+
+        monkeypatch.setattr(store, "iter_pages", boom)
+        row = dict(self._matching_row(), tax_rate="15")
+        assert store.upsert_site_config_row(row, page_index=index) == "updated"
+        assert store.upsert_site_config_row(self._matching_row(), page_index=index) == "unchanged"
+        assert writes["updated"] == ["p-1"]

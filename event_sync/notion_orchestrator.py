@@ -104,7 +104,8 @@ def seed_default_settings(store: NotionStore) -> int:
     for key, value, notes in DEFAULT_SETTINGS_SEED:
         if key in existing:
             continue
-        store.upsert_setting(key, value, notes=notes)
+        # fetch_settings above confirmed the key is absent — skip the scan.
+        store.upsert_setting(key, value, notes=notes, existing_page_id=None)
         logger.info("  ➕ Setting '%s' = %s", key, value)
         added += 1
     return added
@@ -2015,15 +2016,25 @@ def pull_site_config_notion(runtime: SyncRuntime) -> bool:
 
         rows.sort(key=site_config_row_sort_key)
 
+        # One scan of the Site Config DB serves every upsert below.
+        page_index = store.index_site_config_pages()
+        outcomes = {"created": 0, "updated": 0, "unchanged": 0}
         for row in rows:
-            store.upsert_site_config_row(row)
+            outcome = store.upsert_site_config_row(row, page_index=page_index)
+            outcomes[outcome] += 1
+            marker = "✅" if outcome != "unchanged" else "⏭️"
             logger.info(
-                "  ✅ %s — %s%%",
+                "  %s %s — %s%%%s",
+                marker,
                 row.get("jurisdiction") or row.get("region") or "(unknown)",
                 row.get("tax_rate") or "unset",
+                " (unchanged)" if outcome == "unchanged" else "",
             )
 
-        logger.info("\n📊 Wrote %d site config row(s) to Notion", len(rows))
+        logger.info(
+            "\n📊 Site config: %d created, %d updated, %d unchanged",
+            outcomes["created"], outcomes["updated"], outcomes["unchanged"],
+        )
         return True
     except Exception as exc:
         logger.exception("Failed to pull site config: %s", exc)

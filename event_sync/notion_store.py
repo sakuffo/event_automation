@@ -1251,16 +1251,31 @@ class NotionStore:
         logger.info("Fetched %d setting(s) from Notion", len(settings))
         return settings
 
-    def upsert_setting(self, key: str, value: str, notes: str = "") -> None:
+    _SCAN_FOR_EXISTING = object()
+
+    def upsert_setting(
+        self,
+        key: str,
+        value: str,
+        notes: str = "",
+        existing_page_id: Any = _SCAN_FOR_EXISTING,
+    ) -> None:
+        """Create or update a Settings row.
+
+        Callers that already know the key is absent (e.g. the seeder, which
+        checks ``fetch_settings`` first) pass ``existing_page_id=None`` to
+        skip the per-key DB scan.
+        """
         db_id = self.config.notion_settings_db_id
         if not db_id:
             raise ConfigError("NOTION_SETTINGS_DB_ID is missing")
 
-        existing_page_id: Optional[str] = None
-        for page in self.iter_pages(db_id):
-            if v_plain_text(page, SettingProps.KEY).strip().lower() == key.lower():
-                existing_page_id = page.get("id")
-                break
+        if existing_page_id is self._SCAN_FOR_EXISTING:
+            existing_page_id = None
+            for page in self.iter_pages(db_id):
+                if v_plain_text(page, SettingProps.KEY).strip().lower() == key.lower():
+                    existing_page_id = page.get("id")
+                    break
 
         props = {
             SettingProps.KEY: p_title(key),
@@ -1303,42 +1318,96 @@ class NotionStore:
         logger.info("Fetched %d site config row(s) from Notion", len(rows))
         return rows
 
-    def upsert_site_config_row(self, row: Dict[str, Any]) -> None:
-        """Create or update a Site Config row, keyed by mapping id then region+group."""
+    def index_site_config_pages(self) -> Tuple[Dict[str, Any], Dict[Tuple[str, str], Any]]:
+        """One paginated pass over the Site Config DB, indexed for upserts.
+
+        Returns ``(by_mapping_id, by_region_group)``; pages that carry a
+        mapping id are excluded from the region+group index (mapping id wins),
+        and duplicate keys keep the first page — the same precedence the
+        per-row scan used.
+        """
         db_id = self.config.notion_site_config_db_id
         if not db_id:
             raise ConfigError("NOTION_SITE_CONFIG_DB_ID is missing")
 
-        existing_page_id: Optional[str] = None
+        by_mapping: Dict[str, Any] = {}
+        by_region_group: Dict[Tuple[str, str], Any] = {}
+        for page in self.iter_pages(db_id):
+            mapping_id = v_plain_text(page, SiteConfigProps.MAPPING_ID).strip()
+            if mapping_id:
+                by_mapping.setdefault(mapping_id, page)
+                continue
+            region_group = (
+                v_plain_text(page, SiteConfigProps.REGION_ID).strip(),
+                v_plain_text(page, SiteConfigProps.GROUP_ID).strip(),
+            )
+            if region_group != ("", ""):
+                by_region_group.setdefault(region_group, page)
+        return by_mapping, by_region_group
+
+    @staticmethod
+    def _site_config_rate_number(row: Dict[str, Any]) -> Optional[float]:
+        rate_text = str(row.get("tax_rate") or "").strip()
+        if not rate_text:
+            return None
+        try:
+            return float(rate_text)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _site_config_page_matches(cls, page: Dict[str, Any], row: Dict[str, Any]) -> bool:
+        """True when writing ``row`` to ``page`` would change nothing.
+
+        Strict equality on every written field — any doubt means write.
+        """
+        return (
+            v_plain_text(page, SiteConfigProps.NAME)
+            == (row.get("jurisdiction") or row.get("region") or "(unknown region)")
+            and v_select(page, SiteConfigProps.SETTING_TYPE)
+            == _sanitize_option(row.get("setting_type") or "tax_location")
+            and v_plain_text(page, SiteConfigProps.REGION) == (row.get("region") or "")
+            and v_plain_text(page, SiteConfigProps.TAX_NAME) == (row.get("tax_name") or "")
+            and v_plain_text(page, SiteConfigProps.TAX_TYPE) == (row.get("tax_type") or "")
+            and v_number(page, SiteConfigProps.TAX_RATE) == cls._site_config_rate_number(row)
+            and v_plain_text(page, SiteConfigProps.REGION_ID) == (row.get("region_id") or "")
+            and v_plain_text(page, SiteConfigProps.GROUP_ID) == (row.get("group_id") or "")
+            and v_plain_text(page, SiteConfigProps.MAPPING_ID) == (row.get("mapping_id") or "")
+            and v_plain_text(page, SiteConfigProps.REVISION) == str(row.get("revision") or "")
+        )
+
+    def upsert_site_config_row(
+        self,
+        row: Dict[str, Any],
+        page_index: Optional[Tuple[Dict[str, Any], Dict[Tuple[str, str], Any]]] = None,
+    ) -> str:
+        """Create or update a Site Config row, keyed by mapping id then region+group.
+
+        ``page_index`` (from :meth:`index_site_config_pages`) lets bulk
+        callers avoid a full DB scan per row. Unchanged rows are not
+        rewritten. Returns ``"created"``, ``"updated"``, or ``"unchanged"``.
+        """
+        db_id = self.config.notion_site_config_db_id
+        if not db_id:
+            raise ConfigError("NOTION_SITE_CONFIG_DB_ID is missing")
+
+        if page_index is None:
+            page_index = self.index_site_config_pages()
+        by_mapping, by_region_group = page_index
+
         mapping_id = (row.get("mapping_id") or "").strip()
         region_group = (
             (row.get("region_id") or "").strip(),
             (row.get("group_id") or "").strip(),
         )
-        for page in self.iter_pages(db_id):
-            page_mapping = v_plain_text(page, SiteConfigProps.MAPPING_ID).strip()
-            if mapping_id and page_mapping == mapping_id:
-                existing_page_id = page.get("id")
-                break
-            page_region_group = (
-                v_plain_text(page, SiteConfigProps.REGION_ID).strip(),
-                v_plain_text(page, SiteConfigProps.GROUP_ID).strip(),
-            )
-            if (
-                not page_mapping
-                and region_group != ("", "")
-                and page_region_group == region_group
-            ):
-                existing_page_id = page.get("id")
-                break
+        existing_page: Optional[Dict[str, Any]] = None
+        if mapping_id and mapping_id in by_mapping:
+            existing_page = by_mapping[mapping_id]
+        elif region_group != ("", ""):
+            existing_page = by_region_group.get(region_group)
 
-        rate_number: Optional[float] = None
-        rate_text = str(row.get("tax_rate") or "").strip()
-        if rate_text:
-            try:
-                rate_number = float(rate_text)
-            except ValueError:
-                rate_number = None
+        if existing_page is not None and self._site_config_page_matches(existing_page, row):
+            return "unchanged"
 
         props = {
             SiteConfigProps.NAME: p_title(
@@ -1348,17 +1417,18 @@ class NotionStore:
             SiteConfigProps.REGION: p_rich_text(row.get("region") or ""),
             SiteConfigProps.TAX_NAME: p_rich_text(row.get("tax_name") or ""),
             SiteConfigProps.TAX_TYPE: p_rich_text(row.get("tax_type") or ""),
-            SiteConfigProps.TAX_RATE: p_number(rate_number),
+            SiteConfigProps.TAX_RATE: p_number(self._site_config_rate_number(row)),
             SiteConfigProps.REGION_ID: p_rich_text(row.get("region_id") or ""),
             SiteConfigProps.GROUP_ID: p_rich_text(row.get("group_id") or ""),
             SiteConfigProps.MAPPING_ID: p_rich_text(row.get("mapping_id") or ""),
             SiteConfigProps.REVISION: p_rich_text(str(row.get("revision") or "")),
         }
 
-        if existing_page_id:
-            self.update_page(existing_page_id, props)
-        else:
-            self.create_page(db_id, props)
+        if existing_page is not None:
+            self.update_page(existing_page.get("id", ""), props)
+            return "updated"
+        self.create_page(db_id, props)
+        return "created"
 
     # -- workspace discovery (bootstrap helper) -----------------------------------
 
