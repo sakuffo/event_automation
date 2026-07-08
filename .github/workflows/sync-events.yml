@@ -3,16 +3,27 @@ name: Sync Events from Notion to Wix
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 14 * * *'  # 9 AM EST daily
+    - cron: '0 14 * * *'  # 14:00 UTC = 9 AM EST (winter) / 10 AM EDT (summer)
   # Notion automations/buttons can fire this via a webhook to
   # https://api.github.com/repos/{owner}/{repo}/dispatches with
   # body {"event_type": "notion-sync"}. See docs/NOTION_BACKEND.md.
   repository_dispatch:
     types: [notion-sync]
 
+# Never run two syncs at once: overlapping runs each snapshot the Wix event
+# index at start, so both would see the same Ready row as unmatched and
+# double-create it. Queue instead of cancel — a mid-flight sync must finish.
+concurrency:
+  group: wix-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
 jobs:
   sync-events:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository

@@ -11,7 +11,7 @@ The development toolkit includes:
 - **dev_events.py** - Full CRUD operations for events (RSVP, TICKETING, EXTERNAL, NO_REGISTRATION)
 - **dev_tickets.py** - Ticket management and search tools
 
-⚠️ **Important Note:** RSVP creation via API appears to be deprecated. RSVP commands in `dev_tickets.py` may not work. Use Wix Dashboard to manage RSVPs.
+⚠️ **Important Note:** RSVP creation via API appears to be deprecated. RSVP commands in `scripts/dev/dev_tickets.py` may not work. Use Wix Dashboard to manage RSVPs.
 
 ## Setup
 
@@ -33,21 +33,14 @@ make unit
 Edit `.env` file:
 
 ```bash
-# Production credentials (required)
-WIX_API_KEY=your_production_api_key
-WIX_SITE_ID=your_production_site_id
-WIX_ACCOUNT_ID=your_production_account_id
+WIX_API_KEY=your_api_key
+WIX_SITE_ID=your_dev_site_id       # keep this on the dev site while testing
+WIX_ACCOUNT_ID=your_account_id     # optional; Site Media uploads
 
-# Development/Sandbox credentials (optional)
-DEV_WIX_API_KEY=your_dev_api_key
-DEV_WIX_SITE_ID=your_dev_site_id
-DEV_WIX_ACCOUNT_ID=your_dev_account_id
-
-# Environment mode
-ENV_MODE=development  # or production
+# Safety: declare which site is the dev site. Destructive dev commands
+# (delete-*) refuse to run unless WIX_SITE_ID matches this value.
+WIX_DEV_SITE_ID=your_dev_site_id
 ```
-
-When `ENV_MODE=development` and `DEV_*` credentials are set, all dev scripts will use the sandbox site instead of production.
 
 ### 3. Logging & Verbosity
 
@@ -63,36 +56,36 @@ Manage events programmatically without the Wix dashboard.
 
 ```bash
 # List all events (default: 50)
-python dev_events.py list
+python scripts/dev/dev_events.py list
 
 # List with custom limit
-python dev_events.py list 100
+python scripts/dev/dev_events.py list 100
 ```
 
 ### Get Event Details
 
 ```bash
 # Get full event details including JSON
-python dev_events.py get <event_id>
+python scripts/dev/dev_events.py get <event_id>
 ```
 
 ### Create Events
 
 ```bash
 # Create a draft RSVP event 7 days from now
-python dev_events.py create "My Test Event"
+python scripts/dev/dev_events.py create "My Test Event"
 
 # Create event X days from now
-python dev_events.py create "Workshop" 14 true RSVP
+python scripts/dev/dev_events.py create "Workshop" 14 true RSVP
 
 # Create and publish immediately
-python dev_events.py create "Live Event" 3 false RSVP
+python scripts/dev/dev_events.py create "Live Event" 3 false RSVP
 
 # Create event for external registration
-python dev_events.py create "External Event" 7 true EXTERNAL
+python scripts/dev/dev_events.py create "External Event" 7 true EXTERNAL
 
 # Registration types: RSVP, TICKETS, EXTERNAL, NO_REGISTRATION
-python dev_events.py create "Concert" 7 false TICKETS  # Creates ticketed event
+python scripts/dev/dev_events.py create "Concert" 7 false TICKETS  # Creates ticketed event
 ```
 
 **TICKETS Event Workflow:**
@@ -106,33 +99,33 @@ python dev_events.py create "Concert" 7 false TICKETS  # Creates ticketed event
 
 ```bash
 # Update event title
-python dev_events.py update-title <event_id> "New Title"
+python scripts/dev/dev_events.py update-title <event_id> "New Title"
 ```
 
 ### Publish Events
 
 ```bash
 # Publish a draft event
-python dev_events.py publish <event_id>
+python scripts/dev/dev_events.py publish <event_id>
 ```
 
 ### Delete Events
 
 ```bash
 # Delete single event (requires confirmation)
-python dev_events.py delete <event_id> --confirm
+python scripts/dev/dev_events.py delete <event_id> --confirm
 
 # Delete all draft events
-python dev_events.py delete-drafts --confirm
+python scripts/dev/dev_events.py delete-drafts --confirm
 
 # Delete all test events (title contains 'test')
-python dev_events.py delete-test --confirm
+python scripts/dev/dev_events.py delete-test --confirm
 
 # Delete events matching a pattern
-python dev_events.py delete-pattern "Workshop" --confirm
+python scripts/dev/dev_events.py delete-pattern "Workshop" --confirm
 
 # Delete only draft events matching pattern
-python dev_events.py delete-pattern "Concert" --confirm --drafts-only
+python scripts/dev/dev_events.py delete-pattern "Concert" --confirm --drafts-only
 
 # Using Makefile shortcuts (includes safety delays)
 make dev-clean-drafts     # Delete all drafts (3 second delay)
@@ -144,10 +137,10 @@ make dev-clean-all        # Delete ALL events (5 second delay)
 
 ```bash
 # Create 5 sample events for testing (mix of RSVP and TICKETS)
-python dev_events.py create-samples
+python scripts/dev/dev_events.py create-samples
 
 # Create custom number of samples
-python dev_events.py create-samples 20
+python scripts/dev/dev_events.py create-samples 20
 
 # Sample events are prefixed with "-test-" for easy cleanup:
 # - "-test- Workshop: Introduction to Python" (RSVP)
@@ -157,7 +150,7 @@ python dev_events.py create-samples 20
 # - "-test- Product Demo Session" (TICKETS)
 
 # Clean up all sample events
-python dev_events.py delete-test --confirm
+python scripts/dev/dev_events.py delete-test --confirm
 # or
 make dev-clean-test
 ```
@@ -166,7 +159,7 @@ make dev-clean-test
 
 ```bash
 # Search for events by title
-python dev_events.py search "Workshop"
+python scripts/dev/dev_events.py search "Workshop"
 ```
 
 ## Ticket Operations (dev_tickets.py)
@@ -177,41 +170,41 @@ Automate ticket purchases and RSVPs for testing.
 
 ```bash
 # Create RSVP with default test user
-python dev_tickets.py rsvp <event_id>
+python scripts/dev/dev_tickets.py rsvp <event_id>
 
 # Create RSVP with custom details
-python dev_tickets.py rsvp <event_id> "John Doe" "john@example.com" 2
+python scripts/dev/dev_tickets.py rsvp <event_id> "John Doe" "john@example.com" 2
 ```
 
 ### Create Bulk RSVPs
 
 ```bash
 # Create 10 test RSVPs
-python dev_tickets.py bulk-rsvp <event_id>
+python scripts/dev/dev_tickets.py bulk-rsvp <event_id>
 
 # Create custom number of RSVPs
-python dev_tickets.py bulk-rsvp <event_id> 50
+python scripts/dev/dev_tickets.py bulk-rsvp <event_id> 50
 ```
 
 ### List RSVPs
 
 ```bash
 # List all RSVPs for an event
-python dev_tickets.py list-rsvps <event_id>
+python scripts/dev/dev_tickets.py list-rsvps <event_id>
 ```
 
 ### List Orders
 
 ```bash
 # List all ticket orders for an event
-python dev_tickets.py list-orders <event_id>
+python scripts/dev/dev_tickets.py list-orders <event_id>
 ```
 
 ### Search for Events
 
 ```bash
 # Find event by title to get event_id
-python dev_tickets.py search-event "Workshop"
+python scripts/dev/dev_tickets.py search-event "Workshop"
 ```
 
 ## Using the Wix Client Library
@@ -270,50 +263,44 @@ results = client.search_events_by_title('Workshop')
 
 ```bash
 # 1. Create a test event
-python dev_events.py create "Test Workshop" 7 false
+python scripts/dev/dev_events.py create "Test Workshop" 7 false
 
 # 2. Get the event ID from output or search
-python dev_events.py search "Test Workshop"
+python scripts/dev/dev_events.py search "Test Workshop"
 
 # 3. Create bulk RSVPs for testing
-python dev_tickets.py bulk-rsvp <event_id> 25
+python scripts/dev/dev_tickets.py bulk-rsvp <event_id> 25
 
 # 4. Verify RSVPs were created
-python dev_tickets.py list-rsvps <event_id>
+python scripts/dev/dev_tickets.py list-rsvps <event_id>
 
 # 5. Clean up when done
-python dev_events.py delete <event_id> --confirm
+python scripts/dev/dev_events.py delete <event_id> --confirm
 ```
 
 ### Load Testing
 
 ```bash
 # Create 50 events
-python dev_events.py create-samples 50
+python scripts/dev/dev_events.py create-samples 50
 
 # Create 100 RSVPs per event (use in a loop or script)
-for event_id in $(python dev_events.py list | grep "ID:" | awk '{print $2}'); do
-    python dev_tickets.py bulk-rsvp $event_id 100
+for event_id in $(python scripts/dev/dev_events.py list | grep "ID:" | awk '{print $2}'); do
+    python scripts/dev/dev_tickets.py bulk-rsvp $event_id 100
 done
 ```
 
-### Development vs Production
+### The dev-site guard
 
-```bash
-# Test on sandbox/dev site
-export ENV_MODE=development
-python dev_events.py create "Dev Test Event"
+Destructive commands (`delete`, `delete-drafts`, `delete-test`,
+`delete-pattern`, `delete-after-date`) only run when `WIX_SITE_ID` equals
+`WIX_DEV_SITE_ID`. If the guard refuses:
 
-# Switch to production
-export ENV_MODE=production
-python dev_events.py list
-```
+- Confirm `.env` points `WIX_SITE_ID` at the dev site.
+- Confirm `WIX_DEV_SITE_ID` is set to that same dev site id.
 
-Or set in `.env`:
-```bash
-ENV_MODE=development  # Uses DEV_* credentials
-ENV_MODE=production   # Uses regular credentials (default)
-```
+There is deliberately no override flag — deleting events on the production
+site should require editing `.env` twice, on purpose.
 
 ## Available Wix Client Methods
 
@@ -358,10 +345,10 @@ Run this mini-regression before shipping changes to the sync pipeline:
 
 | Registration Type | Command | Expected Result |
 |-------------------|---------|-----------------|
-| `RSVP` | `python dev_events.py create "Test RSVP" 7 false RSVP` | Event includes `registration.initialType = "RSVP"` |
-| `TICKETING` | `python dev_events.py create "Test Ticket" 7 false TICKETS` | Event converted to `"TICKETING"`; tickets must exist or be added |
-| `EXTERNAL` | `python dev_events.py create "Test External" 7 false EXTERNAL` | Event published with external registration link placeholder |
-| `NO_REGISTRATION` | `python dev_events.py create "Test NoReg" 7 false NO_REGISTRATION` | Display-only event created successfully |
+| `RSVP` | `python scripts/dev/dev_events.py create "Test RSVP" 7 false RSVP` | Event includes `registration.initialType = "RSVP"` |
+| `TICKETING` | `python scripts/dev/dev_events.py create "Test Ticket" 7 false TICKETS` | Event converted to `"TICKETING"`; tickets must exist or be added |
+| `EXTERNAL` | `python scripts/dev/dev_events.py create "Test External" 7 false EXTERNAL` | Event published with external registration link placeholder |
+| `NO_REGISTRATION` | `python scripts/dev/dev_events.py create "Test NoReg" 7 false NO_REGISTRATION` | Display-only event created successfully |
 
 ### Sync Flow Essentials
 
@@ -380,8 +367,8 @@ Run this mini-regression before shipping changes to the sync pipeline:
 
 ### Follow-Up Checks
 
-- `python dev_events.py list` → confirm newly created events.
-- `python dev_events.py delete-pattern "Test" --confirm` → clean up fixtures.
+- `python scripts/dev/dev_events.py list` → confirm newly created events.
+- `python scripts/dev/dev_events.py delete-pattern "Test" --confirm` → clean up fixtures.
 - Review GitHub Actions (`ci.yml`) to ensure tests run in CI.
 
 ## Troubleshooting
@@ -392,16 +379,16 @@ Run this mini-regression before shipping changes to the sync pipeline:
 
 ### "Event not found"
 - Verify event ID is correct
-- Use `python dev_events.py search` to find events
+- Use `python scripts/dev/dev_events.py search` to find events
 
 ### Rate Limiting Errors
 - Scripts include built-in delays
 - For bulk operations, increase sleep time in code
 
 ### Wrong Site/Environment
-- Check `ENV_MODE` in `.env`
-- Verify `DEV_*` credentials are set if using development mode
-- Client will print which mode it's using when initialized
+- Check `WIX_SITE_ID` in `.env` (should be the dev site while testing)
+- The client logs the first 8 characters of the site id when initialized
+- Destructive commands additionally require `WIX_DEV_SITE_ID` to match
 
 ## Next Steps
 

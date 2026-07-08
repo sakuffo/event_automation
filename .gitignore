@@ -47,3 +47,6 @@ temp/
 
 *.csv
 *.xlsx
+
+# Claude Code session artifacts (worktrees, local settings, memory)
+.claude/

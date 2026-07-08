@@ -7,7 +7,7 @@ rows push local Notion changes to Wix and land back on Published.
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from event_sync import generator, notion_orchestrator
+from event_sync import notion_orchestrator
 from event_sync.notion_orchestrator import notion_sync_events
 from event_sync.notion_store import row_to_event_record
 
@@ -130,12 +130,12 @@ def make_runtime(store: StoreStub) -> SimpleNamespace:
 def patch_wix_side(monkeypatch, wix_event, config_row):
     monkeypatch.setattr(
         notion_orchestrator,
-        "_index_events_by_id_and_key",
+        "index_events_by_id_and_key",
         lambda runtime, fieldsets=None: ({wix_event["id"]: wix_event}, {}),
     )
     monkeypatch.setattr(
-        generator,
-        "_wix_event_to_config_row",
+        notion_orchestrator,
+        "wix_event_to_config_row",
         lambda event, ticket_defs, tz_name=TZ: config_row,
     )
     monkeypatch.setattr(notion_orchestrator.time, "sleep", lambda s: None)
@@ -257,7 +257,7 @@ def test_update_row_missing_from_wix_gets_error_note(monkeypatch):
     store = StoreStub([make_row("Update")])
     monkeypatch.setattr(
         notion_orchestrator,
-        "_index_events_by_id_and_key",
+        "index_events_by_id_and_key",
         lambda runtime, fieldsets=None: ({}, {}),
     )
     monkeypatch.setattr(notion_orchestrator.time, "sleep", lambda s: None)

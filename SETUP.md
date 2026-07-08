@@ -1,402 +1,109 @@
-# Setup Guide - Wix Events + Google Sheets Sync (Python)
+# Setup Guide — Wix Events + Notion Sync
 
-Complete step-by-step guide to set up automated event syncing from Google Sheets to Wix Events.
+Step-by-step setup for the Notion-backed event pipeline. Total time:
+roughly 30–45 minutes, most of it collecting credentials.
 
 ## Prerequisites
 
-- Python 3.8+ installed on your computer
-- Wix website with Events app installed
-- Google account for Sheets and Cloud Console
-- GitHub account (free) for automation
+- Python 3.9+
+- A Wix website with the Events app installed (plus a **dev copy** of the
+  site for testing)
+- A Notion workspace where the event databases will live
+- A Google Cloud service account (only for Drive-hosted event images)
+- A GitHub account for the daily automation
 
-## Part 1: Google Cloud Setup (15 minutes)
+## Part 1: Wix API key (5 minutes)
 
-### 1.1 Create Google Cloud Project
+1. Go to <https://manage.wix.com/account/api-keys> and create an API key.
+2. Give it **Wix Events** permissions (and eCommerce **Manage Orders** if you
+   plan to use the tax-by-location site config).
+3. Note the API key, your **dev** site id, and (optional, for image uploads)
+   your account id.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Click "Select a project" → "New Project"
-3. Name it: `wix-events-sync`
-4. Click "Create"
+> ⚠️ Point `WIX_SITE_ID` at the **dev copy** of the site while testing.
+> Production only gets configured once the flow is proven.
 
-### 1.2 Enable Required APIs
+## Part 2: Notion integration (10 minutes)
 
-1. In your project, go to "APIs & Services" → "Library"
-2. Search for and enable each of these APIs:
-   - **Google Sheets API** - to read event data
-   - **Google Drive API** - to download event images
-3. Click on each and press "Enable"
+1. Go to <https://www.notion.so/my-integrations> and create an internal
+   integration; copy the token (`ntn_…`).
+2. In Notion, create (or pick) a page that will hold the event databases.
+3. Share that page with the integration (page menu → Connections).
+4. Copy the page id from its URL into `NOTION_PARENT_PAGE_ID`.
 
-### 1.3 Create Service Account
+## Part 3: Google service account (10 minutes — images only)
 
-1. Go to "APIs & Services" → "Credentials"
-2. Click "+ Create Credentials" → "Service account"
-3. Service account details:
-   - Name: `wix-events-sync`
-   - ID: (auto-generated)
-   - Description: "Reads event data from Google Sheets"
-4. Click "Create and Continue"
-5. Skip optional steps (Grant access, Grant users)
-6. Click "Done"
+Event images are Drive-hosted; the pipeline downloads them via a service
+account.
 
-### 1.4 Download Credentials
+1. In Google Cloud Console, create a project (or reuse one) and enable the
+   **Google Drive API**.
+2. Create a service account, then a JSON key for it.
+3. Share the Drive folder holding event images with the service account's
+   email (viewer access).
+4. Put the whole JSON (one line) into `GOOGLE_CREDENTIALS`.
 
-1. Click on your service account email
-2. Go to "Keys" tab
-3. Click "Add Key" → "Create new key"
-4. Choose "JSON" format
-5. Click "Create" (file downloads automatically)
-6. **Save this file safely** - you'll need it later
-
-### 1.5 Prepare Google Sheet
-
-1. Create a new Google Sheet or use existing one
-2. Set up columns A-L with these headers:
-   ```
-   Event Name | Event Type | Start Date | Start Time | End Date | End Time | Location | Description | Ticket Price | Capacity | Registration Type | Image URL
-   ```
-3. Copy the spreadsheet ID from the URL:
-   ```
-   https://docs.google.com/spreadsheets/d/[SPREADSHEET_ID]/edit
-   ```
-
-### 1.6 Prepare Event Images (Optional)
-
-1. Upload event images to Google Drive
-2. For each image file:
-   - Right-click → "Share"
-   - Change to "Anyone with the link" can view
-   - Click "Copy link"
-3. Paste the Google Drive link in Column L of your spreadsheet
-4. Supported formats:
-   - Full URL: `https://drive.google.com/file/d/FILE_ID/view`
-   - Short URL: `https://drive.google.com/open?id=FILE_ID`
-   - Just the file ID: `FILE_ID`
-
-**IMPORTANT:** The service account needs access to your Google Drive images:
-- Share each image file (or parent folder) with the service account email
-- OR make images publicly accessible with "Anyone with the link"
-
-### 1.7 Share Sheet with Service Account
-
-1. Open your Google Sheet
-2. Click "Share" button
-3. Paste the service account email (from credentials JSON)
-4. Set permission to "Viewer"
-5. Click "Send"
-
-## Part 2: Wix API Setup (10 minutes)
-
-### 2.1 Get Wix API Key
-
-1. Go to [Wix Developers](https://dev.wix.com/)
-2. Sign in with your Wix account
-3. Click "My Apps" → "Create New App"
-4. Choose "Website / Business App"
-5. Name it: `Event Sync`
-6. Go to "Permissions" tab
-7. Add these permissions:
-   - Wix Events: Read and Manage
-8. Go to "API Keys" tab
-9. Click "Generate API Key"
-10. **Copy and save the API key** (shown only once)
-
-### 2.2 Get Site ID
-
-1. In Wix Dashboard, go to "Settings" → "Website Settings"
-2. Look for "Site ID" or find it in the URL when editing your site
-3. Copy the Site ID
-
-### 2.3 Get Account ID
-
-1. In Wix Dashboard, go to "Settings"
-2. Find your Account ID (usually in billing or account section)
-3. Copy the Account ID
-
-## Part 3: Local Setup (10 minutes)
-
-### 3.1 Clone or Download Project
+## Part 4: Local setup (5 minutes)
 
 ```bash
-# Clone from GitHub (if available)
-git clone https://github.com/yourusername/wix-events-sync.git
-cd wix-events-sync
+./setup.sh        # or setup.bat on Windows, or: make setup
+# fills .env from .env.example — edit it with the values from Parts 1–3
 
-# Or create new directory
-mkdir wix-events-sync
-cd wix-events-sync
+python sync_events.py validate     # every ✅ should be green
+python sync_events.py test         # confirms the Wix connection
 ```
 
-### 3.2 Run Setup Script
-
-**Unix/Linux/Mac:**
-```bash
-chmod +x setup.sh
-./setup.sh
-```
-
-**Windows:**
-```cmd
-setup.bat
-```
-
-**Or using Make:**
-```bash
-make setup
-```
-
-### 3.3 Configure Environment Variables
-
-1. Create a new `.env` file in the project root (if it doesn't already exist) and open it in your editor.
-2. Add your credentials:
+Then bootstrap the Notion databases:
 
 ```bash
-# Wix Credentials
-WIX_API_KEY=your_api_key_from_step_2.1
-WIX_ACCOUNT_ID=your_account_id_from_step_2.3
-WIX_SITE_ID=your_site_id_from_step_2.2
+python sync_events.py setup-notion
+# copy the four printed NOTION_*_DB_ID values into .env
 
-# Google Sheets
-GOOGLE_SHEET_ID=your_spreadsheet_id_from_step_1.5
-
-# Optional tab name overrides (defaults shown)
-# DEFAULTS_TAB=defaults
-# GENERATED_EVENTS_TAB=generated_events
-# ROLLING_SCHEDULE_TAB=rolling_schedule
-# CLASS_INFO_TAB=class_info
-# CATEGORY_CONFIG_TAB=category_config   # used by pull-categories / push-categories
-# SITE_CONFIG_TAB=site_config           # used by pull-site-config / push-site-config (tax by location)
+python sync_events.py import-event-templates   # optional: seed recurring-event templates
+python sync_events.py pull                     # backfill rows from live Wix events
 ```
 
-3. For `GOOGLE_CREDENTIALS`:
-   - Open the JSON file downloaded in step 1.4
-   - Copy the entire contents
-   - Paste as a single line after `GOOGLE_CREDENTIALS=`
-   - Make sure it's all on ONE line (remove line breaks)
+Finally, in Notion (by hand — the API can't create these):
 
-Example:
-```bash
-GOOGLE_CREDENTIALS={"type":"service_account","project_id":"...","private_key":"..."}
-```
+- Calendar view on **Date**, Board view grouped by **Status**
+- A "Needs attention" table filtered to non-empty **Sync Error**
+- The default "New Event" database template
+  (see [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md))
 
-### 3.4 Test the Setup
+## Part 5: GitHub Actions (5 minutes)
 
-```bash
-# Activate virtual environment (if not already active)
-source venv/bin/activate  # Unix/Mac
-# OR
-venv\Scripts\activate.bat  # Windows
+Add these repository secrets (Settings → Secrets and variables → Actions):
 
-# Validate credentials
-python sync_events.py validate
+| Secret | Value |
+| --- | --- |
+| `WIX_API_KEY` | from Part 1 |
+| `WIX_SITE_ID` | the site the automation should target |
+| `WIX_ACCOUNT_ID` | optional (Site Media) |
+| `NOTION_ACCESS_TOKEN` | from Part 2 |
+| `NOTION_EVENT_SCHEDULING_DB_ID` | printed by setup-notion |
+| `NOTION_CATALOG_DB_ID` | printed by setup-notion |
+| `NOTION_SETTINGS_DB_ID` | printed by setup-notion |
+| `NOTION_SITE_CONFIG_DB_ID` | printed by setup-notion |
+| `GOOGLE_CREDENTIALS` | from Part 3 |
 
-# Test Wix connection
-python sync_events.py test
+[.github/workflows/sync-events.yml](.github/workflows/sync-events.yml) then
+runs `sync` daily, on manual dispatch, and on the `notion-sync`
+repository-dispatch webhook. Runs are serialized by a concurrency group.
 
-# List existing events
-python sync_events.py list
+## Part 6: Dev safety
 
-# Run your first sync
-python sync_events.py sync
-```
-
-### 3.5 Optional: Config Round-Trip Workflows
-
-Once the basic sync works, two pull/push pairs let you edit existing Wix events from Google Sheets:
-
-```bash
-# Full config (descriptions, dates, prices, tax, categories, ...)
-python sync_events.py pull-config              # Snapshot Wix → config_events tab
-python sync_events.py push-config --dry-run    # Preview before pushing
-python sync_events.py push-config              # Push edits back to Wix
-
-# Categories only — safe to run on past events
-python sync_events.py pull-categories                       # default --scope upcoming
-python sync_events.py pull-categories --scope all           # past + present + future
-python sync_events.py push-categories --dry-run             # preview
-python sync_events.py push-categories --scope all           # push for every non-draft event
-
-# Site config — bulk eCommerce tax-by-location (pay-link checkout tax)
-python sync_events.py pull-site-config            # Snapshot tax regions/mappings → site_config tab
-python sync_events.py push-site-config --dry-run  # Preview rate changes
-python sync_events.py push-site-config            # Apply rates (e.g. 13% HST) everywhere
-```
-
-The categories round-trip writes to a separate `category_config` tab (override with `CATEGORY_CONFIG_TAB`) and only ever changes category assignments — descriptions and identifiers in that tab are read-only on push. See [README.md](README.md#config-round-trips) for the full sheet contract.
-
-The site-config round-trip writes to a separate `site_config` tab (override with `SITE_CONFIG_TAB`) and manages eCommerce **tax by location** (the tax pay links charge at checkout) — distinct from per-event ticket tax. Enter rates as percentages (e.g. `13`). It requires the Wix API key to have the eCommerce **Manage Orders** scope. See [README.md](README.md#config-round-trips) for the full sheet contract.
-
-## Part 4: GitHub Actions Setup (10 minutes)
-
-### 4.1 Create GitHub Repository
-
-1. Go to [GitHub](https://github.com/)
-2. Click "+" → "New repository"
-3. Name: `wix-events-sync`
-4. Set to Private (recommended)
-5. Create repository
-
-### 4.2 Push Code to GitHub
-
-```bash
-git init
-git add .
-git commit -m "Initial setup"
-git branch -M main
-git remote add origin https://github.com/yourusername/wix-events-sync.git
-git push -u origin main
-```
-
-### 4.3 Add GitHub Secrets
-
-1. Go to your repository on GitHub
-2. Click "Settings" → "Secrets and variables" → "Actions"
-3. Add these secrets (click "New repository secret" for each):
-
-   - **WIX_API_KEY**: Your Wix API key
-   - **WIX_ACCOUNT_ID**: Your Wix account ID
-   - **WIX_SITE_ID**: Your Wix site ID
-   - **GOOGLE_SHEET_ID**: Your spreadsheet ID
-   - **GOOGLE_CREDENTIALS**: Entire JSON content (one line)
-
-### 4.4 Enable GitHub Actions
-
-1. Go to "Actions" tab in your repository
-2. If prompted, enable Actions for this repository
-3. You should see "Sync Events from Google Sheets to Wix"
-4. Test it: Click "Run workflow" → "Run workflow"
-
-## Part 5: Verify Everything Works
-
-### 5.1 Check Automated Schedule
-
-- The sync runs automatically at 9 AM EST daily
-- Check `.github/workflows/sync-events.yml` to modify schedule
-- Cron expression: `0 14 * * *` (14:00 UTC = 9 AM EST)
-
-### 5.2 Manual Trigger
-
-1. Go to GitHub repository → "Actions"
-2. Click "Sync Events from Google Sheets to Wix"
-3. Click "Run workflow"
-4. Check the logs for success
-
-### 5.3 Monitor Syncs
-
-- GitHub Actions tab shows all sync history
-- Green checkmark = successful sync
-- Red X = failed sync (check logs)
+- `WIX_DEV_SITE_ID` in `.env` declares which site is the dev site; the
+  destructive `scripts/dev` commands (`delete-*`) refuse to run unless
+  `WIX_SITE_ID` matches it.
+- `pytest` / `make unit` never touch live APIs — collection is confined to
+  `tests/`, and the manual scripts live in `scripts/dev/`.
 
 ## Troubleshooting
 
-### Common Issues
-
-**"Google Sheets API error"**
-- Verify service account has access to sheet
-- Check GOOGLE_CREDENTIALS is valid JSON
-- Ensure Sheets API is enabled
-
-**"Wix API connection failed"**
-- Verify API key is correct
-- Check Site ID matches your Wix site
-- Ensure Events app is installed on Wix
-
-**"No data found in spreadsheet"**
-- Check sheet has data starting from row 2
-- Verify GOOGLE_SHEET_ID is correct
-- Ensure date format is YYYY-MM-DD
-
-**GitHub Actions fails**
-- Check all secrets are set correctly
-- Verify GOOGLE_CREDENTIALS is one line
-- Look at workflow logs for specific error
-
-### Getting Help
-
-1. Check error messages in console
-2. Review GitHub Actions logs
-3. Verify all credentials are correct
-4. Ensure spreadsheet format matches requirements
-
-## Data Format Reference
-
-### Spreadsheet Columns
-
-| Column | Field | Format | Example |
-|--------|-------|--------|----------|
-| A | Event Name | Text | "Workshop 2024" |
-| B | Event Type | Text | "Workshop" |
-| C | Start Date | YYYY-MM-DD | "2024-03-15" |
-| D | Start Time | HH:MM | "14:00" |
-| E | End Date | YYYY-MM-DD | "2024-03-15" |
-| F | End Time | HH:MM | "16:00" |
-| G | Location | Text | "Room 101, Main Building" |
-| H | Description | Text | "Learn the basics..." |
-| I | Ticket Price | Number | "0" or "25.00" |
-| J | Capacity | Number | "30" |
-| K | Registration Type | Text | "RSVP" |
-| L | Image URL | Text | "https://drive.google.com/file/d/ABC123..." |
-
-### Registration Types
-
-- `RSVP` - Free RSVP registration
-- `TICKETS` - Creates ticketed event (shows "Tickets are not on sale")
-  - Event is created with TICKETING registration type
-  - Add tickets manually via Wix Dashboard after creation
-  - Registration type **cannot** be changed after event creation
-- `EXTERNAL` - External registration platform
-- `NO_REGISTRATION` - Display-only events
-
-### Event Images
-
-- **Column L** contains a Google Drive link to the event image
-- Accepted formats:
-  - Full URL: `https://drive.google.com/file/d/1A2B3C4D5E6F7G8H9/view`
-  - Short URL: `https://drive.google.com/open?id=1A2B3C4D5E6F7G8H9`
-  - Just file ID: `1A2B3C4D5E6F7G8H9`
-- Supported image formats: JPG, JPEG, PNG, GIF, WebP
-- Leave blank if no image needed
-- **Must share with service account or set to "Anyone with the link"**
-
-## Maintenance
-
-### Update Dependencies
-
-```bash
-pip install --upgrade -r requirements.txt
-```
-
-### Modify Schedule
-
-Edit `.github/workflows/sync-events.yml`:
-```yaml
-schedule:
-  - cron: '0 14 * * *'  # Daily at 2 PM UTC
-```
-
-### View Logs
-
-```bash
-# Local logs
-python sync_events.py sync > sync.log 2>&1
-
-# GitHub Actions logs
-# Go to Actions tab → Click on workflow run
-```
-
-## Security Notes
-
-- Never commit `.env` file to Git
-- Keep API keys secret
-- Use GitHub Secrets for production
-- Regularly rotate API keys
-- Set repository to private if possible
-
-## Next Steps
-
-1. Add more events to your Google Sheet
-2. Customize event types and fields
-3. Set up error notifications (optional)
-4. Create backup of credentials
-5. Document your specific setup
-
-Congratulations! Your automated event sync is now running.
+- **validate fails on NOTION_*_DB_ID** — run `setup-notion` and copy the
+  printed ids into `.env`.
+- **Notion pages not found** — share the parent page with the integration
+  (Connections menu), then re-run.
+- **Images not uploading** — confirm the Drive folder is shared with the
+  service account email and `GOOGLE_CREDENTIALS` is valid one-line JSON.
+- Add `--log-level DEBUG` to any command for full API traces.

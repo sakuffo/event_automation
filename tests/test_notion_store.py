@@ -275,7 +275,6 @@ def make_config(**overrides) -> AppConfig:
         wix_api_key=None,
         wix_account_id=None,
         wix_site_id=None,
-        google_sheet_id=None,
         google_credentials_raw=None,
         notion_token="secret",
         notion_event_scheduling_db_id="db-events",
@@ -407,4 +406,226 @@ class TestStatusLifecycle:
         store = NotionStore(make_config())
 
         assert store.ensure_event_status_options() == 0
+        assert fake.data_sources.update_calls == []
+
+
+class TestSiteConfigUpsertPrecedence:
+    """upsert_site_config_row matching: mapping_id wins; region+group only
+    matches pages that have no mapping_id; no match -> create."""
+
+    @staticmethod
+    def _site_page(page_id, mapping_id="", region_id="", group_id=""):
+        SC = notion_store.SiteConfigProps
+        return properties_to_page(
+            {
+                SC.NAME: notion_store.p_title("Ontario"),
+                SC.MAPPING_ID: notion_store.p_rich_text(mapping_id),
+                SC.REGION_ID: notion_store.p_rich_text(region_id),
+                SC.GROUP_ID: notion_store.p_rich_text(group_id),
+            },
+            page_id=page_id,
+        )
+
+    def _store_with_pages(self, fake_store, monkeypatch, pages):
+        store = fake_store([])
+        monkeypatch.setattr(store, "iter_pages", lambda db_id, filter_=None: iter(pages))
+        writes = {"updated": [], "created": []}
+        monkeypatch.setattr(
+            store, "update_page",
+            lambda page_id, props: writes["updated"].append(page_id),
+        )
+        monkeypatch.setattr(
+            store, "create_page",
+            lambda db_id, props: writes["created"].append(db_id),
+        )
+        return store, writes
+
+    def test_mapping_id_match_wins(self, fake_store, monkeypatch):
+        pages = [
+            self._site_page("p-map", mapping_id="m1", region_id="r1", group_id="g1"),
+            self._site_page("p-plain", region_id="r1", group_id="g1"),
+        ]
+        store, writes = self._store_with_pages(fake_store, monkeypatch, pages)
+        store.upsert_site_config_row(
+            {"mapping_id": "m1", "region_id": "r1", "group_id": "g1", "tax_rate": "13"}
+        )
+        assert writes["updated"] == ["p-map"]
+        assert writes["created"] == []
+
+    def test_region_group_only_matches_pages_without_mapping_id(
+        self, fake_store, monkeypatch
+    ):
+        pages = [
+            self._site_page("p-map", mapping_id="m1", region_id="r1", group_id="g1"),
+            self._site_page("p-plain", region_id="r1", group_id="g1"),
+        ]
+        store, writes = self._store_with_pages(fake_store, monkeypatch, pages)
+        store.upsert_site_config_row(
+            {"mapping_id": "", "region_id": "r1", "group_id": "g1", "tax_rate": "13"}
+        )
+        assert writes["updated"] == ["p-plain"]
+
+    def test_unmatched_row_creates_page(self, fake_store, monkeypatch):
+        pages = [self._site_page("p-map", mapping_id="m1")]
+        store, writes = self._store_with_pages(fake_store, monkeypatch, pages)
+        store.upsert_site_config_row(
+            {"mapping_id": "m2", "region_id": "r9", "group_id": "g9", "tax_rate": "5"}
+        )
+        assert writes["updated"] == []
+        assert writes["created"] == ["db-site"]
+
+
+class TestSiteConfigUpsertEfficiency:
+    @staticmethod
+    def _full_page(page_id="p-1"):
+        SC = notion_store.SiteConfigProps
+        return properties_to_page(
+            {
+                SC.NAME: notion_store.p_title("Ontario"),
+                SC.SETTING_TYPE: notion_store.p_select("tax_location"),
+                SC.REGION: notion_store.p_rich_text("CA / ON"),
+                SC.TAX_NAME: notion_store.p_rich_text("HST"),
+                SC.TAX_TYPE: notion_store.p_rich_text(""),
+                SC.TAX_RATE: notion_store.p_number(13.0),
+                SC.REGION_ID: notion_store.p_rich_text("r1"),
+                SC.GROUP_ID: notion_store.p_rich_text("g1"),
+                SC.MAPPING_ID: notion_store.p_rich_text("m1"),
+                SC.REVISION: notion_store.p_rich_text("3"),
+            },
+            page_id=page_id,
+        )
+
+    @staticmethod
+    def _matching_row():
+        return {
+            "setting_type": "tax_location",
+            "jurisdiction": "Ontario",
+            "region": "CA / ON",
+            "tax_name": "HST",
+            "tax_type": "",
+            "tax_rate": "13",
+            "region_id": "r1",
+            "group_id": "g1",
+            "mapping_id": "m1",
+            "revision": "3",
+        }
+
+    def _store(self, fake_store, monkeypatch, pages):
+        store = fake_store([])
+        monkeypatch.setattr(store, "iter_pages", lambda db_id, filter_=None: iter(pages))
+        writes = {"updated": [], "created": []}
+        monkeypatch.setattr(
+            store, "update_page", lambda page_id, props: writes["updated"].append(page_id)
+        )
+        monkeypatch.setattr(
+            store, "create_page", lambda db_id, props: writes["created"].append(db_id)
+        )
+        return store, writes
+
+    def test_unchanged_row_is_not_rewritten(self, fake_store, monkeypatch):
+        store, writes = self._store(fake_store, monkeypatch, [self._full_page()])
+        outcome = store.upsert_site_config_row(self._matching_row())
+        assert outcome == "unchanged"
+        assert writes == {"updated": [], "created": []}
+
+    def test_changed_rate_still_updates(self, fake_store, monkeypatch):
+        store, writes = self._store(fake_store, monkeypatch, [self._full_page()])
+        row = dict(self._matching_row(), tax_rate="15")
+        assert store.upsert_site_config_row(row) == "updated"
+        assert writes["updated"] == ["p-1"]
+
+    def test_prebuilt_index_avoids_per_row_scans(self, fake_store, monkeypatch):
+        store, writes = self._store(fake_store, monkeypatch, [self._full_page()])
+        index = store.index_site_config_pages()
+
+        def boom(db_id, filter_=None):
+            raise AssertionError("iter_pages must not run per row")
+
+        monkeypatch.setattr(store, "iter_pages", boom)
+        row = dict(self._matching_row(), tax_rate="15")
+        assert store.upsert_site_config_row(row, page_index=index) == "updated"
+        assert store.upsert_site_config_row(self._matching_row(), page_index=index) == "unchanged"
+        assert writes["updated"] == ["p-1"]
+
+
+class _FakeTransientError(Exception):
+    def __init__(self, status=503):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
+class TestNotionApiRetry:
+    def test_transient_query_error_is_retried(self, fake_store, monkeypatch):
+        store = fake_store([{"results": [], "has_more": False, "next_cursor": None}])
+        monkeypatch.setattr(notion_store.time, "sleep", lambda s: None)
+        attempts = {"n": 0}
+
+        def flaky():
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise _FakeTransientError()
+            return {"ok": True}
+
+        assert store._api("test call", flaky) == {"ok": True}
+        assert attempts["n"] == 2
+
+    def test_page_create_is_never_retried(self, fake_store, monkeypatch):
+        store = fake_store([])
+        monkeypatch.setattr(notion_store.time, "sleep", lambda s: None)
+        attempts = {"n": 0}
+
+        def flaky():
+            attempts["n"] += 1
+            raise _FakeTransientError()
+
+        with pytest.raises(notion_store.NotionStoreError):
+            store._api("page create", flaky, retry=False)
+        assert attempts["n"] == 1
+
+    def test_non_transient_error_is_not_retried(self, fake_store, monkeypatch):
+        store = fake_store([])
+        monkeypatch.setattr(notion_store.time, "sleep", lambda s: None)
+        attempts = {"n": 0}
+
+        def bad_request():
+            attempts["n"] += 1
+            raise ValueError("400 validation error")
+
+        with pytest.raises(notion_store.NotionStoreError):
+            store._api("page update", bad_request)
+        assert attempts["n"] == 1
+
+
+class TestEnsureEventProperties:
+    def _store_with_live_props(self, monkeypatch, live_props):
+        fake = FakeClient([], schema={"properties": live_props})
+        monkeypatch.setattr(notion_store, "Client", lambda **kwargs: fake)
+        return NotionStore(make_config()), fake
+
+    def test_adds_missing_events_properties(self, monkeypatch):
+        # A database created before Instructor/Template existed.
+        live = {
+            name: {"id": f"prop-{i}"}
+            for i, name in enumerate(
+                notion_store._events_db_properties("ds-db-catalog")
+            )
+            if name not in (EventProps.INSTRUCTOR, EventProps.TEMPLATE)
+        }
+        store, fake = self._store_with_live_props(monkeypatch, live)
+
+        added = store.ensure_event_properties()
+
+        assert added == sorted([EventProps.INSTRUCTOR, EventProps.TEMPLATE])
+        sent = fake.data_sources.update_calls[0]["properties"]
+        assert sent[EventProps.TEMPLATE]["relation"]["data_source_id"] == "ds-db-catalog"
+
+    def test_noop_when_schema_complete(self, monkeypatch):
+        live = {
+            name: {"id": f"prop-{i}"}
+            for i, name in enumerate(
+                notion_store._events_db_properties("ds-db-catalog")
+            )
+        }
+        store, fake = self._store_with_live_props(monkeypatch, live)
+        assert store.ensure_event_properties() == []
         assert fake.data_sources.update_calls == []
