@@ -891,93 +891,114 @@ class NotionStore:
 
     # -- database creation (setup-notion) -----------------------------------
 
-    def ensure_event_status_options(self) -> int:
-        """Add any missing Status select options to the live Events DB schema.
+    def _ensure_select_options(
+        self, db_id: str, prop_name: str, wanted: List[Dict[str, str]]
+    ) -> int:
+        """Append any missing options to a live select property.
 
-        Lets new lifecycle statuses (e.g. Cancel/Delete) appear in the Notion
-        dropdown for databases created before those statuses existed. Existing
-        options are preserved untouched. Returns how many options were added.
+        Existing options (and their ids/colors) are preserved untouched —
+        patching is additive only. Returns how many options were added.
         """
-        db_id = self._require_db(self.config.notion_event_scheduling_db_id, "NOTION_EVENT_SCHEDULING_DB_ID")
-
         ds_id = self.data_source_id(db_id)
-        data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
-        status_prop = (data_source.get("properties") or {}).get(EventProps.STATUS) or {}
-        existing_options = (status_prop.get("select") or {}).get("options") or []
+        data_source = self._api(
+            f"data source retrieve {ds_id}",
+            lambda: self.client.data_sources.retrieve(data_source_id=ds_id),
+        )
+        prop = (data_source.get("properties") or {}).get(prop_name) or {}
+        existing_options = (prop.get("select") or {}).get("options") or []
         existing_names = {opt.get("name") for opt in existing_options}
 
-        missing = [
-            opt for opt in STATUS_SELECT_OPTIONS if opt["name"] not in existing_names
-        ]
+        missing = [opt for opt in wanted if opt["name"] not in existing_names]
         if not missing:
             return 0
 
-        self.client.data_sources.update(
-            data_source_id=ds_id,
-            properties={
-                EventProps.STATUS: {
-                    "select": {"options": existing_options + missing}
-                }
-            },
+        self._api(
+            f"schema update {prop_name}",
+            lambda: self.client.data_sources.update(
+                data_source_id=ds_id,
+                properties={
+                    prop_name: {"select": {"options": existing_options + missing}}
+                },
+            ),
         )
         return len(missing)
 
-    def ensure_template_type_options(self) -> int:
-        """Add the Type select (class/event) to the live Catalog DB schema.
+    def _ensure_properties(self, db_id: str, schema: Dict[str, Any]) -> List[str]:
+        """Add schema properties wholly missing from a live database.
 
-        Databases created before the catalog redesign don't have the Type
-        property; this adds it (or any missing option) in place. Existing
-        options and row values are preserved. Returns how many options were
-        added.
+        Existing properties (and their values) are never touched. Returns
+        the sorted names added.
         """
-        db_id = self._require_db(self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID")
-
         ds_id = self.data_source_id(db_id)
-        data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
-        type_prop = (data_source.get("properties") or {}).get(TemplateProps.TYPE) or {}
-        existing_options = (type_prop.get("select") or {}).get("options") or []
-        existing_names = {opt.get("name") for opt in existing_options}
-
-        missing = [
-            opt
-            for opt in TEMPLATE_TYPE_SELECT_OPTIONS
-            if opt["name"] not in existing_names
-        ]
-        if not missing:
-            return 0
-
-        self.client.data_sources.update(
-            data_source_id=ds_id,
-            properties={
-                TemplateProps.TYPE: {
-                    "select": {"options": existing_options + missing}
-                }
-            },
+        data_source = self._api(
+            f"data source retrieve {ds_id}",
+            lambda: self.client.data_sources.retrieve(data_source_id=ds_id),
         )
-        return len(missing)
-
-    def ensure_catalog_properties(self) -> List[str]:
-        """Add any Catalog schema properties missing from the live database.
-
-        Existing properties (and their values) are never touched — only
-        wholly missing ones are created. Returns the names added.
-        """
-        db_id = self._require_db(self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID")
-
-        ds_id = self.data_source_id(db_id)
-        data_source = self.client.data_sources.retrieve(data_source_id=ds_id)
         live = data_source.get("properties") or {}
 
         missing = {
             name: definition
-            for name, definition in _catalog_db_properties().items()
+            for name, definition in schema.items()
             if name not in live
         }
         if not missing:
             return []
 
-        self.client.data_sources.update(data_source_id=ds_id, properties=missing)
+        self._api(
+            "schema update (missing properties)",
+            lambda: self.client.data_sources.update(
+                data_source_id=ds_id, properties=missing
+            ),
+        )
         return sorted(missing)
+
+    def ensure_event_status_options(self) -> int:
+        """Add any missing Status select options to the live Events DB schema."""
+        db_id = self._require_db(
+            self.config.notion_event_scheduling_db_id, "NOTION_EVENT_SCHEDULING_DB_ID"
+        )
+        return self._ensure_select_options(
+            db_id, EventProps.STATUS, STATUS_SELECT_OPTIONS
+        )
+
+    def ensure_template_type_options(self) -> int:
+        """Add the Type select options (class/event) to the live Catalog DB schema."""
+        db_id = self._require_db(
+            self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID"
+        )
+        return self._ensure_select_options(
+            db_id, TemplateProps.TYPE, TEMPLATE_TYPE_SELECT_OPTIONS
+        )
+
+    def ensure_catalog_properties(self) -> List[str]:
+        """Add any Catalog schema properties missing from the live database."""
+        db_id = self._require_db(
+            self.config.notion_catalog_db_id, "NOTION_CATALOG_DB_ID"
+        )
+        return self._ensure_properties(db_id, _catalog_db_properties())
+
+    def ensure_event_properties(self) -> List[str]:
+        """Add any Events schema properties missing from the live database.
+
+        The Events DB previously had no property patcher at all — a property
+        added to ``_events_db_properties`` after a database was created would
+        silently never exist there (reads blank, writes 400). The Template
+        relation needs the Catalog data source id; when the catalog is not
+        configured or resolvable, that one property is skipped.
+        """
+        db_id = self._require_db(
+            self.config.notion_event_scheduling_db_id, "NOTION_EVENT_SCHEDULING_DB_ID"
+        )
+        catalog_ds_id: Optional[str] = None
+        if self.config.notion_catalog_db_id:
+            try:
+                catalog_ds_id = self.data_source_id(self.config.notion_catalog_db_id)
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve the Catalog data source (%s) — "
+                    "skipping the Template relation in the schema patch", exc,
+                )
+        return self._ensure_properties(db_id, _events_db_properties(catalog_ds_id))
 
     def _rename_property(
         self, database_id: str, old_name: str, new_name: str

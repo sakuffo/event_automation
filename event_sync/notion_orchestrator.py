@@ -191,6 +191,17 @@ def setup_notion(runtime: SyncRuntime) -> bool:
         logger.warning("  ⚠️  Could not patch Catalog properties: %s", exc)
 
     try:
+        added_event_props = store.ensure_event_properties()
+        if added_event_props:
+            logger.info(
+                "⚙️  Added Event Scheduling propert%s: %s",
+                "y" if len(added_event_props) == 1 else "ies",
+                ", ".join(added_event_props),
+            )
+    except Exception as exc:
+        logger.warning("  ⚠️  Could not patch Event Scheduling properties: %s", exc)
+
+    try:
         added_types = store.ensure_template_type_options()
         if added_types:
             logger.info(

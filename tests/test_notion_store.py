@@ -594,3 +594,38 @@ class TestNotionApiRetry:
         with pytest.raises(notion_store.NotionStoreError):
             store._api("page update", bad_request)
         assert attempts["n"] == 1
+
+
+class TestEnsureEventProperties:
+    def _store_with_live_props(self, monkeypatch, live_props):
+        fake = FakeClient([], schema={"properties": live_props})
+        monkeypatch.setattr(notion_store, "Client", lambda **kwargs: fake)
+        return NotionStore(make_config()), fake
+
+    def test_adds_missing_events_properties(self, monkeypatch):
+        # A database created before Instructor/Template existed.
+        live = {
+            name: {"id": f"prop-{i}"}
+            for i, name in enumerate(
+                notion_store._events_db_properties("ds-db-catalog")
+            )
+            if name not in (EventProps.INSTRUCTOR, EventProps.TEMPLATE)
+        }
+        store, fake = self._store_with_live_props(monkeypatch, live)
+
+        added = store.ensure_event_properties()
+
+        assert added == sorted([EventProps.INSTRUCTOR, EventProps.TEMPLATE])
+        sent = fake.data_sources.update_calls[0]["properties"]
+        assert sent[EventProps.TEMPLATE]["relation"]["data_source_id"] == "ds-db-catalog"
+
+    def test_noop_when_schema_complete(self, monkeypatch):
+        live = {
+            name: {"id": f"prop-{i}"}
+            for i, name in enumerate(
+                notion_store._events_db_properties("ds-db-catalog")
+            )
+        }
+        store, fake = self._store_with_live_props(monkeypatch, live)
+        assert store.ensure_event_properties() == []
+        assert fake.data_sources.update_calls == []
