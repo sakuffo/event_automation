@@ -440,9 +440,12 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
         client = runtime.get_wix_client()
         tz_name = runtime.config.timezone
 
+        # scope=upcoming filters server-side ($in on status); the client-side
+        # guard stays as belt and braces.
         wix_events = list(client.iter_events(
             page_size=100,
             include_drafts=False,
+            statuses=sorted(_UPCOMING_STATUSES) if scope == "upcoming" else None,
             fieldsets=["DETAILS", "REGISTRATION", "CATEGORIES"],
         ))
         if scope == "upcoming":

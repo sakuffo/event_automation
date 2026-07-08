@@ -234,13 +234,21 @@ class WixClient:
         page_size: int = 100,
         include_drafts: bool = True,
         status_filter: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
         offset: int = 0,
         fieldsets: Optional[List[str]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        """Yield events across all pages with cursor/offset pagination."""
+        """Yield events across all pages with cursor/offset pagination.
+
+        ``statuses`` filters server-side with ``$in`` (the v3 query grammar
+        supports ``$eq``/``$ne``/``$in`` on ``status``) and takes precedence
+        over ``status_filter``/``include_drafts``.
+        """
 
         base_query: Dict[str, Any] = {}
-        if status_filter:
+        if statuses:
+            base_query['filter'] = {'status': {'$in': list(statuses)}}
+        elif status_filter:
             base_query['filter'] = {'status': {'$eq': status_filter}}
         elif not include_drafts:
             base_query['filter'] = {'status': {'$ne': 'DRAFT'}}
@@ -506,14 +514,13 @@ class WixClient:
     # Category Operations
 
     def query_categories(self) -> List[Dict[str, Any]]:
-        """Return all event categories on the site."""
+        """Return all event categories on the site (paginated past 100)."""
         try:
-            response = self._request(
-                'POST',
-                '/events/v1/categories/query',
-                json={'query': {'paging': {'limit': 100}}},
+            return list(
+                self._paged_post(
+                    '/events/v1/categories/query', 'categories', None, 100
+                )
             )
-            return response.json().get('categories', [])
         except Exception as exc:
             logger.warning("Could not query categories: %s", exc)
             return []
