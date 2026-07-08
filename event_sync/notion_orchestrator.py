@@ -50,15 +50,24 @@ from .notion_store import (
     parse_validation_error,
     row_to_event_record,
 )
-from .orchestrator import (
-    _create_tickets_from_config,
-    _ensure_ticket_definition,
-    _index_events_by_id_and_key,
-    _log_event_diff,
+from .wix_flows import (
     apply_event_update_plan,
     compute_event_update_plan,
+    create_tickets_from_config,
     create_wix_event,
+    ensure_ticket_definition,
+    index_events_by_id_and_key,
     log_update_plan_dry_run,
+    process_site_config_rows,
+)
+from .wix_mapping import (
+    blank_region_site_row,
+    log_event_diff,
+    parse_month_value,
+    select_default_tax_group_id,
+    site_config_row_sort_key,
+    tax_mapping_to_site_row,
+    wix_event_to_config_row,
 )
 from .runtime import SyncRuntime
 
@@ -210,82 +219,12 @@ def setup_notion(runtime: SyncRuntime) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# import-classes (one-time: class_info sheet -> Catalog DB, defaults -> Settings)
+# category slugs
 # ---------------------------------------------------------------------------
 
 
 def _slugify_category(raw: str) -> str:
     return "-".join(raw.strip().lower().split())
-
-
-def import_classes(runtime: SyncRuntime) -> bool:
-    """One-time import of the class_info sheet tab into the Catalog DB.
-
-    Also copies the source sheet's ``defaults`` tab (e.g. ``default_img``)
-    into the Settings DB so the sheet is no longer needed at enrich time.
-    """
-    from .generator import fetch_class_info, fetch_defaults
-
-    store: NotionStore = runtime.get_notion_store()
-
-    logger.info("📚 Importing class_info sheet into the Notion Catalog DB...\n")
-    try:
-        class_info = fetch_class_info(runtime)
-    except Exception as exc:
-        logger.error("❌ Failed to read class_info sheet: %s", exc)
-        return False
-
-    if not class_info:
-        logger.warning("No class definitions found in the class_info tab.")
-        return False
-
-    existing = store.fetch_classes()
-
-    created = 0
-    updated = 0
-    failed = 0
-    for class_name, details in class_info.items():
-        categories = [
-            _slugify_category(c)
-            for c in (details.get("categories", "") or "").split(";")
-            if c.strip()
-        ]
-        existing_entry = existing.get(class_name.strip().lower())
-        try:
-            store.upsert_class(
-                name=class_name,
-                categories=categories,
-                tagline=details.get("class_tagline", "") or "",
-                description=details.get("description", "") or "",
-                image_url=(details.get("image_link", "") or "").strip(),
-                existing_page_id=(existing_entry or {}).get("page_id"),
-            )
-            if existing_entry:
-                updated += 1
-                logger.info("  ♻️  Updated class: %s", class_name)
-            else:
-                created += 1
-                logger.info("  ➕ Created class: %s", class_name)
-        except Exception as exc:
-            failed += 1
-            logger.warning("  ⚠️  Failed to import '%s': %s", class_name, exc)
-
-    logger.info("\n⚙️  Copying defaults tab into the Settings DB...")
-    try:
-        defaults = fetch_defaults(runtime)
-        for key, value in defaults.items():
-            store.upsert_setting(key, value)
-            logger.info("  ✅ Setting '%s' = %s", key, value)
-        if not defaults:
-            logger.info("  (no defaults found — set 'default_img' in Settings by hand)")
-    except Exception as exc:
-        logger.warning("  ⚠️  Could not import defaults: %s", exc)
-
-    logger.info(
-        "\n📊 Classes import: %d created, %d updated, %d failed",
-        created, updated, failed,
-    )
-    return failed == 0
 
 
 # ---------------------------------------------------------------------------
@@ -486,8 +425,6 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
     Delete/Error/Skip) are never overwritten — those belong to humans or to
     the sync flow.
     """
-    from .generator import _wix_event_to_config_row
-
     if scope not in {"upcoming", "all"}:
         logger.error("Invalid scope '%s' (expected 'upcoming' or 'all')", scope)
         return False
@@ -545,7 +482,7 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
             )
 
             ticket_defs = client.get_ticket_definitions(wix_id)
-            config_row = _wix_event_to_config_row(wix_event, ticket_defs, tz_name=tz_name)
+            config_row = wix_event_to_config_row(wix_event, ticket_defs, tz_name=tz_name)
 
             record: Optional[EventRecord] = None
             invalid_note = ""
@@ -707,11 +644,9 @@ def _lookup_price_for_category(category: str) -> Optional[float]:
 
 
 def _month_numbers(month_filters: Optional[List[str]]) -> Optional[Set[int]]:
-    from .generator import _parse_month_value
-
     if not month_filters:
         return None
-    return {_parse_month_value(m) for m in month_filters}
+    return {parse_month_value(m) for m in month_filters}
 
 
 def _row_in_months(row: Dict[str, Any], allowed: Optional[Set[int]]) -> bool:
@@ -1175,8 +1110,6 @@ def notion_sync_events(
     ``Delete`` rows delete it outright (row becomes ``Removed``). Results are
     written back onto each row.
     """
-    from .generator import _wix_event_to_config_row
-
     logger.info("🚀 Starting Notion ⇄ Wix sync...\n")
     if dry_run:
         logger.info("🔍 DRY RUN — nothing will be written to Wix or Notion\n")
@@ -1216,7 +1149,7 @@ def notion_sync_events(
         client = runtime.get_wix_client()
         # DETAILS is needed so existing mainImage/descriptions are present for
         # diffing and for skipping re-uploads of images already in Wix Media.
-        by_id, by_key = _index_events_by_id_and_key(
+        by_id, by_key = index_events_by_id_and_key(
             runtime, fieldsets=["DETAILS", "CATEGORIES", "REGISTRATION"],
         )
 
@@ -1403,7 +1336,7 @@ def notion_sync_events(
                 )
 
                 ticket_defs = client.get_ticket_definitions(wix_id)
-                config_row = _wix_event_to_config_row(
+                config_row = wix_event_to_config_row(
                     wix_event, ticket_defs, tz_name=runtime.config.timezone
                 )
                 config_row["image_url"] = _preserved_image_url(
@@ -1570,7 +1503,7 @@ def notion_sync_events(
                     name, record.start_date, plan["change_desc"],
                 )
                 if plan["event_changed"]:
-                    _log_event_diff(name, plan["event_diffs"])
+                    log_event_diff(name, plan["event_diffs"])
 
                 if apply_event_update_plan(client, runtime, record, wix_id, wix_event, plan):
                     results["updated"].append(name)
@@ -1610,9 +1543,9 @@ def notion_sync_events(
                         continue
                     if auto_create_tickets and record.registration_type == "TICKETING":
                         if record.ticket_name:
-                            _create_tickets_from_config(client, wix_id, record)
+                            create_tickets_from_config(client, wix_id, record)
                         elif record.ticket_price > 0:
-                            _ensure_ticket_definition(client, wix_id, record)
+                            ensure_ticket_definition(client, wix_id, record)
                     results["published"].append(name)
                     store.write_sync_result(
                         page_id, status=STATUS_PUBLISHED, wix_event_id=wix_id,
@@ -1643,9 +1576,9 @@ def notion_sync_events(
 
                 if ok and auto_create_tickets and record.registration_type == "TICKETING" and wix_status != "DRAFT":
                     if record.ticket_name:
-                        _create_tickets_from_config(client, wix_id, record)
+                        create_tickets_from_config(client, wix_id, record)
                     elif record.ticket_price > 0:
-                        _ensure_ticket_definition(client, wix_id, record)
+                        ensure_ticket_definition(client, wix_id, record)
 
                 new_status = STATUS_READY if wix_status == "DRAFT" else STATUS_PUBLISHED
                 if ok:
@@ -1783,13 +1716,6 @@ def notion_sync_events(
 
 def pull_site_config_notion(runtime: SyncRuntime) -> bool:
     """Pull Wix tax regions/mappings into the Notion Site Config DB."""
-    from .orchestrator import (
-        _blank_region_site_row,
-        _select_default_tax_group_id,
-        _site_config_row_sort_key,
-        _tax_mapping_to_site_row,
-    )
-
     logger.info("⬇️  Pulling site config (tax locations) from Wix into Notion...\n")
 
     try:
@@ -1814,18 +1740,18 @@ def pull_site_config_notion(runtime: SyncRuntime) -> bool:
             return False
 
         regions_by_id = {r.get("id", ""): r for r in regions if r.get("id")}
-        default_group_id = _select_default_tax_group_id(groups)
+        default_group_id = select_default_tax_group_id(groups)
 
         rows: List[Dict[str, Any]] = [
-            _tax_mapping_to_site_row(m, regions_by_id) for m in mappings
+            tax_mapping_to_site_row(m, regions_by_id) for m in mappings
         ]
         mapped_region_ids = {m.get("taxRegionId", "") for m in mappings}
         for region in regions:
             if region.get("id", "") in mapped_region_ids:
                 continue
-            rows.append(_blank_region_site_row(region, default_group_id))
+            rows.append(blank_region_site_row(region, default_group_id))
 
-        rows.sort(key=_site_config_row_sort_key)
+        rows.sort(key=site_config_row_sort_key)
 
         for row in rows:
             store.upsert_site_config_row(row)
@@ -1844,8 +1770,6 @@ def pull_site_config_notion(runtime: SyncRuntime) -> bool:
 
 def push_site_config_notion(runtime: SyncRuntime, dry_run: bool = False) -> bool:
     """Push tax edits from the Notion Site Config DB back to Wix."""
-    from .orchestrator import process_site_config_rows
-
     logger.info("🚀 Push site config (tax locations) from Notion to Wix...\n")
     if dry_run:
         logger.info("🔍 DRY RUN — no changes will be made\n")

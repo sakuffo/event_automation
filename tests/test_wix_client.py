@@ -1,4 +1,4 @@
-from wix_client import WixClient
+from event_sync.wix_client import WixClient
 
 
 class DummyResponse:

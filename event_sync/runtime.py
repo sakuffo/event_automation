@@ -5,27 +5,21 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional, Tuple
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-
-from .config import AppConfig
-from wix_client import WixClient
-from .config import ConfigError
+from .config import AppConfig, ConfigError
+from .wix_client import WixClient
 
 
 CacheEntry = Tuple[Optional[bytes], Optional[str], Optional[str]]
 
 
 class SyncRuntime:
-    """Lazily instantiates Google + Wix clients and tracks cross-cutting caches."""
+    """Lazily instantiates Google Drive + Wix + Notion clients and tracks caches."""
 
-    SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
     DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
     def __init__(self, config: AppConfig):
         self.config = config
         self._wix_client: Optional[WixClient] = None
-        self._sheets_service = None
         self._drive_service = None
         self._notion_store = None
         self._credentials_info: Optional[Dict[str, Any]] = None
@@ -61,17 +55,16 @@ class SyncRuntime:
             )
         return self._wix_client
 
-    def get_sheets_service(self):
-        if self._sheets_service is None:
-            creds_dict = self._load_credentials_info()
-            credentials = service_account.Credentials.from_service_account_info(
-                creds_dict, scopes=[self.SHEETS_SCOPE]
-            )
-            self._sheets_service = build("sheets", "v4", credentials=credentials)
-        return self._sheets_service
-
     def get_drive_service(self):
+        """Google Drive client for downloading event images.
+
+        The Google SDK import lives here so Notion-only commands never pay
+        its ~1s import cost (or need it installed at all).
+        """
         if self._drive_service is None:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+
             creds_dict = self._load_credentials_info()
             credentials = service_account.Credentials.from_service_account_info(
                 creds_dict, scopes=[self.DRIVE_SCOPE]
@@ -114,5 +107,3 @@ class SyncRuntime:
 
     def record_wix_upload(self) -> None:
         self.cache_stats["wix_uploads"] += 1
-
-

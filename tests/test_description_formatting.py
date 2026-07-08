@@ -1,4 +1,4 @@
-from event_sync.orchestrator import format_description_as_html, _wix_timestamp
+from event_sync.wix_mapping import format_description_as_html, wix_timestamp
 
 
 def test_format_description_preserves_paragraphs_and_line_breaks():
@@ -88,7 +88,7 @@ def test_format_description_realistic_class_description():
 
 
 def test_wix_timestamp_converts_to_utc_with_timezone():
-    timestamp = _wix_timestamp("2025-12-25", "07:00", "America/Toronto")
+    timestamp = wix_timestamp("2025-12-25", "07:00", "America/Toronto")
 
     assert timestamp == "2025-12-25T12:00:00Z"
 

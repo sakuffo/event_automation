@@ -27,7 +27,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from wix_client import WixClient
+from event_sync.wix_client import WixClient
 
 QUERY_FIELDS = ["DETAILS", "TEXTS", "REGISTRATION", "URLS", "DASHBOARD", "CATEGORIES"]
 

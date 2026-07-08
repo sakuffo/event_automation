@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from wix_client import WixClient
+from event_sync.wix_client import WixClient
 
 # Fix Windows console encoding for emojis
 if sys.platform == 'win32':

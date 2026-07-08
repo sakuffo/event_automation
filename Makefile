@@ -1,4 +1,4 @@
-.PHONY: help setup install install-dev validate test list sync generate generate-sheet unit clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-add-ticket dev-search dev-clean-drafts dev-clean-test dev-clean-all
+.PHONY: help setup install install-dev validate test list sync unit clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-add-ticket dev-search dev-clean-drafts dev-clean-test dev-clean-all
 
 # Default target
 help:
@@ -12,8 +12,6 @@ help:
 	@echo "  make test       - Test Wix API connection"
 	@echo "  make list       - List existing Wix events"
 	@echo "  make sync       - Run the event sync"
-	@echo "  make generate   - Generate merged event data (CSV to stdout)"
-	@echo "  make generate-sheet TAB_NAME=... - Write to sheet tab"
 	@echo "  make unit       - Run automated unit tests"
 	@echo "  make clean      - Remove virtual environment and cache files"
 	@echo "  make activate   - Show how to activate virtual environment"
@@ -72,17 +70,8 @@ list:
 sync:
 	@python sync_events.py sync
 
-# Generate merged event data from rolling_schedule + class_info
-generate:
-	@python sync_events.py generate
 
 # Generate and write to a sheet tab
-generate-sheet:
-ifndef TAB_NAME
-	@echo "Usage: make generate-sheet TAB_NAME=events_output"
-	@exit 1
-endif
-	@python sync_events.py generate --output-sheet $(TAB_NAME)
 
 unit:
 	@pytest

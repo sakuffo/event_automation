@@ -275,7 +275,6 @@ def make_config(**overrides) -> AppConfig:
         wix_api_key=None,
         wix_account_id=None,
         wix_site_id=None,
-        google_sheet_id=None,
         google_credentials_raw=None,
         notion_token="secret",
         notion_event_scheduling_db_id="db-events",

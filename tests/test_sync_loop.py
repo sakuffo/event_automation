@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from event_sync import generator, notion_orchestrator
+from event_sync import notion_orchestrator
 from event_sync.notion_orchestrator import (
     enrich_events,
     notion_sync_events,
@@ -174,7 +174,7 @@ def make_runtime(store: StoreStub, client: Optional[ClientStub] = None) -> Simpl
 def patch_index(monkeypatch, by_id=None, by_key=None):
     monkeypatch.setattr(
         notion_orchestrator,
-        "_index_events_by_id_and_key",
+        "index_events_by_id_and_key",
         lambda runtime, fieldsets=None: (by_id or {}, by_key or {}),
     )
     monkeypatch.setattr(notion_orchestrator.time, "sleep", lambda s: None)
@@ -182,8 +182,8 @@ def patch_index(monkeypatch, by_id=None, by_key=None):
 
 def patch_config_row(monkeypatch, config_row):
     monkeypatch.setattr(
-        generator,
-        "_wix_event_to_config_row",
+        notion_orchestrator,
+        "wix_event_to_config_row",
         lambda event, ticket_defs, tz_name=TZ: config_row,
     )
 
@@ -210,7 +210,7 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
     ensured: List[tuple] = []
     monkeypatch.setattr(
         notion_orchestrator,
-        "_ensure_ticket_definition",
+        "ensure_ticket_definition",
         lambda c, wix_id, record: ensured.append((wix_id, record.ticket_price)),
     )
 
@@ -235,7 +235,7 @@ def test_ready_row_with_named_tickets_uses_config_ticket_creation(monkeypatch):
     created: List[str] = []
     monkeypatch.setattr(
         notion_orchestrator,
-        "_create_tickets_from_config",
+        "create_tickets_from_config",
         lambda c, wix_id, record: created.append(wix_id) or True,
     )
 
@@ -260,7 +260,7 @@ def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
     ensured: List[str] = []
     monkeypatch.setattr(
         notion_orchestrator,
-        "_ensure_ticket_definition",
+        "ensure_ticket_definition",
         lambda c, wix_id, record: ensured.append(wix_id),
     )
 
@@ -291,7 +291,7 @@ def test_ready_row_matches_by_title_date_time_when_id_missing(monkeypatch):
         lambda *a, **k: pytest.fail("matched by key; must not create"),
     )
     monkeypatch.setattr(
-        notion_orchestrator, "_ensure_ticket_definition", lambda *a: None
+        notion_orchestrator, "ensure_ticket_definition", lambda *a: None
     )
 
     assert notion_sync_events(make_runtime(store), run_enrich=False) is True
@@ -552,8 +552,8 @@ def make_pull_runtime(store, events):
 
 def patch_pull(monkeypatch):
     monkeypatch.setattr(
-        generator,
-        "_wix_event_to_config_row",
+        notion_orchestrator,
+        "wix_event_to_config_row",
         lambda event, ticket_defs, tz_name=TZ: config_row_for(event),
     )
 
@@ -742,8 +742,8 @@ def test_pull_refresh_preserves_drive_image(monkeypatch):
     )
     store = StoreStub([existing])
     monkeypatch.setattr(
-        generator,
-        "_wix_event_to_config_row",
+        notion_orchestrator,
+        "wix_event_to_config_row",
         lambda event, ticket_defs, tz_name=TZ: make_wix_config_row(
             event_name=event["title"], image_url="", short_description="new"
         ),
