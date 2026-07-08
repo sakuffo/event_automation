@@ -771,3 +771,30 @@ def test_create_with_failed_image_upload_gets_sync_error_note(monkeypatch):
     assert kwargs["status"] == "Published"
     assert "upload failed" in kwargs["error"]
     assert DRIVE_URL in kwargs["error"]
+
+
+# ---------------------------------------------------------------------------
+# Match-key normalization (one owner: wix_mapping.event_match_key)
+# ---------------------------------------------------------------------------
+
+
+def test_match_key_strips_title_whitespace():
+    from event_sync.wix_mapping import event_match_key
+
+    assert (
+        event_match_key("  Rope Lab ", "2026-08-12", "19:00")
+        == event_match_key("Rope Lab", "2026-08-12", "19:00")
+        == "Rope Lab|2026-08-12|19:00"
+    )
+
+
+def test_row_with_padded_name_still_matches_by_key(monkeypatch):
+    from event_sync.notion_orchestrator import _match_wix_event
+
+    wix = {"id": "w-1", "status": "UPCOMING"}
+    by_key = {"Rope Lab|2026-08-12|19:00": wix}
+    row = make_row("Ready", event_name="  Rope Lab ", wix_event_id="")
+
+    matched, wix_id = _match_wix_event(row, {}, by_key)
+    assert matched is wix
+    assert wix_id == "w-1"
