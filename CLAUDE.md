@@ -8,7 +8,7 @@ Event automation tool with a **Notion backend**: events are planned in the Event
 
 The old **Google Sheets pipeline was deleted** in the Notion-only cleanup — it is recoverable from the git tag `legacy-sheets-final` if ever needed. **Google is not entirely gone**: `GOOGLE_CREDENTIALS` (service account) is still required to download Drive-hosted event images, which are the human-managed image source of truth.
 
-**Wix safety**: only ever target the "Dev Birdhaus Copy" site while testing — `WIX_SITE_ID` in `.env` must stay on the dev site id, never the production one (commented out in `.env`).
+**Wix safety**: only ever target the "Dev Birdhaus Copy" site while testing — `WIX_SITE_ID` in `.env` must stay on the dev site id, never the production one (commented out in `.env`). `WIX_DEV_SITE_ID` declares which site is the dev site; the destructive `scripts/dev` commands (`delete-*`) refuse to run unless `WIX_SITE_ID` matches it.
 
 ## Commands
 
@@ -81,7 +81,7 @@ pytest tests/test_sync_loop.py -v    # Sync-loop status-lifecycle characterizati
 
 ## Environment Variables
 
-Required in `.env`: `WIX_API_KEY`, `WIX_SITE_ID` (dev site!), `NOTION_ACCESS_TOKEN`, `NOTION_*_DB_ID` (from `setup-notion`), `GOOGLE_CREDENTIALS` (Drive images). Optional: `WIX_ACCOUNT_ID` (Site Media), `NOTION_PARENT_PAGE_ID` (setup only).
+Required in `.env`: `WIX_API_KEY`, `WIX_SITE_ID` (dev site!), `NOTION_ACCESS_TOKEN`, `NOTION_*_DB_ID` (from `setup-notion`), `GOOGLE_CREDENTIALS` (Drive images). Optional: `WIX_ACCOUNT_ID` (Site Media), `NOTION_PARENT_PAGE_ID` (setup only), `WIX_DEV_SITE_ID` (enables the destructive dev-script guard).
 
 ## Tests
 

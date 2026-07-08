@@ -26,7 +26,7 @@ class WixApiError(Exception):
 class WixClient:
     """Client for Wix API operations"""
 
-    def __init__(self, api_key: str = None, site_id: str = None, account_id: str = None, use_dev: bool = None):
+    def __init__(self, api_key: str = None, site_id: str = None, account_id: str = None):
         """
         Initialize Wix API client
 
@@ -34,23 +34,10 @@ class WixClient:
             api_key: Wix API key (optional, reads from env)
             site_id: Wix site ID (optional, reads from env)
             account_id: Wix account ID (optional, reads from env)
-            use_dev: Use development credentials if True, otherwise check ENV_MODE
         """
-        # Determine if we should use dev credentials
-        env_mode = os.getenv('ENV_MODE', 'production')
-        use_dev_mode = use_dev if use_dev is not None else (env_mode == 'development')
-
-        # Load credentials based on mode
-        if use_dev_mode and os.getenv('DEV_WIX_API_KEY'):
-            self.api_key = api_key or os.getenv('DEV_WIX_API_KEY')
-            self.site_id = site_id or os.getenv('DEV_WIX_SITE_ID')
-            self.account_id = account_id or os.getenv('DEV_WIX_ACCOUNT_ID')
-            self.mode = 'development'
-        else:
-            self.api_key = api_key or os.getenv('WIX_API_KEY')
-            self.site_id = site_id or os.getenv('WIX_SITE_ID')
-            self.account_id = account_id or os.getenv('WIX_ACCOUNT_ID')
-            self.mode = 'production'
+        self.api_key = api_key or os.getenv('WIX_API_KEY')
+        self.site_id = site_id or os.getenv('WIX_SITE_ID')
+        self.account_id = account_id or os.getenv('WIX_ACCOUNT_ID')
 
         self.base_url = 'https://www.wixapis.com'
 
@@ -61,7 +48,9 @@ class WixClient:
         # same host, and a fresh TLS handshake per call adds real seconds.
         self._session = requests.Session()
 
-        logger.info("Wix Client initialized in %s mode", self.mode.upper())
+        logger.info(
+            "Wix Client initialized for site %s…", (self.site_id or "")[:8]
+        )
 
     def _headers(self, content_type: str = 'application/json') -> Dict[str, str]:
         """Get standard headers for Wix API requests"""

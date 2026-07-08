@@ -72,25 +72,14 @@ fi
 # Create .env file if it doesn't exist
 echo ""
 if [ ! -f ".env" ]; then
-    echo "Creating .env template..."
-    cat <<'EOF' > .env
-# Wix Credentials
-WIX_API_KEY=
-WIX_ACCOUNT_ID=
-WIX_SITE_ID=
-
-# Google Sheets
-GOOGLE_SHEET_ID=
-GOOGLE_CREDENTIALS=
-EOF
-    echo "✅ .env template created"
+    echo "Creating .env from .env.example..."
+    cp .env.example .env
+    echo "✅ .env created"
     echo ""
-    echo "⚠️  IMPORTANT: Edit .env file and add your credentials"
-    echo "   - WIX_API_KEY"
-    echo "   - WIX_ACCOUNT_ID"
-    echo "   - WIX_SITE_ID"
-    echo "   - GOOGLE_SHEET_ID"
-    echo "   - GOOGLE_CREDENTIALS"
+    echo "⚠️  IMPORTANT: Edit .env and fill in your credentials"
+    echo "   - WIX_API_KEY + WIX_SITE_ID (the DEV site) + WIX_DEV_SITE_ID"
+    echo "   - NOTION_ACCESS_TOKEN (+ NOTION_*_DB_ID after setup-notion)"
+    echo "   - GOOGLE_CREDENTIALS (Drive-hosted event images)"
 else
     echo "✅ .env file already exists"
 fi

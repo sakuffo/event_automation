@@ -33,21 +33,14 @@ make unit
 Edit `.env` file:
 
 ```bash
-# Production credentials (required)
-WIX_API_KEY=your_production_api_key
-WIX_SITE_ID=your_production_site_id
-WIX_ACCOUNT_ID=your_production_account_id
+WIX_API_KEY=your_api_key
+WIX_SITE_ID=your_dev_site_id       # keep this on the dev site while testing
+WIX_ACCOUNT_ID=your_account_id     # optional; Site Media uploads
 
-# Development/Sandbox credentials (optional)
-DEV_WIX_API_KEY=your_dev_api_key
-DEV_WIX_SITE_ID=your_dev_site_id
-DEV_WIX_ACCOUNT_ID=your_dev_account_id
-
-# Environment mode
-ENV_MODE=development  # or production
+# Safety: declare which site is the dev site. Destructive dev commands
+# (delete-*) refuse to run unless WIX_SITE_ID matches this value.
+WIX_DEV_SITE_ID=your_dev_site_id
 ```
-
-When `ENV_MODE=development` and `DEV_*` credentials are set, all dev scripts will use the sandbox site instead of production.
 
 ### 3. Logging & Verbosity
 
@@ -297,23 +290,17 @@ for event_id in $(python scripts/dev/dev_events.py list | grep "ID:" | awk '{pri
 done
 ```
 
-### Development vs Production
+### The dev-site guard
 
-```bash
-# Test on sandbox/dev site
-export ENV_MODE=development
-python scripts/dev/dev_events.py create "Dev Test Event"
+Destructive commands (`delete`, `delete-drafts`, `delete-test`,
+`delete-pattern`, `delete-after-date`) only run when `WIX_SITE_ID` equals
+`WIX_DEV_SITE_ID`. If the guard refuses:
 
-# Switch to production
-export ENV_MODE=production
-python scripts/dev/dev_events.py list
-```
+- Confirm `.env` points `WIX_SITE_ID` at the dev site.
+- Confirm `WIX_DEV_SITE_ID` is set to that same dev site id.
 
-Or set in `.env`:
-```bash
-ENV_MODE=development  # Uses DEV_* credentials
-ENV_MODE=production   # Uses regular credentials (default)
-```
+There is deliberately no override flag — deleting events on the production
+site should require editing `.env` twice, on purpose.
 
 ## Available Wix Client Methods
 
@@ -399,9 +386,9 @@ Run this mini-regression before shipping changes to the sync pipeline:
 - For bulk operations, increase sleep time in code
 
 ### Wrong Site/Environment
-- Check `ENV_MODE` in `.env`
-- Verify `DEV_*` credentials are set if using development mode
-- Client will print which mode it's using when initialized
+- Check `WIX_SITE_ID` in `.env` (should be the dev site while testing)
+- The client logs the first 8 characters of the site id when initialized
+- Destructive commands additionally require `WIX_DEV_SITE_ID` to match
 
 ## Next Steps
 

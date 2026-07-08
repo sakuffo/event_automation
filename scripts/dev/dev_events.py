@@ -20,7 +20,29 @@ if sys.platform == 'win32':
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import os
+
 from event_sync.wix_client import WixClient
+
+
+def require_dev_site(client: WixClient) -> None:
+    """Refuse destructive operations unless the target is the declared dev site.
+
+    Set WIX_DEV_SITE_ID in .env to the dev site's id; delete-* commands run
+    only when WIX_SITE_ID matches it, so they can never hit production —
+    even if someone flips WIX_SITE_ID and forgets.
+    """
+    dev_site = (os.getenv("WIX_DEV_SITE_ID") or "").strip()
+    if not dev_site:
+        print("❌ Refusing: WIX_DEV_SITE_ID is not set.")
+        print("   Add WIX_DEV_SITE_ID=<dev site id> to .env so destructive")
+        print("   commands can never target the production site.")
+        sys.exit(1)
+    if (client.site_id or "").strip() != dev_site:
+        print("❌ Refusing: WIX_SITE_ID does not match WIX_DEV_SITE_ID.")
+        print("   This looks like a non-dev site — destructive commands only")
+        print("   run against the declared dev site.")
+        sys.exit(1)
 
 
 def list_all_events(client: WixClient, limit: int = 50):
@@ -612,6 +634,7 @@ Examples:
             publish_event(client, event_id)
 
         elif command == 'delete':
+            require_dev_site(client)
             if len(sys.argv) < 3:
                 print("Error: event_id required")
                 sys.exit(1)
@@ -621,14 +644,17 @@ Examples:
             delete_event(client, event_id, confirm)
 
         elif command == 'delete-drafts':
+            require_dev_site(client)
             confirm = '--confirm' in sys.argv
             delete_all_drafts(client, confirm)
 
         elif command == 'delete-test':
+            require_dev_site(client)
             confirm = '--confirm' in sys.argv
             delete_test_events(client, confirm)
 
         elif command == 'delete-pattern':
+            require_dev_site(client)
             if len(sys.argv) < 3:
                 print("Error: pattern required")
                 sys.exit(1)
@@ -639,6 +665,7 @@ Examples:
             bulk_delete_events(client, pattern=pattern, drafts_only=drafts_only, confirm=confirm)
 
         elif command == 'delete-after-date':
+            require_dev_site(client)
             if len(sys.argv) < 3:
                 print("Error: date required (format: YYYY-MM-DD)")
                 sys.exit(1)

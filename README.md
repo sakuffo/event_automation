@@ -6,9 +6,9 @@ team can drop an event placeholder into Notion; the system enriches it from
 the class catalog, a human flips it to Ready, and the sync publishes it to
 Wix with tickets, categories, and images.
 
-> The previous Google Sheets pipeline still works side by side (see
-> [Legacy Google Sheets pipeline](#legacy-google-sheets-pipeline)) and will be
-> removed once the Notion flow has proven itself through a full posting cycle.
+> The previous Google Sheets pipeline has been removed; it remains
+> recoverable from the `legacy-sheets-final` git tag. Google Drive is still
+> used to host event images.
 
 ## What This Does
 
@@ -38,14 +38,14 @@ make setup           # Using Makefile
 # Windows
 setup.bat            # Run setup script
 
-# Configure .env (see Environment Variables below), then:
+# Setup copies .env.example to .env — fill in your credentials, then:
 python sync_events.py validate      # Check credentials
 python sync_events.py test          # Test Wix connection
 
 # One-time Notion bootstrap
 python sync_events.py setup-notion   # Create the 4 databases, print their IDs
 #   -> copy the printed NOTION_*_DB_ID values into .env
-python sync_events.py import-classes # Seed the Catalog DB from the class_info sheet
+python sync_events.py import-event-templates  # Seed recurring-event templates from the events-export CSV
 python sync_events.py pull           # Backfill the Event Scheduling DB from live Wix events
 ```
 
@@ -89,13 +89,13 @@ Tips:
 
 ```bash
 # Setup / diagnostics
-python sync_events.py validate            # Validate credentials (Wix + Google + Notion)
+python sync_events.py validate            # Validate credentials (Wix + Notion + Drive images)
 python sync_events.py test                # Test Wix API connection
 python sync_events.py list                # List existing Wix events
 
 # Notion pipeline
-python sync_events.py setup-notion        # One-time: create Notion databases
-python sync_events.py import-classes      # One-time: class_info sheet -> Catalog DB
+python sync_events.py setup-notion        # One-time: create Notion databases (re-run patches schemas)
+python sync_events.py import-event-templates  # One-time: events-export CSV -> Type=event catalog rows
 python sync_events.py pull                # Wix -> Notion backfill/refresh (--scope all for past events)
 python sync_events.py enrich              # Fill blanks on Idea/Draft rows (-m for months; sync does this too)
 python sync_events.py sync                # Enrich pass + push Ready/Update rows, refresh Published rows from Wix (--no-enrich, --dry-run, --draft, -m)
@@ -160,21 +160,20 @@ NOTION_CATALOG_DB_ID=...                    # was NOTION_CLASSES_DB_ID (old name
 NOTION_SETTINGS_DB_ID=...
 NOTION_SITE_CONFIG_DB_ID=...
 
-# Google (Drive image downloads + legacy sheet commands)
+# Google (Drive-hosted event images only)
 GOOGLE_CREDENTIALS={"type":"service_account"...}  # Full JSON on one line
-GOOGLE_SHEET_ID=your_spreadsheet_id               # legacy pipeline + import-classes
-SOURCE_SHEET_ID=your_source_spreadsheet_id        # optional; falls back to GOOGLE_SHEET_ID
-```
 
-Optional: `ENV_MODE=development` + `DEV_WIX_*` for a sandbox Wix site, and the
-legacy tab-name overrides (`GENERATED_EVENTS_TAB`, `CATEGORY_CONFIG_TAB`,
-`SITE_CONFIG_TAB`, `ROLLING_SCHEDULE_TAB`, `CLASS_INFO_TAB`, `DEFAULTS_TAB`).
+# Safety: scripts/dev delete-* commands refuse to run unless WIX_SITE_ID
+# matches this declared dev site id
+WIX_DEV_SITE_ID=your_dev_site_id
+```
 
 ## How It Works
 
 - **Modular Python package (`event_sync/`)** — `notion_store.py` owns all
   Notion I/O (API version `2025-09-03`, data-source aware);
-  `notion_orchestrator.py` composes Notion with the existing Wix call paths
+  `notion_orchestrator.py` composes it with the pure converters in
+  `wix_mapping.py` and the Wix mutations in `wix_flows.py`
 - **Wix Events API v3** creates/patches events via REST (`wix_client.py`)
 - **Google Drive** still hosts event images; `images.py` downloads (Drive API
   or plain HTTP), resizes with Pillow, and uploads to Wix Media
@@ -186,50 +185,28 @@ legacy tab-name overrides (`GENERATED_EVENTS_TAB`, `CATEGORY_CONFIG_TAB`,
   (class `Price Override` in Notion wins when set; unknown categories default
   to $30)
 
-## Legacy Google Sheets pipeline
-
-Kept working during the transition; every command has the same behavior as
-before the Notion migration:
-
-```bash
-python sync_events.py prepare-sheet            # rolling_schedule + class_info -> generated_events tab
-python sync_events.py sync-sheet               # generated_events tab -> Wix (was: sync)
-python sync_events.py pull-config              # Wix -> config_events tab
-python sync_events.py push-config --dry-run    # config_events tab -> Wix
-python sync_events.py pull-categories          # Wix -> category_config tab
-python sync_events.py push-categories          # category_config tab -> Wix
-python sync_events.py pull-site-config-sheet   # Wix tax -> site_config tab (was: pull-site-config)
-python sync_events.py push-site-config-sheet   # site_config tab -> Wix (was: push-site-config)
-python sync_events.py generate                 # merged CSV to stdout
-python sync_events.py clean-synced             # delete rope+class events matching the generated tab
-python sync_events.py publish-drafts           # publish drafts matching the generated tab
-```
-
-The sheet format, round-trip semantics, and tab names are documented in the
-git history of this README and in [docs/HISTORY.md](docs/HISTORY.md).
-
 ## Project Structure
 
 ```
 .
-├── event_sync/                # Modular sync package
-│   ├── cli.py                 # CLI (Notion commands + legacy sheet commands)
-│   ├── config.py              # Env-driven settings (Wix, Google, Notion)
-│   ├── constants.py           # Pricing table, defaults, column mappings
+├── event_sync/                # The sync package
+│   ├── cli.py                 # CLI dispatch table (per-command lazy imports)
+│   ├── config.py              # Env-driven settings (Wix, Notion, Drive creds)
+│   ├── constants.py           # Pricing table, defaults
 │   ├── images.py              # Drive/HTTP image download -> Wix Media upload
 │   ├── models.py              # EventRecord (+ content_hash), TicketSpec
 │   ├── notion_store.py        # All Notion I/O: schemas, mapping, queries
 │   ├── notion_orchestrator.py # enrich / sync / pull / site-config flows
-│   ├── orchestrator.py        # Wix flows shared by both backends + legacy sheet flows
-│   ├── generator.py           # [legacy] sheet merge + tab writers
-│   ├── sheets.py              # [legacy] sheet readers
-│   └── runtime.py             # Lazy Google/Wix/Notion clients + caches
+│   ├── wix_mapping.py         # Pure converters (timestamps, payloads, diffs, match keys)
+│   ├── wix_flows.py           # Wix mutations (create/update, tickets, categories, tax)
+│   ├── wix_client.py          # Wix REST client (Session, retry matrix)
+│   └── runtime.py             # Lazy Wix/Notion/Drive clients + caches
 ├── sync_events.py             # CLI entrypoint
-├── wix_client.py              # Reusable Wix API client
-├── scripts/                   # Dev helpers (create test Idea rows, set status)
+├── scripts/                   # Operational one-offs (set status, diag hashes)
+│   └── dev/                   # Manual Wix dev tools (never collected by pytest)
 ├── docs/NOTION_BACKEND.md     # Notion data model + lifecycle + triggers
 ├── .github/workflows/         # ci.yml, sync-events.yml
-└── tests/                     # pytest suite
+└── tests/                     # pytest suite (pyproject.toml confines collection)
 ```
 
 ## Testing & Quality Checks
@@ -242,14 +219,10 @@ git history of this README and in [docs/HISTORY.md](docs/HISTORY.md).
 
 ## Development Tools
 
-Test against the dev/sandbox Wix site without touching the live one! See
-[docs/DEV_TOOLS.md](docs/DEV_TOOLS.md).
-
-```bash
-ENV_MODE=development
-DEV_WIX_API_KEY=your_dev_api_key
-DEV_WIX_SITE_ID=your_dev_site_id
-```
+Manual Wix tools live in `scripts/dev/` — see
+[docs/DEV_TOOLS.md](docs/DEV_TOOLS.md). Destructive commands (`delete-*`)
+refuse to run unless `WIX_SITE_ID` matches the declared `WIX_DEV_SITE_ID`,
+so they can never hit the production site.
 
 Dev helpers for the Notion flow:
 

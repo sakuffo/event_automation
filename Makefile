@@ -40,8 +40,8 @@ setup:
 	@./venv/bin/pip install --upgrade pip
 	@./venv/bin/pip install -r requirements.txt
 	@if [ ! -f .env ]; then \
-		printf "# Wix Credentials\nWIX_API_KEY=\nWIX_ACCOUNT_ID=\nWIX_SITE_ID=\n\n# Google Sheets\nGOOGLE_SHEET_ID=\nGOOGLE_CREDENTIALS=\n" > .env; \
-		echo "Created .env template - please add your credentials"; \
+		cp .env.example .env; \
+		echo "Created .env from .env.example - fill in your credentials"; \
 	fi
 	@echo "Setup complete! Activate venv with: source venv/bin/activate"
 
