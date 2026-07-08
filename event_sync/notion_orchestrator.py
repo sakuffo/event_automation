@@ -645,7 +645,7 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
         )
         return len(results["failed"]) == 0
     except Exception as exc:
-        logger.error("Fatal error during pull: %s", exc)
+        logger.exception("Fatal error during pull: %s", exc)
         return False
 
 
@@ -1076,7 +1076,7 @@ def enrich_events(
         )
         return True
     except Exception as exc:
-        logger.error("Fatal error during enrich: %s", exc)
+        logger.exception("Fatal error during enrich: %s", exc)
         return False
 
 
@@ -1726,7 +1726,7 @@ def notion_sync_events(
 
         return len(results["failed"]) == 0
     except Exception as exc:
-        logger.error("Fatal error during sync: %s", exc)
+        logger.exception("Fatal error during sync: %s", exc)
         return False
 
 
@@ -1792,7 +1792,7 @@ def pull_site_config_notion(runtime: SyncRuntime) -> bool:
         logger.info("\n📊 Wrote %d site config row(s) to Notion", len(rows))
         return True
     except Exception as exc:
-        logger.error("Failed to pull site config: %s", exc)
+        logger.exception("Failed to pull site config: %s", exc)
         return False
 
 
@@ -1814,5 +1814,5 @@ def push_site_config_notion(runtime: SyncRuntime, dry_run: bool = False) -> bool
             return False
         return process_site_config_rows(runtime, rows, dry_run=dry_run)
     except Exception as exc:
-        logger.error("Fatal error during site config push: %s", exc)
+        logger.exception("Fatal error during site config push: %s", exc)
         return False
