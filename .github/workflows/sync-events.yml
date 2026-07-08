@@ -46,6 +46,12 @@ jobs:
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}
           WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
+          # Production guard: with this secret set, the run refuses to touch
+          # the production site unless the command below explicitly adds
+          # --production. To transition CI to production on purpose: set the
+          # WIX_SITE_ID secret to the prod id AND change the run line to
+          # `python sync_events.py sync --production`.
+          WIX_PROD_SITE_ID: ${{ secrets.WIX_PROD_SITE_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           NOTION_ACCESS_TOKEN: ${{ secrets.NOTION_ACCESS_TOKEN }}
           NOTION_EVENT_SCHEDULING_DB_ID: ${{ secrets.NOTION_EVENT_SCHEDULING_DB_ID }}

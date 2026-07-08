@@ -27,6 +27,10 @@ class AppConfig:
     # Google service-account JSON — only needed to download Drive-hosted
     # event images (the human-managed image source of truth).
     google_credentials_raw: Optional[str]
+    # Declared production site id. Wix-touching CLI commands refuse to run
+    # against this site unless the human passes --production explicitly, and
+    # --production retargets the run onto it (see cli._enforce_site_guard).
+    wix_prod_site_id: Optional[str] = None
     timezone: str = "America/Toronto"
     # Notion backend
     notion_token: Optional[str] = None
@@ -96,6 +100,7 @@ def load_config() -> AppConfig:
         wix_api_key=os.getenv("WIX_API_KEY"),
         wix_account_id=os.getenv("WIX_ACCOUNT_ID"),
         wix_site_id=os.getenv("WIX_SITE_ID"),
+        wix_prod_site_id=os.getenv("WIX_PROD_SITE_ID"),
         google_credentials_raw=os.getenv("GOOGLE_CREDENTIALS"),
         notion_token=os.getenv("NOTION_ACCESS_TOKEN") or os.getenv("NOTION_TOKEN"),
         notion_parent_page_id=os.getenv("NOTION_PARENT_PAGE_ID"),

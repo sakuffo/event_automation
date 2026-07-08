@@ -166,7 +166,28 @@ GOOGLE_CREDENTIALS={"type":"service_account"...}  # Full JSON on one line
 # Safety: scripts/dev delete-* commands refuse to run unless WIX_SITE_ID
 # matches this declared dev site id
 WIX_DEV_SITE_ID=your_dev_site_id
+
+# Safety: declares the production site. Wix-touching commands refuse to run
+# against it without the explicit --production flag, and --production is the
+# only way to target it (retargets the run onto this id)
+WIX_PROD_SITE_ID=your_prod_site_id
 ```
+
+### Targeting production
+
+`WIX_SITE_ID` should always stay on the dev site. To run against production,
+pass `--production` to any Wix-touching command (`sync`, `pull`, `test`,
+`list`, `validate`, `pull-site-config`, `push-site-config`):
+
+```bash
+python sync_events.py sync --dry-run --production   # preview against prod
+python sync_events.py sync --production             # real prod sync
+```
+
+The flag retargets the run onto `WIX_PROD_SITE_ID` — no `.env` editing. As a
+backstop, if `WIX_SITE_ID` is ever pointed at the production id, every Wix
+command refuses to run until `--production` is passed explicitly. The flag is
+**human-only**: automation and AI agents must never pass it.
 
 ## How It Works
 

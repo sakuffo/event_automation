@@ -13,6 +13,56 @@ from .logging_utils import configure_logging, get_logger
 logger = get_logger(__name__)
 
 
+# Commands that talk to the Wix API and are therefore subject to the
+# production-site guard (_enforce_site_guard).
+WIX_COMMANDS = {
+    "validate",
+    "test",
+    "list",
+    "pull",
+    "sync",
+    "pull-site-config",
+    "push-site-config",
+}
+
+
+def _enforce_site_guard(command: str, args, config) -> Optional[str]:
+    """Production-site guard for every Wix-touching command.
+
+    ``WIX_PROD_SITE_ID`` in ``.env`` declares which site is production.
+    Without the explicit ``--production`` flag, a run whose ``WIX_SITE_ID``
+    matches it is refused. With the flag, the run is retargeted onto the
+    production site id — the flag is the *only* supported way to hit
+    production, and it is human-only: automation and AI agents must never
+    pass it.
+
+    Returns an error message to print, or None when the run may proceed.
+    """
+    if command not in WIX_COMMANDS:
+        return None
+    prod_site_id = (config.wix_prod_site_id or "").strip()
+    if getattr(args, "production", False):
+        if not prod_site_id:
+            return (
+                "--production requires WIX_PROD_SITE_ID in .env "
+                "(the declared production site id)"
+            )
+        config.wix_site_id = prod_site_id
+        logger.warning(
+            "🚨 PRODUCTION RUN — targeting the production Wix site (%s…)",
+            prod_site_id[:8],
+        )
+        return None
+    if prod_site_id and (config.wix_site_id or "").strip() == prod_site_id:
+        return (
+            "WIX_SITE_ID points at the declared production site "
+            "(WIX_PROD_SITE_ID). Refusing to run without --production. "
+            "Point WIX_SITE_ID back at the dev site, or re-run with "
+            "--production if you really mean production."
+        )
+    return None
+
+
 def _ensure_command_config(command: str, config) -> None:
     """Validate only the settings required for a given command."""
     if command == "setup-notion":
@@ -57,18 +107,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set log verbosity (default: INFO). Accepted before or after the subcommand.",
     )
 
+    # Second shared parent for commands that talk to Wix. --production is
+    # human-only: it retargets the run onto WIX_PROD_SITE_ID and is the only
+    # way to touch the production site (see _enforce_site_guard).
+    wix_common = argparse.ArgumentParser(add_help=False)
+    wix_common.add_argument(
+        "--production",
+        action="store_true",
+        help=(
+            "Target the production Wix site (WIX_PROD_SITE_ID) instead of "
+            "WIX_SITE_ID. Human-only — never passed by automation or agents."
+        ),
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser(
         "validate",
-        parents=[common],
+        parents=[common, wix_common],
         help="Validate credentials and configuration",
     )
     subparsers.add_parser(
-        "test", parents=[common], help="Test Wix API connectivity"
+        "test", parents=[common, wix_common], help="Test Wix API connectivity"
     )
     subparsers.add_parser(
-        "list", parents=[common], help="List existing events in Wix"
+        "list", parents=[common, wix_common], help="List existing events in Wix"
     )
 
     subparsers.add_parser(
@@ -107,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     pull_parser = subparsers.add_parser(
         "pull",
-        parents=[common],
+        parents=[common, wix_common],
         help="Pull Wix events into the Notion Event Scheduling DB (backfill/refresh)",
     )
     pull_parser.add_argument(
@@ -132,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_parser = subparsers.add_parser(
         "sync",
-        parents=[common],
+        parents=[common, wix_common],
         help=(
             "Sync Notion with Wix: push Ready/Update rows, refresh Published "
             "rows from Wix (runs an enrich pass first)"
@@ -168,13 +231,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser(
         "pull-site-config",
-        parents=[common],
+        parents=[common, wix_common],
         help="Pull eCommerce tax-by-location settings into the Notion Site Config DB",
     )
 
     push_site_parser = subparsers.add_parser(
         "push-site-config",
-        parents=[common],
+        parents=[common, wix_common],
         help="Push Site Config tax-location edits (rates) from Notion back to Wix",
     )
     push_site_parser.add_argument(
@@ -291,6 +354,14 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             except ConfigError as exc:
                 logger.error("Configuration error: %s", exc)
                 return 1
+
+        # Production-site guard: runs before any handler (including
+        # `validate`) so no Wix call can ever hit production without the
+        # explicit, human-only --production flag.
+        guard_error = _enforce_site_guard(args.command, args, config)
+        if guard_error:
+            logger.error("%s", guard_error)
+            return 1
 
         return 0 if handler(args, config, runtime) else 1
     except KeyboardInterrupt:
