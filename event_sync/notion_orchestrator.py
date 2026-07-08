@@ -611,6 +611,18 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                     logger.info("   ⏭️  Skipped (row status is %s)", row_status)
                     continue
 
+                # Refreshing a code-owned row: don't let an imageless Wix
+                # event wipe a human-entered image link.
+                if record is not None:
+                    preserved = _preserved_image_url(existing, record.image_url or "")
+                    if preserved and not record.image_url:
+                        record.image_url = preserved
+                        record.synced_hash = record.content_hash()
+                else:
+                    config_row["image_url"] = _preserved_image_url(
+                        existing, (config_row.get("image_url") or "").strip()
+                    )
+
                 if record is not None:
                     store.upsert_event_from_record(
                         record,
@@ -1085,6 +1097,26 @@ def enrich_events(
 # ---------------------------------------------------------------------------
 
 
+def _preserved_image_url(
+    existing_row: Optional[Dict[str, Any]], wix_image_url: str
+) -> str:
+    """Keep a human-entered Image URL when the Wix event has none.
+
+    A transient upload failure leaves the Wix event imageless; blindly
+    refreshing the Notion row from it would wipe the human-entered Drive
+    link permanently. Wixstatic URLs are code-written, so an image removed
+    on the website stays removed.
+    """
+    from .images import is_wix_media_url
+
+    if wix_image_url:
+        return wix_image_url
+    current = ((existing_row or {}).get("image_url") or "").strip()
+    if current and not is_wix_media_url(current):
+        return current
+    return ""
+
+
 def _converge_hosted_image(
     store: NotionStore,
     runtime: SyncRuntime,
@@ -1374,6 +1406,9 @@ def notion_sync_events(
                 config_row = _wix_event_to_config_row(
                     wix_event, ticket_defs, tz_name=runtime.config.timezone
                 )
+                config_row["image_url"] = _preserved_image_url(
+                    row, (config_row.get("image_url") or "").strip()
+                )
 
                 wix_record: Optional[EventRecord] = None
                 invalid_note = ""
@@ -1646,12 +1681,23 @@ def notion_sync_events(
             if new_id:
                 results["created"].append(name)
                 _converge_hosted_image(store, runtime, record, page_id)
+                failed_image = getattr(runtime, "last_image_failure", None)
+                if draft:
+                    note = "Created as Wix draft — run sync without --draft to publish"
+                elif failed_image:
+                    note = (
+                        "Created without image — upload failed for "
+                        f"{failed_image}. Fix the link and set Status to "
+                        "Update to retry."
+                    )
+                else:
+                    note = None
                 store.write_sync_result(
                     page_id,
                     status=STATUS_READY if draft else STATUS_PUBLISHED,
                     wix_event_id=new_id,
                     synced_hash=record.content_hash(),
-                    error="Created as Wix draft — run sync without --draft to publish" if draft else None,
+                    error=note,
                 )
             else:
                 results["failed"].append(name)

@@ -684,3 +684,90 @@ def test_validation_record_round_trip_matches_row():
     record = row_to_event_record(make_row("Ready"))
     assert record.name == "Rope Lab"
     assert record.registration_type == "TICKETING"
+
+
+# ---------------------------------------------------------------------------
+# Image preservation (the silent-image-loss fix)
+# ---------------------------------------------------------------------------
+
+DRIVE_URL = "https://drive.google.com/file/d/abc123/view"
+WIXSTATIC_URL = "https://static.wixstatic.com/media/xyz.jpg"
+
+
+def test_published_refresh_preserves_drive_image_when_wix_has_none(monkeypatch):
+    row = make_row("Published", image_url=DRIVE_URL, short_description="stale")
+    store = StoreStub([row])
+    patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
+    patch_config_row(monkeypatch, make_wix_config_row(image_url=""))
+
+    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert len(store.upserts) == 1
+    record, _, _, _ = store.upserts[0]
+    assert record.image_url == DRIVE_URL
+    assert record.synced_hash == record.content_hash()
+
+
+def test_published_refresh_skips_when_only_difference_was_missing_wix_image(monkeypatch):
+    # With preservation, a row identical to Wix except for its Drive image
+    # hash-matches and is skipped instead of being rewritten imageless.
+    row = make_row("Published", image_url=DRIVE_URL)
+    config_row = make_wix_config_row(image_url="")
+    preserved = dict(config_row, image_url=DRIVE_URL)
+    from event_sync.notion_store import row_to_event_record as to_record
+    row["synced_hash"] = to_record(preserved).content_hash()
+    store = StoreStub([row])
+    patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
+    patch_config_row(monkeypatch, config_row)
+
+    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert store.upserts == []
+
+
+def test_published_refresh_respects_deliberate_wix_image_removal(monkeypatch):
+    # A wixstatic row URL is code-written; if the image is gone from Wix,
+    # the refresh clears it rather than resurrecting it.
+    row = make_row("Published", image_url=WIXSTATIC_URL, short_description="stale")
+    store = StoreStub([row])
+    patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
+    patch_config_row(monkeypatch, make_wix_config_row(image_url=""))
+
+    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    record, _, _, _ = store.upserts[0]
+    assert record.image_url is None
+
+
+def test_pull_refresh_preserves_drive_image(monkeypatch):
+    existing = make_row(
+        "Published", event_name="Rope Lab", wix_event_id="w1", image_url=DRIVE_URL
+    )
+    store = StoreStub([existing])
+    monkeypatch.setattr(
+        generator,
+        "_wix_event_to_config_row",
+        lambda event, ticket_defs, tz_name=TZ: make_wix_config_row(
+            event_name=event["title"], image_url="", short_description="new"
+        ),
+    )
+
+    assert pull_events(make_pull_runtime(store, [wix_event("w1", "Rope Lab")])) is True
+    record, _, _, page_id = store.upserts[0]
+    assert page_id == "page-1"
+    assert record.image_url == DRIVE_URL
+
+
+def test_create_with_failed_image_upload_gets_sync_error_note(monkeypatch):
+    store = StoreStub([make_row("Ready", wix_event_id="", image_url=DRIVE_URL)])
+    patch_index(monkeypatch)
+
+    def fake_create(record, *, runtime, **kwargs):
+        runtime.last_image_failure = record.image_url
+        return "new-wix-id"
+
+    monkeypatch.setattr(notion_orchestrator, "create_wix_event", fake_create)
+
+    runtime = make_runtime(store)
+    assert notion_sync_events(runtime, run_enrich=False) is True
+    _, kwargs = store.sync_results[0]
+    assert kwargs["status"] == "Published"
+    assert "upload failed" in kwargs["error"]
+    assert DRIVE_URL in kwargs["error"]

@@ -749,6 +749,7 @@ def create_wix_event(
     draft: bool = False,
 ) -> Optional[str]:
     """Create a Wix event. Returns the new event id on success, None on failure."""
+    runtime.last_image_failure = None
     file_descriptor = None
     if event.image_url:
         file_descriptor = upload_image_to_wix(event.image_url, event.name, runtime)
@@ -756,6 +757,7 @@ def create_wix_event(
             logger.info("   ✅ Image uploaded successfully")
         else:
             logger.warning("   ⚠️  Proceeding without image")
+            runtime.last_image_failure = event.image_url
 
     event_data = _build_wix_event_payload(
         event,

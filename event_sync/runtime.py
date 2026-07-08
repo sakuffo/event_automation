@@ -31,6 +31,9 @@ class SyncRuntime:
         self._credentials_info: Optional[Dict[str, Any]] = None
         self._drive_download_cache: Dict[str, CacheEntry] = {}
         self._wix_upload_cache: Dict[str, Dict[str, Any]] = {}
+        # Set by create_wix_event when an image upload fails (the event is
+        # still created); sync surfaces it as a Sync Error note on the row.
+        self.last_image_failure: Optional[str] = None
         self.cache_stats = {
             "drive_hits": 0,
             "drive_misses": 0,
