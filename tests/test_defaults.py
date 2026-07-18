@@ -27,7 +27,6 @@ def bare_row(**overrides) -> Dict[str, Any]:
         "end_time": "21:00",
         "location": "",
         "registration_type": "",
-        "capacity": "",
         "ticket_price": "",
         "image_url": "",
         "short_description": "",
@@ -62,7 +61,6 @@ def sample_class(**overrides) -> Dict[str, Any]:
         "description": "Class body text",
         "image_url": "https://drive.google.com/file/d/abc/view",
         "price_override": None,
-        "default_capacity": None,
         "default_ticket_names": "",
         "default_ticket_prices": "",
         "default_ticket_capacities": "",
@@ -78,7 +76,8 @@ class TestApplyRowDefaults:
 
         assert row["location"]  # constants default
         assert row["registration_type"] == "TICKETS"
-        assert row["capacity"] == "24"
+        # Guaranteed per-ticket capacity: single value covers every ticket.
+        assert row["ticket_capacity"] == "24"
         assert row["ticket_price"] == "30"  # global default price
         assert row["tax_name"] == "HST"
         assert row["tax_rate"] == "13"
@@ -91,6 +90,11 @@ class TestApplyRowDefaults:
         assert props[EventProps.TICKET_PRICE]["number"] == 30.0
         assert EventProps.FEE_TYPE in props
         assert props[EventProps.TICKET_LIMIT_PER_ORDER]["number"] == 4
+        assert (
+            props[EventProps.TICKET_CAPACITIES]["rich_text"][0]["text"]["content"]
+            == "24"
+        )
+        assert "ticket capacities" in changes
 
     def test_settings_values_win_over_constants(self):
         settings = {
@@ -104,7 +108,7 @@ class TestApplyRowDefaults:
         _apply_row_defaults(row, None, settings)
 
         assert row["location"] == "123 New Studio Ave"
-        assert row["capacity"] == "18"
+        assert row["ticket_capacity"] == "18"
         assert row["tax_rate"] == "15"
         assert row["fee_type"] == "NO_FEE"
         assert row["ticket_limit_per_order"] == "6"
@@ -113,16 +117,16 @@ class TestApplyRowDefaults:
         row = bare_row(
             location="Custom Venue",
             registration_type="RSVP",
-            capacity="10",
+            ticket_capacity="10",
         )
         props, changes = _apply_row_defaults(row, None, {})
 
         assert row["location"] == "Custom Venue"
         assert row["registration_type"] == "RSVP"
-        assert row["capacity"] == "10"
+        assert row["ticket_capacity"] == "10"
         assert EventProps.LOCATION not in props
         assert EventProps.REGISTRATION_TYPE not in props
-        assert EventProps.CAPACITY not in props
+        assert EventProps.TICKET_CAPACITIES not in props
 
     def test_no_tax_or_fee_for_rsvp_rows(self):
         row = bare_row(registration_type="RSVP")
@@ -335,16 +339,32 @@ class TestTemplateTicketDefaults:
         assert row["ticket_capacity"] == "20; 4"
 
     def test_price_list_without_names_is_not_applied(self):
-        # Prices/capacities are keyed by names — without names they would
-        # produce no tickets, so the normal pricing chain runs instead.
+        # Prices are keyed by names — without names they would produce no
+        # tickets, so the normal pricing chain runs instead. Capacities
+        # stand alone (they also cap the single-ticket path), so the
+        # template's list still lands.
         row = bare_row()
         klass = self._klass(default_ticket_names="")
         _apply_row_defaults(row, klass, {})
 
         assert row["ticket_name"] == ""
-        assert row["ticket_capacity"] == ""
+        assert row["ticket_capacity"] == "20; 4"
         # "The Body in Flight" category price from the template's tags.
         assert row["ticket_price"] == "40"
+
+    def test_template_capacities_beat_the_settings_default(self):
+        row = bare_row()
+        klass = sample_class(default_ticket_capacities="60")
+        _apply_row_defaults(row, klass, {"default_capacity": "18"})
+        assert row["ticket_capacity"] == "60"
+
+    def test_non_positive_capacity_setting_falls_back_to_constant(self):
+        # A "0"/"-5" typo in Settings must not spread unlimited inventory
+        # onto every enriched row (the old Capacity validator caught this).
+        for bad in ("0", "-5"):
+            row = bare_row()
+            _apply_row_defaults(row, None, {"default_capacity": bad})
+            assert row["ticket_capacity"] == "24"
 
     def test_rsvp_row_gets_no_ticket_trio(self):
         row = bare_row(registration_type="RSVP")
@@ -597,6 +617,19 @@ class TestEnrichNameFill:
         # written state.
         assert row["status"] == "Draft"
         assert props[EventProps.STATUS] == {"select": {"name": "Draft"}}
+
+    def test_enrich_guarantees_ticket_capacities_end_to_end(self):
+        # Not just the fill helper: a bare Idea row run through enrich_events
+        # comes out with the guaranteed Ticket Capacities write.
+        row = bare_row(status="Idea", template_relation_ids=["tpl-1"])
+        updates = self._run_enrich([row], self._catalog())
+
+        props = updates["page-1"]
+        assert row["ticket_capacity"] == "24"
+        assert (
+            props[EventProps.TICKET_CAPACITIES]["rich_text"][0]["text"]["content"]
+            == "24"
+        )
 
     def test_blank_status_on_incomplete_row_stays_idea(self):
         row = bare_row(

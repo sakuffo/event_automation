@@ -50,7 +50,6 @@ def make_record(**overrides) -> EventRecord:
         end_time="22:00",
         location="Studio",
         ticket_price=35.0,
-        capacity=24,
         registration_type="TICKETS",
     )
     payload.update(overrides)
@@ -321,7 +320,6 @@ def make_notion_row(**overrides) -> Dict[str, Any]:
         "end_time": "22:00",
         "location": "Studio",
         "registration_type": "TICKETS",
-        "capacity": "24",
         "ticket_price": "35",
         "image_url": "",
         "short_description": "",

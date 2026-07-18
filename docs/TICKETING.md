@@ -206,7 +206,8 @@ When sync pushes a Ready/Update row from the Event Scheduling DB:
 
 1. **Event Created** → TICKETING event with `initialType: "TICKETING"`
 2. **Tickets Auto-Created** → named tickets from `Ticket Names/Prices/Capacities`
-   when set, otherwise a single "Single Ticket" from `Ticket Price`/`Capacity`
+   when set, otherwise a single "Single Ticket" from `Ticket Price` with the
+   first `Ticket Capacities` value as its inventory
 3. **Tickets On Sale** → immediately available for purchase
 
 ### Ticket Creation Controls
@@ -225,8 +226,15 @@ In practice a ticketed row can no longer reach sync with a blank price: the
 enrich pass guarantees one via the fill hierarchy — template
 `Default Ticket Names/Prices/Capacities` → template `Price Override` →
 `CATEGORY_PRICING` by tag → the `default_ticket_price` Setting (seeded 30).
-Blank ticket-entry capacities inherit the row `Capacity` (template
-`Default Capacity` → `default_capacity` Setting).
+`Ticket Capacities` is the only inventory column (there is no event-level
+`Capacity`). Enrich guarantees ticketed rows a value — template
+`Default Ticket Capacities`, else the `default_capacity` Setting — a single
+value covers every ticket type (missing tail entries inherit the last one),
+and entries must be positive numbers (decimals round to whole tickets;
+blank/zero/negative/unparseable entries fall back to the `default_capacity`
+Setting; unlimited tickets are dashboard-only). On the Update path,
+capacities are managed per entry: a blank or invalid entry — like a fully
+blank column — leaves that live ticket's dashboard-set inventory alone.
 
 If ticket creation fails anyway (API error), the event still publishes but
 the row gets a **Sync Error** note ("Published but ticket creation failed —
@@ -243,8 +251,8 @@ Status to `Update` to retry.
 
 #### Mixed Rows Example
 
-| Title | Price | Capacity | Registration | Auto tickets? |
-|-------|-------|----------|--------------|----------------|
+| Title | Price | Ticket Capacities | Registration | Auto tickets? |
+|-------|-------|-------------------|--------------|----------------|
 | Workshop A | `25.00` | `50` | `TICKETS` | ✅ Yes |
 | Community Jam | `0` | `50` | `TICKETS` | ✅ Yes — free ticket |
 | Wix-pulled row | *(blank)* | `50` | `TICKETS` | ❌ No (no price at all) |
@@ -360,8 +368,7 @@ column in the Event Scheduling DB (enrich fills blanks from the
 `default_ticket_limit_per_order` setting, seeded at 4). It is sent inside
 `registration.tickets` at event-creation time and patched via update-event
 when an `Update` row changes it. A ticket definition's `initialLimit`
-(the `Capacity` / `Ticket Capacities` columns) is total inventory, not a
-per-order limit.
+(the `Ticket Capacities` column) is total inventory, not a per-order limit.
 
 ### Checkout Form: One Form Per Ticket or Per Order
 

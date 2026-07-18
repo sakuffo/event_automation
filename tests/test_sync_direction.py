@@ -27,7 +27,6 @@ def make_row(status: str, **overrides) -> Dict[str, Any]:
         "end_time": "22:00",
         "location": "Studio",
         "registration_type": "TICKETS",
-        "capacity": "24",
         "ticket_price": "35",
         "image_url": "",
         "short_description": "",

@@ -39,7 +39,6 @@ class EventRecord(BaseModel):
     end_time: str
     location: str = Field(..., min_length=1)
     ticket_price: float = 0.0
-    capacity: int = 24
     # Max tickets a buyer can purchase in one checkout — the Wix event-level
     # `registration.tickets.ticketLimitPerOrder` (Wix defaults it to 20 when
     # unset). The per-ticket-definition `limitPerCheckout` is read-only in the
@@ -134,14 +133,6 @@ class EventRecord(BaseModel):
     def ensure_non_negative_price(cls, value: float) -> float:
         return max(0.0, float(value))
 
-    @field_validator("capacity")
-    @classmethod
-    def ensure_capacity_positive(cls, value: int) -> int:
-        value_int = int(value)
-        if value_int <= 0:
-            raise ValueError("capacity must be greater than zero")
-        return value_int
-
     @field_validator("ticket_limit_per_order", mode="before")
     @classmethod
     def normalize_ticket_limit(cls, value):
@@ -214,7 +205,6 @@ class EventRecord(BaseModel):
         "end_time",
         "location",
         "ticket_price",
-        "capacity",
         "ticket_limit_per_order",
         "checkout_form",
         "registration_type",
@@ -254,6 +244,9 @@ class EventRecord(BaseModel):
 
         ``None`` and ``""`` collapse together, floats drop trailing zeros
         (``35.00`` == ``35``), and semicolon lists normalize token spacing.
+        Empty tokens are kept positionally — an empty capacity slot is
+        meaningful (the read-back of an unlimited live ticket), so
+        ``20; ; 4`` must not hash like ``20; 4``.
         """
         if value is None:
             return ""
@@ -264,7 +257,9 @@ class EventRecord(BaseModel):
             return ""
         if field in cls._SEMICOLON_FIELDS or field == "tax_rate":
             tokens = [cls._canonical_token(t) for t in text.split(";")]
-            return "; ".join(t for t in tokens if t)
+            if not any(tokens):
+                return ""
+            return "; ".join(tokens)
         return text
 
     def content_hash(self) -> str:
@@ -307,8 +302,13 @@ def parse_tickets(
 ) -> List[TicketSpec]:
     """Build ticket specs from separate name/price/capacity fields.
 
-    Each field can hold multiple values separated by ``;`` for multi-ticket events.
-    ``ticket_price`` can be a float, int, or semicolon-separated string.
+    Each field can hold multiple values separated by ``;`` for multi-ticket
+    events. ``ticket_price`` can be a float, int, or semicolon-separated
+    string. Missing tail entries inherit the last provided value (like
+    prices), so a single capacity applies to every ticket type. Capacities
+    must be positive integers — blank, zero, negative, or unparseable
+    entries fall back to ``default_capacity`` (unlimited tickets are a
+    Wix-dashboard-only concept; the update plan never touches them).
     """
     if not ticket_name or ticket_price is None:
         return []
@@ -326,28 +326,89 @@ def parse_tickets(
         except ValueError:
             prices.append(0.0)
 
-    # Parse capacities
-    cap_parts = [c.strip() for c in (ticket_capacity or "").split(";")] if ticket_capacity else []
-    capacities: List[int] = []
-    for c in cap_parts:
-        try:
-            capacities.append(int(c)) if c else capacities.append(default_capacity)
-        except ValueError:
-            capacities.append(default_capacity)
+    capacities = _parse_capacity_values(ticket_capacity, default_capacity)
 
     specs: List[TicketSpec] = []
     for i, name in enumerate(names):
         price = prices[i] if i < len(prices) else prices[-1] if prices else 0.0
-        capacity = capacities[i] if i < len(capacities) else default_capacity
+        capacity = (
+            capacities[i] if i < len(capacities)
+            else capacities[-1] if capacities
+            else default_capacity
+        )
         specs.append(TicketSpec(name=name, price=price, capacity=capacity))
 
     return specs
+
+
+def _parse_capacity_values(
+    ticket_capacity: Optional[str], default_capacity: int
+) -> List[int]:
+    """Parse a semicolon capacity list into positive ints.
+
+    Blank, zero, negative, or unparseable entries get the default — a
+    non-positive inventory can't be expressed (Wix would read it as an
+    unlimited ticket, which this pipeline treats as dashboard-only).
+    """
+    if not ticket_capacity or not str(ticket_capacity).strip():
+        return []
+    capacities: List[int] = []
+    for c in str(ticket_capacity).split(";"):
+        try:
+            # Numeric entries round to whole tickets ("50.0" is not a typo —
+            # the price column and the hash canonicalizer accept floats too).
+            value = int(round(float(c.strip())))
+        except ValueError:
+            value = default_capacity
+        capacities.append(value if value > 0 else default_capacity)
+    return capacities
+
+
+def managed_ticket_capacities(
+    ticket_capacity: Optional[str], count: int
+) -> List[Optional[int]]:
+    """Per-entry desired inventory for the Update diff; None = not managed.
+
+    An entry is managed only when its token (or, past the end of the list,
+    the last token — the single-value-covers-all rule) is an explicit
+    positive int. Blank or invalid tokens mean "leave that live ticket
+    alone" — the per-entry form of the blank-column convention, so a typo
+    or a deliberately blanked slot never drags live inventory to the
+    parser's fallback default.
+    """
+    text = str(ticket_capacity or "")
+    if not text.strip():
+        return [None] * count
+
+    def parse(token: str) -> Optional[int]:
+        try:
+            value = int(round(float(token.strip())))
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    values = [parse(t) for t in text.split(";")]
+    return [values[i] if i < len(values) else values[-1] for i in range(count)]
+
+
+def single_ticket_capacity(
+    ticket_capacity: Optional[str], default_capacity: int = 24
+) -> int:
+    """Inventory for the single-ticket path: the first Ticket Capacities value.
+
+    Blank, non-positive, or unparseable input falls back to
+    ``default_capacity``, like the multi-ticket entries.
+    """
+    values = _parse_capacity_values(ticket_capacity, default_capacity)
+    return values[0] if values else default_capacity
 
 
 __all__ = [
     "EventRecord",
     "TicketSpec",
     "parse_tickets",
+    "managed_ticket_capacities",
+    "single_ticket_capacity",
     "ValidationError",
     "CHECKOUT_FORM_PER_TICKET",
     "CHECKOUT_FORM_PER_ORDER",

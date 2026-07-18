@@ -35,7 +35,6 @@ def make_row(status: str, **overrides) -> Dict[str, Any]:
         "end_time": "22:00",
         "location": "Studio",
         "registration_type": "TICKETS",
-        "capacity": "24",
         "ticket_price": "35",
         "image_url": "",
         "short_description": "",
@@ -170,6 +169,7 @@ def make_runtime(store: StoreStub, client: Optional[ClientStub] = None) -> Simpl
         get_notion_store=lambda: store,
         get_wix_client=lambda: client or ClientStub(),
         get_ticket_policy_text=lambda: "",
+        get_default_ticket_capacity=lambda: 24,
     )
 
 
@@ -231,6 +231,35 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
     assert kwargs["error"] is None
 
 
+def test_ready_row_safety_net_writes_ticket_capacity_back(monkeypatch):
+    # A row flipped straight to Ready without an enrich pass still gets the
+    # guaranteed Ticket Capacities fill, written back so Notion shows
+    # exactly what was pushed.
+    store = StoreStub([make_row("Ready", ticket_capacity="")])
+    client = ClientStub()
+    patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "DRAFT"}})
+    captured: List[str] = []
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "ensure_event_tickets",
+        lambda c, wix_id, record, **kw: captured.append(
+            record.ticket_capacity
+        ) or True,
+    )
+
+    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert captured == ["24"]
+    fills = [
+        props for _, props in store.field_updates
+        if EventProps.TICKET_CAPACITIES in props
+    ]
+    assert fills, "safety net should write the capacity fill back to Notion"
+    assert (
+        fills[0][EventProps.TICKET_CAPACITIES]["rich_text"][0]["text"]["content"]
+        == "24"
+    )
+
+
 def test_ready_row_with_named_tickets_passes_specs_through(monkeypatch):
     store = StoreStub(
         [make_row("Ready", ticket_name="GA; VIP", ticket_price="25; 50")]
@@ -255,11 +284,11 @@ def test_ensure_event_tickets_branches_on_named_specs(monkeypatch):
     calls: List[str] = []
     monkeypatch.setattr(
         wix_flows, "create_tickets_from_config",
-        lambda c, eid, rec, existing_defs=None, policy_text=None: calls.append("config") or True,
+        lambda c, eid, rec, **kw: calls.append("config") or True,
     )
     monkeypatch.setattr(
         wix_flows, "ensure_ticket_definition",
-        lambda c, eid, rec, existing_defs=None, policy_text=None: calls.append("single") or True,
+        lambda c, eid, rec, **kw: calls.append("single") or True,
     )
 
     named = row_to_event_record(make_row("Ready", ticket_name="GA", ticket_price="25"))
@@ -738,10 +767,11 @@ def test_enrich_writes_error_note_and_keeps_idea_status():
 
 def test_enrich_skips_noop_draft_rows_entirely():
     # A complete Draft row with nothing to fill and no stale error costs
-    # zero Notion writes.
+    # zero Notion writes. (Complete now includes Ticket Capacities — the
+    # enrich pass guarantees ticketed rows a value.)
     store = StoreStub([
         make_row("Draft", fee_type="FEE_ADDED_AT_CHECKOUT",
-                 ticket_limit_per_order="4"),
+                 ticket_limit_per_order="4", ticket_capacity="24"),
     ])
     assert enrich_events(make_enrich_runtime(store)) is True
     assert store.field_updates == []
@@ -765,7 +795,7 @@ def test_enrich_skips_rewrite_of_unchanged_error_note():
     store = StoreStub([
         make_row("Draft", start_date="", start_time="",
                  fee_type="FEE_ADDED_AT_CHECKOUT",
-                 ticket_limit_per_order="4"),
+                 ticket_limit_per_order="4", ticket_capacity="24"),
     ])
     assert enrich_events(make_enrich_runtime(store)) is True
     assert len(store.field_updates) == 1
@@ -775,7 +805,8 @@ def test_enrich_skips_rewrite_of_unchanged_error_note():
     # Second pass with the note already stored on the row: no write.
     row = make_row("Draft", start_date="", start_time="",
                    fee_type="FEE_ADDED_AT_CHECKOUT",
-                   ticket_limit_per_order="4", sync_error=note)
+                   ticket_limit_per_order="4", ticket_capacity="24",
+                   sync_error=note)
     store2 = StoreStub([row])
     assert enrich_events(make_enrich_runtime(store2)) is True
     assert store2.field_updates == []

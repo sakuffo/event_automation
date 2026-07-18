@@ -24,7 +24,6 @@ except ImportError:  # pragma: no cover
 from notion_client import Client
 
 from .config import AppConfig, ConfigError
-from .constants import DEFAULT_CAPACITY
 from .logging_utils import get_logger
 from .models import EventRecord, ValidationError
 
@@ -122,7 +121,6 @@ class EventProps:
     CATEGORIES = "Categories"
     LOCATION = "Location"
     REGISTRATION_TYPE = "Registration Type"
-    CAPACITY = "Capacity"
     TICKET_PRICE = "Ticket Price"
     TICKET_NAMES = "Ticket Names"
     TICKET_PRICES = "Ticket Prices"
@@ -165,7 +163,6 @@ class TemplateProps:
     DESCRIPTION = "Description"
     IMAGE_URL = "Image URL"
     PRICE_OVERRIDE = "Price Override"
-    DEFAULT_CAPACITY = "Default Capacity"
     DEFAULT_START_TIME = "Default Start Time"
     DEFAULT_END_TIME = "Default End Time"
     DEFAULT_INSTRUCTOR = "Default Instructor"
@@ -215,7 +212,6 @@ def _events_db_properties(catalog_data_source_id: Optional[str]) -> Dict[str, An
                 "options": [{"name": name} for name in REGISTRATION_TYPE_OPTIONS]
             }
         },
-        EventProps.CAPACITY: {"number": {"format": "number"}},
         EventProps.TICKET_PRICE: {"number": {"format": "canadian_dollar"}},
         EventProps.TICKET_NAMES: {"rich_text": {}},
         EventProps.TICKET_PRICES: {"rich_text": {}},
@@ -274,7 +270,6 @@ def _catalog_db_properties() -> Dict[str, Any]:
         TemplateProps.DESCRIPTION: {"rich_text": {}},
         TemplateProps.IMAGE_URL: {"url": {}},
         TemplateProps.PRICE_OVERRIDE: {"number": {"format": "canadian_dollar"}},
-        TemplateProps.DEFAULT_CAPACITY: {"number": {"format": "number"}},
         # Default schedule/staffing for rows created from this template:
         # times are HH:MM strings applied when the row's Date lacks a time.
         TemplateProps.DEFAULT_START_TIME: {"rich_text": {}},
@@ -565,11 +560,6 @@ def event_property_for_field(
         return EventProps.CATEGORIES, p_multi_select(
             [c.strip() for c in (row.get("categories") or "").split(";") if c.strip()]
         )
-    if field == "capacity":
-        number = _float_or_none(row.get("capacity"))
-        if number is not None and number == int(number):
-            number = int(number)
-        return EventProps.CAPACITY, p_number(number)
     if field == "ticket_limit_per_order":
         number = _float_or_none(row.get("ticket_limit_per_order"))
         if number is not None and number == int(number):
@@ -629,7 +619,6 @@ def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, str]:
         "end_time": end_time,
         "location": v_plain_text(page, EventProps.LOCATION).strip(),
         "registration_type": v_select(page, EventProps.REGISTRATION_TYPE),
-        "capacity": _format_number(v_number(page, EventProps.CAPACITY)),
         "ticket_limit_per_order": _format_number(
             v_number(page, EventProps.TICKET_LIMIT_PER_ORDER)
         ),
@@ -671,11 +660,6 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
     price_number, multi_price = split_price(raw_price)
     ticket_price = 0.0 if multi_price else (price_number or 0.0)
 
-    capacity_number = _float_or_none(row.get("capacity"))
-    capacity = (
-        int(capacity_number) if capacity_number is not None else DEFAULT_CAPACITY
-    )
-
     reg_type = (row.get("registration_type") or "").strip() or "TICKETING"
 
     return EventRecord(
@@ -688,7 +672,6 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
         end_time=row.get("end_time") or row.get("start_time") or "",
         location=row.get("location") or "",
         ticket_price=ticket_price,
-        capacity=capacity,
         ticket_limit_per_order=row.get("ticket_limit_per_order") or None,
         checkout_form=row.get("checkout_form") or None,
         registration_type=reg_type,
@@ -718,7 +701,6 @@ def _event_content_props(
     categories: str,
     location: str,
     reg_select: str,
-    capacity: Optional[int],
     price_number: Optional[float],
     multi_price_text: str,
     ticket_name: Optional[str],
@@ -738,10 +720,7 @@ def _event_content_props(
     """The single owner of the Events content-property shape.
 
     Both builders (validated record and raw row) feed their normalized values
-    through here, so adding a property is a one-place change. ``capacity=None``
-    omits the property entirely — a raw row's blank capacity must not
-    fabricate a number (``row_to_event_record`` substitutes the default at
-    read time instead).
+    through here, so adding a property is a one-place change.
     """
     props: Dict[str, Any] = {
         EventProps.NAME: p_title(name),
@@ -767,8 +746,6 @@ def _event_content_props(
         EventProps.DESCRIPTION: p_rich_text(description),
         EventProps.IMAGE_URL: p_url(image_url or None),
     }
-    if capacity is not None:
-        props[EventProps.CAPACITY] = p_number(capacity)
     return props
 
 
@@ -806,7 +783,6 @@ def event_properties_from_raw_row(row: Dict[str, Any], tz_name: str) -> Dict[str
         categories=row.get("categories") or "",
         location=row.get("location") or "",
         reg_select=reg_type_to_select(row.get("registration_type")),
-        capacity=None,
         price_number=price_number,
         multi_price_text=multi_price,
         ticket_name=row.get("ticket_name") or "",
@@ -849,7 +825,6 @@ def event_properties_from_record(
         categories=record.category or "",
         location=record.location,
         reg_select=reg_type_to_select(record.registration_type or "TICKETING"),
-        capacity=record.capacity,
         price_number=price_number,
         multi_price_text=multi_price,
         ticket_name=record.ticket_name,
@@ -1432,7 +1407,6 @@ class NotionStore:
                 "description": v_plain_text(page, TemplateProps.DESCRIPTION),
                 "image_url": v_url(page, TemplateProps.IMAGE_URL),
                 "price_override": v_number(page, TemplateProps.PRICE_OVERRIDE),
-                "default_capacity": v_number(page, TemplateProps.DEFAULT_CAPACITY),
                 "default_start_time": v_plain_text(
                     page, TemplateProps.DEFAULT_START_TIME
                 ).strip(),
@@ -1465,7 +1439,6 @@ class NotionStore:
         image_url: str,
         template_type: Optional[str] = None,
         price_override: Optional[float] = None,
-        default_capacity: Optional[float] = None,
         default_start_time: Optional[str] = None,
         default_end_time: Optional[str] = None,
         default_instructor: Optional[str] = None,
@@ -1490,8 +1463,6 @@ class NotionStore:
             props[TemplateProps.TYPE] = p_select(template_type)
         if price_override is not None:
             props[TemplateProps.PRICE_OVERRIDE] = p_number(price_override)
-        if default_capacity is not None:
-            props[TemplateProps.DEFAULT_CAPACITY] = p_number(default_capacity)
         if default_start_time is not None:
             props[TemplateProps.DEFAULT_START_TIME] = p_rich_text(default_start_time)
         if default_end_time is not None:

@@ -56,7 +56,7 @@ python sync_events.py pull           # Backfill the Event Scheduling DB from liv
    Anyone can do this. Set up the default "New Event" template once (see
    [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#default-new-event-template-create-by-hand--the-api-cant-create-templates))
    so new rows come pre-filled with the never-changing fields (HST 13% at
-   checkout, fee at checkout, location, capacity); the pipeline also fills
+   checkout, fee at checkout, location); the pipeline also fills
    any blanks from the Settings DB automatically.
 
 ```bash
@@ -122,8 +122,9 @@ Four databases, created by `setup-notion` (details and property tables in
   (row becomes `Removed`). Sync bookkeeping (`Wix Event ID`, `Last Synced`,
   `Synced Hash`, `Sync Error`) is code-owned.
 - **Catalog** — class and recurring-event templates (`Type` = class/event;
-  categories, tagline, description, image, optional price/capacity
-  overrides). Enrichment matches by relation or name.
+  categories, tagline, description, image, optional price override and
+  default ticket names/prices/capacities). Enrichment matches by relation
+  or name.
 - **Settings** — key/value defaults (`default_img`, …).
 - **Site Config** — one row per tax location; only name/type/rate are pushed.
 

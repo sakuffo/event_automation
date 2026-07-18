@@ -103,7 +103,6 @@ def event_row(**overrides) -> Dict[str, Any]:
         "categories": "",
         "location": "somewhere",
         "registration_type": "TICKETS",
-        "capacity": "24",
         "ticket_price": "",
         "short_description": "",
         "detailed_description": "",
@@ -129,7 +128,6 @@ def template(**overrides) -> Dict[str, Any]:
         "description": "Bring a project.",
         "image_url": "https://static.wixstatic.com/media/t.png",
         "price_override": None,
-        "default_capacity": None,
     }
     tpl.update(overrides)
     return tpl

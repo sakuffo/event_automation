@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict, Optional, Tuple
 
 from .config import AppConfig, ConfigError
+from .constants import DEFAULT_CAPACITY
 from .logging_utils import get_logger
 from .wix_client import WixClient
 
@@ -40,6 +41,8 @@ class SyncRuntime:
         self.last_ticket_failure: Optional[str] = None
         # Lazily-resolved global ticket policy blurb (None = not fetched yet).
         self._ticket_policy_text: Optional[str] = None
+        # Lazily-resolved fallback ticket inventory (None = not fetched yet).
+        self._default_ticket_capacity: Optional[int] = None
         self.cache_stats = {
             "drive_hits": 0,
             "drive_misses": 0,
@@ -121,6 +124,31 @@ class SyncRuntime:
                 text = text[:MAX_TICKET_POLICY_CHARS]
             self._ticket_policy_text = text
         return self._ticket_policy_text
+
+    def get_default_ticket_capacity(self) -> int:
+        """Fallback per-ticket inventory for blank/invalid capacity entries.
+
+        Read once per run from the Settings row ``default_capacity`` (the
+        same source the enrich fill uses), so a partially blank Ticket
+        Capacities column honors the Setting at ticket-creation time too.
+        Falls back to the ``DEFAULT_CAPACITY`` constant when the setting is
+        missing, unreadable, or not a positive number.
+        """
+        if self._default_ticket_capacity is None:
+            capacity = DEFAULT_CAPACITY
+            try:
+                settings = self.get_notion_store().fetch_settings()
+                capacity = int(float(settings.get("default_capacity", "")))
+            except Exception:
+                capacity = DEFAULT_CAPACITY
+            if capacity < 1:
+                logger.warning(
+                    "⚠️  Ignoring default_capacity setting %r — must be a "
+                    "positive ticket inventory", capacity,
+                )
+                capacity = DEFAULT_CAPACITY
+            self._default_ticket_capacity = capacity
+        return self._default_ticket_capacity
 
     # -------------------------
     # Caching helpers

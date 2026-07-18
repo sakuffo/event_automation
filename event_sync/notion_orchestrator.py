@@ -86,7 +86,7 @@ _UPCOMING_STATUSES = frozenset({"UPCOMING", "STARTED"})
 # by the default-fill helper (constants remain the fallback).
 DEFAULT_SETTINGS_SEED: List[tuple] = [
     ("default_location", DEFAULT_LOCATION, "Venue used when an event row has no Location"),
-    ("default_capacity", str(DEFAULT_CAPACITY), "Capacity used when an event row has no Capacity"),
+    ("default_capacity", str(DEFAULT_CAPACITY), "Fallback ticket capacity (per ticket type) used when a ticketed row's Ticket Capacities is blank"),
     ("default_registration_type", "TICKETS", "Registration Type for new event rows (TICKETS / RSVP / EXTERNAL / NO_REGISTRATION)"),
     ("default_tax_name", DEFAULT_TAX_NAME, "Ticket tax name for TICKETS events (e.g. HST)"),
     ("default_tax_rate", DEFAULT_TAX_RATE, "Ticket tax rate as a percent (13 = 13%)"),
@@ -767,6 +767,8 @@ class _Defaults:
     tax_rate: str
     tax_type: str
     fee_type: str
+    # Fallback per-ticket-type capacity for ticketed rows whose Ticket
+    # Capacities column is blank (a single value applies to every ticket).
     capacity: int
     ticket_limit_per_order: int
     # "" = not managed (no fill); otherwise PER_TICKET / PER_ORDER.
@@ -779,6 +781,12 @@ class _Defaults:
         try:
             capacity = int(float(settings.get("default_capacity", "")))
         except (TypeError, ValueError):
+            capacity = DEFAULT_CAPACITY
+        if capacity < 1:
+            logger.warning(
+                "  ⚠️  Ignoring default_capacity %r — must be a positive "
+                "ticket inventory", settings.get("default_capacity"),
+            )
             capacity = DEFAULT_CAPACITY
         try:
             ticket_price = float(settings.get("default_ticket_price", ""))
@@ -958,57 +966,48 @@ def _fill_venue_and_registration(row: Dict[str, Any], defaults: _Defaults) -> tu
     return props, changes
 
 
-def _fill_capacity(
-    row: Dict[str, Any], klass: Optional[Dict[str, Any]], defaults: _Defaults
-) -> tuple:
-    props: Dict[str, Any] = {}
-    changes: List[str] = []
-    if not (row.get("capacity") or "").strip():
-        capacity = None
-        if klass and klass.get("default_capacity"):
-            capacity = int(klass["default_capacity"])
-        _set_field(
-            row, props, changes,
-            "capacity", str(capacity or defaults.capacity), "capacity",
-        )
-    return props, changes
-
-
 def _is_ticketed_row(row: Dict[str, Any]) -> bool:
     return (row.get("registration_type") or "").strip().upper() in {
         "TICKETS", "TICKETING",
     }
 
 
-def _fill_tickets(row: Dict[str, Any], klass: Optional[Dict[str, Any]]) -> tuple:
+def _fill_tickets(
+    row: Dict[str, Any], klass: Optional[Dict[str, Any]], defaults: _Defaults
+) -> tuple:
     """Template ticket defaults (names/prices/capacities) for ticketed rows.
 
-    Names fill first; prices and capacities only fill when the row ends up
-    with ticket names — the multi-ticket fields are a trio keyed by names,
-    and a price list without names would produce no tickets at all (single
-    prices belong in Price Override / the pricing fill instead).
+    Names fill first; prices only fill when the row ends up with ticket
+    names — a price list without names would produce no tickets at all
+    (single prices belong in Price Override / the pricing fill instead).
+    Capacities stand alone: the single-ticket path caps its inventory with
+    the first value, missing tail entries inherit the last one (a single
+    value covers every ticket type), so every ticketed row is guaranteed
+    one — template list first, else the ``default_capacity`` Setting.
     """
     props: Dict[str, Any] = {}
     changes: List[str] = []
-    if not klass or not _is_ticketed_row(row):
+    if not _is_ticketed_row(row):
         return props, changes
 
-    tpl_names = (klass.get("default_ticket_names") or "").strip()
+    tpl_names = ((klass or {}).get("default_ticket_names") or "").strip()
     if tpl_names and not (row.get("ticket_name") or "").strip():
         _set_field(row, props, changes, "ticket_name", tpl_names, "ticket names")
+
+    if not (row.get("ticket_capacity") or "").strip():
+        tpl_caps = ((klass or {}).get("default_ticket_capacities") or "").strip()
+        _set_field(
+            row, props, changes,
+            "ticket_capacity", tpl_caps or str(defaults.capacity),
+            "ticket capacities",
+        )
 
     if not (row.get("ticket_name") or "").strip():
         return props, changes
 
-    tpl_prices = (klass.get("default_ticket_prices") or "").strip()
+    tpl_prices = ((klass or {}).get("default_ticket_prices") or "").strip()
     if tpl_prices and not (row.get("ticket_price") or "").strip():
         _set_field(row, props, changes, "ticket_price", tpl_prices, "ticket prices")
-
-    tpl_caps = (klass.get("default_ticket_capacities") or "").strip()
-    if tpl_caps and not (row.get("ticket_capacity") or "").strip():
-        _set_field(
-            row, props, changes, "ticket_capacity", tpl_caps, "ticket capacities",
-        )
     return props, changes
 
 
@@ -1158,8 +1157,7 @@ def _apply_row_defaults(
         _fill_instructor(row, klass),
         _fill_categories(row, klass),
         _fill_venue_and_registration(row, defaults),
-        _fill_capacity(row, klass, defaults),
-        _fill_tickets(row, klass),
+        _fill_tickets(row, klass, defaults),
         _fill_pricing(row, klass, defaults),
         _fill_descriptions(row, klass),
         _fill_image(row, klass, defaults),
@@ -1855,6 +1853,7 @@ def _push_matched_ready_row(
             tickets_ok = bool(ensure_event_tickets(
                 ctx.client, wix_id, record,
                 policy_text=ctx.runtime.get_ticket_policy_text(),
+                default_capacity=ctx.runtime.get_default_ticket_capacity(),
             ))
         ctx.results["published"].append(name)
         _write_row_result(
@@ -1896,6 +1895,7 @@ def _push_matched_ready_row(
             ctx.client, wix_id, record,
             existing_defs=plan.get("wix_ticket_defs"),
             policy_text=ctx.runtime.get_ticket_policy_text(),
+            default_capacity=ctx.runtime.get_default_ticket_capacity(),
         ))
 
     new_status = STATUS_READY if wix_status == "DRAFT" else STATUS_PUBLISHED

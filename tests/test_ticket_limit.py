@@ -38,7 +38,6 @@ def make_record(**overrides) -> EventRecord:
         end_time="22:00",
         location="Studio",
         ticket_price=35.0,
-        capacity=24,
         registration_type="TICKETS",
         ticket_limit_per_order=4,
     )

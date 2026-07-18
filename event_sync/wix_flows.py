@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import AppConfig
 from .images import upload_image_to_wix
 from .logging_utils import get_logger
-from .models import EventRecord, parse_tickets
+from .models import (
+    EventRecord,
+    managed_ticket_capacities,
+    parse_tickets,
+    single_ticket_capacity,
+)
 from .runtime import SyncRuntime
 from .wix_mapping import (
     build_wix_event_payload,
@@ -270,12 +275,15 @@ def ensure_ticket_definition(
     event: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
     policy_text: Optional[str] = None,
+    default_capacity: int = 24,
 ) -> bool:
     """Create a ticket definition if one doesn't already exist. Returns True on success.
 
     ``existing_defs`` lets callers that already fetched the event's ticket
     definitions (e.g. via an update plan) skip the re-query. ``policy_text``
-    is the global blurb printed on every ticket (Wix ``policyText``).
+    is the global blurb printed on every ticket (Wix ``policyText``);
+    ``default_capacity`` is the Settings-resolved fallback inventory
+    (``runtime.get_default_ticket_capacity()``).
     """
     existing = (
         existing_defs if existing_defs is not None
@@ -292,7 +300,9 @@ def ensure_ticket_definition(
             event_id=event_id,
             ticket_name="Single Ticket",
             price=event.ticket_price,
-            capacity=event.capacity,
+            # First Ticket Capacities value; blank falls back to the default
+            # (enrich guarantees ticketed rows a value before they get here).
+            capacity=single_ticket_capacity(event.ticket_capacity, default_capacity),
             policy_text=policy_text,
         )
         actual = result.get("initialLimit") or result.get("actualLimit")
@@ -318,13 +328,16 @@ def create_tickets_from_config(
     event: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
     policy_text: Optional[str] = None,
+    default_capacity: int = 24,
 ) -> bool:
     """Create ticket definitions from the multi-ticket fields.
 
     Skips creation if the event already has ticket definitions to avoid
     duplicates that could confuse customers. ``existing_defs`` lets callers
     that already fetched them skip the re-query. ``policy_text`` is the
-    global blurb printed on every ticket (Wix ``policyText``).
+    global blurb printed on every ticket (Wix ``policyText``);
+    ``default_capacity`` is the Settings-resolved fallback inventory for
+    blank/invalid capacity entries.
     """
     from .constants import DEFAULT_FEE_TYPE
 
@@ -342,9 +355,7 @@ def create_tickets_from_config(
         ticket_name=event.ticket_name,
         ticket_price=event.ticket_price_raw or event.ticket_price,
         ticket_capacity=event.ticket_capacity,
-        # Entries without an explicit capacity inherit the row capacity
-        # (template Default Capacity -> default_capacity Setting).
-        default_capacity=event.capacity,
+        default_capacity=default_capacity,
     )
     if not specs:
         return True
@@ -380,6 +391,7 @@ def ensure_event_tickets(
     record: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
     policy_text: Optional[str] = None,
+    default_capacity: int = 24,
 ) -> bool:
     """Create whatever tickets the record calls for.
 
@@ -393,11 +405,13 @@ def ensure_event_tickets(
         return create_tickets_from_config(
             client, event_id, record,
             existing_defs=existing_defs, policy_text=policy_text,
+            default_capacity=default_capacity,
         )
     if record.ticket_price > 0 or has_explicit_zero_price(record):
         return ensure_ticket_definition(
             client, event_id, record,
             existing_defs=existing_defs, policy_text=policy_text,
+            default_capacity=default_capacity,
         )
     return True
 
@@ -408,6 +422,7 @@ def _repair_missing_tickets(
     event: EventRecord,
     existing_defs: Optional[List[Dict[str, Any]]] = None,
     policy_text: Optional[str] = None,
+    default_capacity: int = 24,
 ) -> None:
     """Check for missing ticket definitions and create one if needed."""
     if event.registration_type != "TICKETING":
@@ -422,7 +437,8 @@ def _repair_missing_tickets(
 
     logger.info("   🔧 No ticket definitions found — repairing...")
     ensure_ticket_definition(
-        client, event_id, event, existing_defs=[], policy_text=policy_text
+        client, event_id, event, existing_defs=[], policy_text=policy_text,
+        default_capacity=default_capacity,
     )
 
 
@@ -472,6 +488,7 @@ def create_wix_event(
             if not ensure_event_tickets(
                 client, event_id, event, existing_defs=[],
                 policy_text=runtime.get_ticket_policy_text(),
+                default_capacity=runtime.get_default_ticket_capacity(),
             ):
                 runtime.last_ticket_failure = event.name
         elif event.registration_type == "TICKETING" and not auto_create_tickets:
@@ -536,6 +553,7 @@ def update_wix_event(
                 client, existing_event_id, event,
                 existing_defs=existing_ticket_defs,
                 policy_text=runtime.get_ticket_policy_text(),
+                default_capacity=runtime.get_default_ticket_capacity(),
             )
 
         return True
@@ -624,16 +642,25 @@ def compute_event_update_plan(
         and desired_guests_assigned != wix_guests_assigned
     )
 
-    # Ticket price/capacity (with sales data for safety)
+    # Ticket price/capacity (with sales data for safety). Same parse as the
+    # create path so a row publishes and updates to identical inventory.
+    # Capacities are managed per entry: only an explicit positive value (or
+    # the single-value-covers-all tail inheritance) is diffed — blank or
+    # invalid entries, like a fully blank column, leave that live ticket's
+    # inventory alone (the ticket-limit convention) rather than dragging it
+    # to the parser's fallback default.
     wix_ticket_defs = client.get_ticket_definitions(event_id, include_sales=True)
     desired_specs = parse_tickets(
         ticket_name=event.ticket_name,
         ticket_price=event.ticket_price_raw or event.ticket_price,
         ticket_capacity=event.ticket_capacity,
     )
+    managed_caps = managed_ticket_capacities(
+        event.ticket_capacity, len(desired_specs)
+    )
     tickets_changed = False
     ticket_updates: List[Dict[str, Any]] = []
-    for spec in desired_specs:
+    for spec, desired_cap in zip(desired_specs, managed_caps):
         for td in wix_ticket_defs:
             if td.get("name") == spec.name:
                 wix_price = float(td.get("pricingMethod", {}).get("fixedPrice", {}).get("value", "0"))
@@ -641,7 +668,11 @@ def compute_event_update_plan(
                 sold = (td.get("salesDetails") or {}).get("soldCount", 0)
 
                 new_price = spec.price if wix_price != spec.price else None
-                new_capacity = spec.capacity if (wix_cap and wix_cap != spec.capacity) else None
+                new_capacity = (
+                    desired_cap
+                    if (desired_cap is not None and wix_cap and wix_cap != desired_cap)
+                    else None
+                )
 
                 if new_capacity is not None and new_capacity < sold:
                     logger.warning(

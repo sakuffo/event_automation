@@ -34,7 +34,6 @@ def build_record(**overrides) -> EventRecord:
         "end_time": "22:00",
         "location": "1233R Queen St W, Toronto",
         "ticket_price": 35.0,
-        "capacity": 24,
         "registration_type": "TICKETS",
         "image_url": "https://drive.google.com/file/d/abc123/view",
         "teaser": "A teaser",
