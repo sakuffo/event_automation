@@ -45,17 +45,17 @@ jobs:
           pip install -r requirements.txt
 
       # `sync` runs the pull and enrich passes first, so one step covers all
-      # three (pull + enrich + Published refresh). It never writes to Wix.
+      # three (pull + enrich + Published refresh). It never writes to Wix,
+      # which is why this scheduled run deliberately targets PRODUCTION with
+      # --production: it only reads the live site and mirrors it into Notion.
+      # `push` (the Wix-mutating command) is never run here.
       - name: Pull + enrich + refresh events from Wix into Notion
         env:
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}
+          # Stays on the dev site id; --production below retargets the run
+          # onto WIX_PROD_SITE_ID, which must be set in repo secrets.
           WIX_SITE_ID: ${{ secrets.WIX_SITE_ID }}
-          # Production guard: with this secret set, the run refuses to touch
-          # the production site unless the command below explicitly adds
-          # --production. To transition CI to production on purpose: set the
-          # WIX_SITE_ID secret to the prod id AND change the run line to
-          # `python sync_events.py sync --production`.
           WIX_PROD_SITE_ID: ${{ secrets.WIX_PROD_SITE_ID }}
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           NOTION_ACCESS_TOKEN: ${{ secrets.NOTION_ACCESS_TOKEN }}
@@ -66,7 +66,7 @@ jobs:
           NOTION_CLASSES_DB_ID: ${{ secrets.NOTION_CLASSES_DB_ID }}
           NOTION_SETTINGS_DB_ID: ${{ secrets.NOTION_SETTINGS_DB_ID }}
           NOTION_SITE_CONFIG_DB_ID: ${{ secrets.NOTION_SITE_CONFIG_DB_ID }}
-        run: python sync_events.py sync
+        run: python sync_events.py sync --production
 
       - name: Report status
         if: always()

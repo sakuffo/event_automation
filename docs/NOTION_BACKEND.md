@@ -263,8 +263,10 @@ safety net at `push` time for rows flipped straight to `Ready`.
 Runs are plain CLI invocations — locally or via GitHub Actions
 ([.github/workflows/sync-events.yml](../.github/workflows/sync-events.yml)):
 
-- **Cron** runs `sync` (pull pass + enrich pass + Published refresh; never
-  writes to Wix) every 30 minutes.
+- **Cron** runs `sync --production` (pull pass + enrich pass + Published
+  refresh) every 30 minutes. Targeting production is safe here because
+  `sync` never writes to Wix — it mirrors the live site into Notion.
+  Requires the `WIX_PROD_SITE_ID` repo secret.
 - **Manual**: Actions tab → "Sync Events from Wix to Notion" → Run workflow.
 - **Pushing to Wix is never scheduled** — run `python sync_events.py push`
   from a terminal when rows are ready to go live.

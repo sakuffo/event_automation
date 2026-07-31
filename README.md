@@ -146,15 +146,16 @@ Recommended views to add by hand: Calendar on Date, Board by Status, a
 ## Automation (GitHub Actions)
 
 [.github/workflows/sync-events.yml](.github/workflows/sync-events.yml) runs
-`sync` (pull pass + enrich pass + Published refresh; never writes to Wix)
-every 30 minutes, on manual dispatch, and on `repository_dispatch` (type
-`notion-sync`) so a Notion button/automation webhook can trigger an instant
-run — see [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
+`sync --production` (pull pass + enrich pass + Published refresh; never
+writes to Wix, so mirroring the production site is safe) every 30 minutes,
+on manual dispatch, and on `repository_dispatch` (type `notion-sync`) so a
+Notion button/automation webhook can trigger an instant run — see
+[docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
 Pushing to Wix is not scheduled: run `python sync_events.py push` yourself.
 
 Required repo secrets: `WIX_API_KEY`, `WIX_ACCOUNT_ID`, `WIX_SITE_ID`,
-`GOOGLE_CREDENTIALS` (Drive images), `NOTION_ACCESS_TOKEN`, and the four
-`NOTION_*_DB_ID` values.
+`WIX_PROD_SITE_ID` (the `--production` target), `GOOGLE_CREDENTIALS`
+(Drive images), `NOTION_ACCESS_TOKEN`, and the four `NOTION_*_DB_ID` values.
 
 ## Environment Variables
 
