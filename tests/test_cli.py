@@ -41,8 +41,20 @@ def test_cli_validate_fails_when_env_missing(clear_env):
 
 
 def test_cli_sync_exits_when_config_invalid(clear_env):
-    exit_code = cli.main(["--log-level", "ERROR", "sync", "--no-tickets"])
+    exit_code = cli.main(["--log-level", "ERROR", "sync", "--no-pull"])
     assert exit_code == 1
+
+
+def test_cli_push_exits_when_config_invalid(clear_env):
+    exit_code = cli.main(["--log-level", "ERROR", "push", "--no-tickets"])
+    assert exit_code == 1
+
+
+def test_cli_sync_rejects_push_only_flags(clear_env):
+    # --draft and --no-tickets moved to `push`; sync must not accept them.
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--log-level", "ERROR", "sync", "--draft"])
+    assert excinfo.value.code != 0
 
 
 def test_cli_pull_exits_when_config_invalid(clear_env):
@@ -107,6 +119,19 @@ def sync_stub(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def push_stub(monkeypatch):
+    """Replace the push handler; records the config each call received."""
+    calls = []
+
+    def stub(args, config, runtime):
+        calls.append(config)
+        return True
+
+    monkeypatch.setitem(cli.COMMANDS, "push", stub)
+    return calls
+
+
 def test_sync_refuses_prod_site_without_production_flag(
     guarded_env, sync_stub, monkeypatch
 ):
@@ -140,6 +165,24 @@ def test_dev_sync_unaffected_by_guard(guarded_env, sync_stub, monkeypatch):
     assert exit_code == 0
     assert len(sync_stub) == 1
     assert sync_stub[0].wix_site_id == DEV_SITE_ID
+
+
+def test_push_refuses_prod_site_without_production_flag(
+    guarded_env, push_stub, monkeypatch
+):
+    monkeypatch.setenv("WIX_SITE_ID", PROD_SITE_ID)
+    monkeypatch.setenv("WIX_PROD_SITE_ID", PROD_SITE_ID)
+    exit_code = cli.main(["--log-level", "CRITICAL", "push"])
+    assert exit_code == 1
+    assert push_stub == []
+
+
+def test_dev_push_unaffected_by_guard(guarded_env, push_stub, monkeypatch):
+    monkeypatch.setenv("WIX_PROD_SITE_ID", PROD_SITE_ID)
+    exit_code = cli.main(["--log-level", "CRITICAL", "push"])
+    assert exit_code == 0
+    assert len(push_stub) == 1
+    assert push_stub[0].wix_site_id == DEV_SITE_ID
 
 
 def test_notion_only_commands_have_no_production_flag(guarded_env):

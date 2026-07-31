@@ -339,7 +339,7 @@ Run this mini-regression before shipping changes to the sync pipeline:
 2. `make unit`
 3. `python sync_events.py validate --log-level DEBUG`
 4. `python sync_events.py test`
-5. `python sync_events.py sync` (against a sandbox sheet)
+5. `python sync_events.py sync` then `python sync_events.py push --dry-run` (against the dev site)
 
 ### Event Creation Coverage
 
@@ -355,7 +355,7 @@ Run this mini-regression before shipping changes to the sync pipeline:
 - Sheet ingestion maps headers → `EventRecord` validation (watch for logged skips).
 - Duplicate detection keys on `title|date|time`; verify an existing row is skipped.
 - Auto-ticket creation is enabled by default when `registration_type == "TICKETING"` and `ticket_price > 0`.
-- Run `python sync_events.py sync --no-tickets` to confirm the opt-out path still logs the skip message.
+- Run `python sync_events.py push --no-tickets` to confirm the opt-out path still logs the skip message.
 
 ### Config Round-Trip Smoke Tests
 

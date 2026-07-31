@@ -49,7 +49,8 @@ Track your progress setting up the Wix Events + Notion sync.
 ## First posting cycle
 
 - [ ] Idea row added in Notion (template + date)
-- [ ] `sync --dry-run` previews the create
-- [ ] Row flipped to Ready; `sync` publishes it with tickets + categories
+- [ ] `sync` (or `enrich`) fills the blanks and promotes it to Draft
+- [ ] Row flipped to Ready; `push --dry-run` previews the create
+- [ ] `push` publishes it with tickets + categories
 - [ ] Wix event verified (image, price, tax at checkout)
 - [ ] Row shows Published with Wix Event ID + Synced Hash

@@ -187,6 +187,29 @@ def wix_event_match_key(wix_event: Dict[str, Any], tz_name: str) -> Optional[str
 
 
 # ---------------------------------------------------------------------------
+# Recurring series detection
+# ---------------------------------------------------------------------------
+
+
+def is_secondary_recurring_occurrence(wix_event: Dict[str, Any]) -> bool:
+    """True for occurrences of a Wix-native recurring series other than the
+    series' representative (its next upcoming occurrence).
+
+    Every Wix event carries ``dateAndTimeSettings.recurrenceStatus``:
+    ``ONE_TIME`` for standalone events, ``RECURRING_UPCOMING`` for the single
+    occurrence Wix designates as the series' "next up", and ``RECURRING`` /
+    ``RECURRING_RECENTLY_ENDED`` / ``RECURRING_RECENTLY_CANCELED`` for every
+    other occurrence. Pull keeps one Notion row per series by skipping the
+    secondary occurrences — this helper is the single owner of that enum
+    knowledge.
+    """
+    status = (
+        (wix_event.get("dateAndTimeSettings") or {}).get("recurrenceStatus") or ""
+    )
+    return status.startswith("RECURRING") and status != "RECURRING_UPCOMING"
+
+
+# ---------------------------------------------------------------------------
 # Month filters
 # ---------------------------------------------------------------------------
 

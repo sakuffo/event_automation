@@ -66,6 +66,7 @@ from .wix_flows import (
 from .wix_mapping import (
     blank_region_site_row,
     event_match_key,
+    is_secondary_recurring_occurrence,
     log_event_diff,
     parse_month_value,
     select_default_tax_group_id,
@@ -445,6 +446,12 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
     code-owned statuses. Rows in any other status (Idea/Draft/Ready/Cancel/
     Delete/Error/Skip) are never overwritten — those belong to humans or to
     the sync flow.
+
+    Wix-native recurring series (each occurrence is its own Wix event) land
+    as **one** row per series: only the occurrence Wix marks
+    ``RECURRING_UPCOMING`` is created; the rest are skipped unless a Notion
+    row is already linked to them. As occurrences pass, the next one becomes
+    ``RECURRING_UPCOMING`` and rolls in on the next pull.
     """
     if scope not in {"upcoming", "all"}:
         logger.error("Invalid scope '%s' (expected 'upcoming' or 'all')", scope)
@@ -490,7 +497,10 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                 )
                 by_key.setdefault(key, row)
 
-        results = {"created": [], "refreshed": [], "linked": [], "skipped": [], "failed": []}
+        results = {
+            "created": [], "refreshed": [], "linked": [], "skipped": [],
+            "recurring": [], "failed": [],
+        }
 
         # Rows in these statuses are code-owned and safe to refresh from Wix.
         refreshable_statuses = {STATUS_PUBLISHED, STATUS_CANCELLED}
@@ -504,6 +514,20 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
             # rows in human statuses skip the ticket-definitions fetch
             # entirely.
             existing = by_wix_id.get(wix_id)
+
+            # One Notion row per Wix-native recurring series: only the
+            # occurrence Wix marks RECURRING_UPCOMING (the series' next up)
+            # gets a row. Other occurrences are skipped before any per-event
+            # Wix calls — unless a row already linked to one exists, which
+            # keeps refreshing (pull never abandons a row it created).
+            if existing is None and is_secondary_recurring_occurrence(wix_event):
+                results["recurring"].append(title)
+                logger.info(
+                    "   🔁 Skipped recurring occurrence (series row is its"
+                    " next upcoming occurrence)"
+                )
+                continue
+
             matched_by_key = False
             record_built = False
             record: Optional[EventRecord] = None
@@ -645,11 +669,13 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
 
         logger.info("\n📈 Pull complete!")
         logger.info(
-            "   ➕ %d created, ♻️ %d refreshed, 🔗 %d linked, ⏭️ %d skipped, ❌ %d failed",
+            "   ➕ %d created, ♻️ %d refreshed, 🔗 %d linked, ⏭️ %d skipped, "
+            "🔁 %d recurring occurrences skipped, ❌ %d failed",
             len(results["created"]),
             len(results["refreshed"]),
             len(results["linked"]),
             len(results["skipped"]),
+            len(results["recurring"]),
             len(results["failed"]),
         )
         return len(results["failed"]) == 0
@@ -1543,10 +1569,11 @@ def _get_defaults_context(ctx: _SyncContext) -> tuple:
 
 # --- per-status handlers ----------------------------------------------------
 #
-# notion_sync_events dispatches to these in a fixed order that is load-bearing:
-# Cancel/Delete/Published run before record validation (incomplete rows can
-# still be acted on); Update and Ready share the validated-record match
-# prelude and the CANCELED guard.
+# The row dispatchers (_refresh_row for sync, _push_row for push) call these
+# in a fixed order that is load-bearing: Cancel/Delete run before record
+# validation (incomplete rows can still be acted on); Update and Ready share
+# the validated-record match prelude and the CANCELED guard; Published is
+# refreshed only by sync, which never mutates Wix.
 
 
 def _handle_cancel_row(
@@ -1986,12 +2013,24 @@ def _create_new_event(
     _pace_wix(ctx)
 
 
-def _sync_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
-    """Dispatch one row to its status handler.
+def _refresh_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
+    """Sync-mode dispatch: refresh Published rows, count the rest as pending.
+
+    Sync never mutates Wix — rows flipped to Ready/Update/Cancel/Delete wait
+    for an explicit ``push`` run and are only reported here.
+    """
+    if (row.get("status") or "") == STATUS_PUBLISHED:
+        _refresh_published_row(ctx, row, name, row["page_id"])
+        return
+    ctx.results["pending_push"].append(name)
+
+
+def _push_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
+    """Push-mode dispatch: route one row to its status handler.
 
     The dispatch order is load-bearing — NOT a status->handler map.
-    Cancel/Delete/Published act before record validation so incomplete rows
-    can still be cancelled, deleted, or refreshed.
+    Cancel/Delete act before record validation so incomplete rows can still
+    be cancelled or deleted.
     """
     page_id = row["page_id"]
     row_status = row.get("status") or ""
@@ -2001,9 +2040,6 @@ def _sync_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
         return
     if row_status == STATUS_DELETE:
         _handle_delete_row(ctx, row, name, page_id)
-        return
-    if row_status == STATUS_PUBLISHED:
-        _refresh_published_row(ctx, row, name, page_id)
         return
 
     if row_status == STATUS_READY and (row.get("event_name") or "").strip():
@@ -2085,6 +2121,13 @@ def _log_sync_summary(
             logger.info("  • %s", n)
     if results["skipped"]:
         logger.info("\n⏭️  Skipped (no changes): %d", len(results["skipped"]))
+    if results["pending_push"]:
+        logger.info(
+            "\n⏸️  Waiting for push — run `python sync_events.py push`: %d",
+            len(results["pending_push"]),
+        )
+        for n in results["pending_push"]:
+            logger.info("  • %s", n)
     if results["incomplete"]:
         logger.warning(
             "\n⚠️  Incomplete rows (fix fields in Notion or Wix): %d",
@@ -2115,30 +2158,169 @@ def _log_sync_summary(
     )
 
 
+def _run_status_loop(
+    runtime: SyncRuntime,
+    statuses: List[str],
+    handler,
+    allowed_months: Optional[Set[int]],
+    empty_message: str,
+    dry_run: bool = False,
+    draft: bool = False,
+    auto_create_tickets: bool = True,
+) -> Optional[Dict[str, List[str]]]:
+    """Shared fetch/index/dispatch loop behind the sync and push flows.
+
+    Fetches Notion rows in ``statuses``, indexes the live Wix events, and
+    runs ``handler(ctx, row, name)`` on each row. Returns the results dict
+    for ``_log_sync_summary``, or ``None`` when there were no rows to
+    process (``empty_message`` is logged instead).
+    """
+    store: NotionStore = runtime.get_notion_store()
+    rows = store.fetch_event_rows(statuses=statuses)
+    rows = [r for r in rows if _row_in_months(r, allowed_months)]
+    if not rows:
+        logger.info("%s", empty_message)
+        return None
+
+    client = runtime.get_wix_client()
+    # DETAILS is needed so existing mainImage/descriptions are present for
+    # diffing and for skipping re-uploads of images already in Wix Media.
+    by_id, by_key = index_events_by_id_and_key(
+        runtime, fieldsets=["DETAILS", "CATEGORIES", "REGISTRATION"],
+    )
+
+    ctx = _SyncContext(
+        runtime=runtime,
+        store=store,
+        client=client,
+        by_id=by_id,
+        by_key=by_key,
+        results={
+            "created": [],
+            "updated": [],
+            "published": [],
+            "refreshed": [],
+            "cancelled": [],
+            "removed": [],
+            "skipped": [],
+            "pending_push": [],
+            "incomplete": [],
+            "not_found": [],
+            "failed": [],
+        },
+        dry_run=dry_run,
+        draft=draft,
+        auto_create_tickets=auto_create_tickets,
+    )
+
+    for row in rows:
+        name = row.get("event_name") or "(unnamed)"
+        try:
+            handler(ctx, row, name)
+        except NotionStoreError as exc:
+            # One row's failed write-back must not abort the batch — the
+            # row keeps its status and is retried on the next run.
+            logger.error("  ❌ %s: Notion write failed — %s", name, exc)
+            ctx.results["failed"].append(name)
+
+    return ctx.results
+
+
 def notion_sync_events(
+    runtime: SyncRuntime,
+    dry_run: bool = False,
+    month_filters: Optional[List[str]] = None,
+    run_enrich: bool = True,
+    run_pull: bool = True,
+) -> bool:
+    """Refresh Notion from Wix — the scheduled flow. Never writes to Wix.
+
+    Three passes in order:
+
+    1. **Pull** (unless ``run_pull`` is False or this is a dry run): the
+       ``pull_events`` upcoming-scope backfill, so events created or edited
+       on the Wix website land in Notion — one row per recurring series.
+    2. **Enrich** (unless ``run_enrich`` is False or this is a dry run):
+       Idea/Draft rows get filled and annotated.
+    3. **Published refresh**: Wix is authoritative — each Published row is
+       refreshed from its live event; rows whose event vanished get a note.
+
+    Rows flipped to Ready/Update/Cancel/Delete are **never pushed** here —
+    they are counted and reported as waiting for an explicit ``push`` run
+    (``notion_push_events``).
+    """
+    logger.info("🚀 Starting Wix → Notion sync (refresh only — no Wix writes)...\n")
+    if dry_run:
+        logger.info("🔍 DRY RUN — nothing will be written to Wix or Notion\n")
+
+    try:
+        allowed_months = _month_numbers(month_filters)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return False
+
+    if run_pull:
+        if dry_run:
+            logger.info("⏭️  Skipping pull pass (dry run writes nothing to Notion)\n")
+        else:
+            if not pull_events(runtime, scope="upcoming"):
+                logger.warning("⚠️  Pull pass had errors — continuing with sync")
+            logger.info("")
+
+    if run_enrich:
+        if dry_run:
+            logger.info("⏭️  Skipping enrich pass (dry run writes nothing to Notion)\n")
+        else:
+            if not enrich_events(runtime, month_filters=month_filters):
+                logger.warning("⚠️  Enrich pass had errors — continuing with sync")
+            logger.info("")
+
+    try:
+        results = _run_status_loop(
+            runtime,
+            statuses=[
+                STATUS_READY,
+                STATUS_PUBLISHED,
+                STATUS_UPDATE,
+                STATUS_CANCEL,
+                STATUS_DELETE,
+            ],
+            handler=_refresh_row,
+            allowed_months=allowed_months,
+            empty_message="No Ready/Published/Update/Cancel/Delete rows to sync.",
+            dry_run=dry_run,
+        )
+        if results is None:
+            return True
+        _log_sync_summary(results, dry_run, runtime.cache_stats)
+        return len(results["failed"]) == 0
+    except Exception as exc:
+        logger.exception("Fatal error during sync: %s", exc)
+        return False
+
+
+def notion_push_events(
     runtime: SyncRuntime,
     auto_create_tickets: bool = True,
     draft: bool = False,
     dry_run: bool = False,
     month_filters: Optional[List[str]] = None,
-    run_enrich: bool = True,
 ) -> bool:
-    """Sync Notion rows with Wix.
+    """Push Notion rows to Wix — the explicit, human-triggered flow.
 
-    Starts with an enrich pass (unless ``run_enrich`` is False or this is a
-    dry run) so Idea/Draft rows get filled and annotated on the same run —
-    drafts still need a human flip to Ready before anything is pushed.
+    The **only** flow that writes to Wix. ``Ready`` rows are created (or, if
+    they already match a Wix event, updated/published — never duplicated).
+    ``Update`` rows are diffed against Wix, patched, and land back on
+    ``Published``. ``Cancel`` rows cancel the Wix event (row becomes
+    ``Cancelled``); ``Delete`` rows delete it outright (row becomes
+    ``Removed``). Cancel/Delete act before record validation, so incomplete
+    rows can still be cancelled or deleted. Results are written back onto
+    each row.
 
-    ``Ready`` rows are created (or, if they already match a Wix event,
-    updated/published). ``Published`` rows treat Wix as authoritative: the
-    Notion row is refreshed from the live event, so edits made on the website
-    flow back into Notion. To push local Notion edits the other way, flip the
-    row to ``Update`` — it is pushed to Wix and lands back on ``Published``.
-    ``Cancel`` rows cancel the Wix event (row becomes ``Cancelled``);
-    ``Delete`` rows delete it outright (row becomes ``Removed``). Results are
-    written back onto each row.
+    No enrich pass runs here — enrich targets Idea/Draft rows, which push
+    never touches; Ready rows still get the default-fill safety net.
     """
-    logger.info("🚀 Starting Notion ⇄ Wix sync...\n")
+    logger.info("🚀 Starting Notion → Wix push...\n")
     if dry_run:
         logger.info("🔍 DRY RUN — nothing will be written to Wix or Notion\n")
     if draft:
@@ -2150,74 +2332,28 @@ def notion_sync_events(
         logger.error("%s", exc)
         return False
 
-    if run_enrich:
-        if dry_run:
-            logger.info("⏭️  Skipping enrich pass (dry run writes nothing to Notion)\n")
-        else:
-            if not enrich_events(runtime, month_filters=month_filters):
-                logger.warning("⚠️  Enrich pass had errors — continuing with sync")
-            logger.info("")
-
     try:
-        store: NotionStore = runtime.get_notion_store()
-        rows = store.fetch_event_rows(
+        results = _run_status_loop(
+            runtime,
             statuses=[
                 STATUS_READY,
-                STATUS_PUBLISHED,
                 STATUS_UPDATE,
                 STATUS_CANCEL,
                 STATUS_DELETE,
-            ]
-        )
-        rows = [r for r in rows if _row_in_months(r, allowed_months)]
-        if not rows:
-            logger.info("No Ready/Published/Update/Cancel/Delete rows to sync.")
-            return True
-
-        client = runtime.get_wix_client()
-        # DETAILS is needed so existing mainImage/descriptions are present for
-        # diffing and for skipping re-uploads of images already in Wix Media.
-        by_id, by_key = index_events_by_id_and_key(
-            runtime, fieldsets=["DETAILS", "CATEGORIES", "REGISTRATION"],
-        )
-
-        ctx = _SyncContext(
-            runtime=runtime,
-            store=store,
-            client=client,
-            by_id=by_id,
-            by_key=by_key,
-            results={
-                "created": [],
-                "updated": [],
-                "published": [],
-                "refreshed": [],
-                "cancelled": [],
-                "removed": [],
-                "skipped": [],
-                "incomplete": [],
-                "not_found": [],
-                "failed": [],
-            },
+            ],
+            handler=_push_row,
+            allowed_months=allowed_months,
+            empty_message="No Ready/Update/Cancel/Delete rows to push.",
             dry_run=dry_run,
             draft=draft,
             auto_create_tickets=auto_create_tickets,
         )
-
-        for row in rows:
-            name = row.get("event_name") or "(unnamed)"
-            try:
-                _sync_row(ctx, row, name)
-            except NotionStoreError as exc:
-                # One row's failed write-back must not abort the batch — the
-                # row keeps its status and is retried on the next run.
-                logger.error("  ❌ %s: Notion write failed — %s", name, exc)
-                ctx.results["failed"].append(name)
-
-        _log_sync_summary(ctx.results, dry_run, runtime.cache_stats)
-        return len(ctx.results["failed"]) == 0
+        if results is None:
+            return True
+        _log_sync_summary(results, dry_run, runtime.cache_stats)
+        return len(results["failed"]) == 0
     except Exception as exc:
-        logger.exception("Fatal error during sync: %s", exc)
+        logger.exception("Fatal error during push: %s", exc)
         return False
 
 

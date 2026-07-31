@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 from event_sync import notion_orchestrator
 from event_sync.config import AppConfig
 from event_sync.models import EventRecord
-from event_sync.notion_orchestrator import notion_sync_events
+from event_sync.notion_orchestrator import notion_push_events, notion_sync_events
 from event_sync.notion_store import row_to_event_record
 from event_sync.runtime import MAX_TICKET_POLICY_CHARS, SyncRuntime
 from event_sync.wix_flows import (
@@ -438,7 +438,7 @@ def test_published_refresh_writes_policy_status_column(monkeypatch):
     )
 
     assert notion_sync_events(
-        make_refresh_runtime(store, client), run_enrich=False
+        make_refresh_runtime(store, client), run_enrich=False, run_pull=False
     ) is True
     assert len(store.upserts) == 1
     record, status, _, _ = store.upserts[0]
@@ -458,7 +458,7 @@ def test_policy_drift_alone_still_triggers_bookkeeping_write(monkeypatch):
     patch_refresh(monkeypatch, config_row)
 
     assert notion_sync_events(
-        make_refresh_runtime(store, client), run_enrich=False
+        make_refresh_runtime(store, client), run_enrich=False, run_pull=False
     ) is True
     assert store.upserts == []  # no full rewrite
     assert len(store.sync_results) == 1
@@ -476,7 +476,7 @@ def test_matching_policy_status_costs_no_write(monkeypatch):
     patch_refresh(monkeypatch, config_row)
 
     assert notion_sync_events(
-        make_refresh_runtime(store, client), run_enrich=False
+        make_refresh_runtime(store, client), run_enrich=False, run_pull=False
     ) is True
     assert store.upserts == []
     assert store.sync_results == []
@@ -507,9 +507,7 @@ def test_update_push_stamps_ok_status(monkeypatch):
         lambda client, runtime, record, wix_id, wix_event, p: True,
     )
 
-    assert notion_sync_events(
-        make_refresh_runtime(store, client), run_enrich=False
-    ) is True
+    assert notion_push_events(make_refresh_runtime(store, client)) is True
     assert len(store.sync_results) == 1
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Published"

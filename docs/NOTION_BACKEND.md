@@ -113,15 +113,20 @@ matching keys: `Region ID`, `Group ID`, `Mapping ID`, `Revision`.
 ## The lifecycle
 
 ```
-Idea ──enrich──▶ Draft ──human review, flip to──▶ Ready ──sync──▶ Published ◀──sync refreshes from Wix
+Idea ──enrich──▶ Draft ──human review, flip to──▶ Ready ──push──▶ Published ◀──sync refreshes from Wix
                                                             │         │
-                                                        (failure)   flip to Update ──sync pushes to Wix──▶ Published
+                                                        (failure)   flip to Update ──push pushes to Wix──▶ Published
                                                             ▼         │
-                                                          Error     flip to Cancel ──sync──▶ Cancelled
+                                                          Error     flip to Cancel ──push──▶ Cancelled
                                                                       │                          │
-                                                                    flip to Delete ──sync──▶ Removed
+                                                                    flip to Delete ──push──▶ Removed
                                                                      (from any state)
 ```
+
+Two commands drive it: the scheduled **`sync`** is Wix-read-only (pull pass +
+enrich pass + Published refresh; rows waiting in Ready/Update/Cancel/Delete
+are only *reported*), and the explicit, human-run **`push`** is the only
+command that writes to Wix.
 
 - **Idea** — a bare placeholder. A linked Template (or a Name matching one)
   plus a Date is enough — the Date doesn't even need a time if the template
@@ -132,10 +137,10 @@ Idea ──enrich──▶ Draft ──human review, flip to──▶ Ready ─�
   missing, the row stays put and `Sync Error` says what's missing.
 - **Draft** — enriched, awaiting human review. Edit anything. `enrich` never
   overwrites a non-empty field.
-- **Ready** — a human approved it; the next `sync` creates it in Wix (event +
+- **Ready** — a human approved it; the next `push` creates it in Wix (event +
   tickets + categories + image), writes back the Wix Event ID, and marks it
   Published. Rows flipped straight to Ready (skipping enrich) get the same
-  default fill at sync time, written back to the row.
+  default fill at push time, written back to the row.
 - **Published** — live on Wix, and **Wix is now the source of truth**: each
   `sync` refreshes the Notion row from the live event, so edits made on the
   website (or by other tools) flow back into Notion. Local edits to a
@@ -143,10 +148,10 @@ Idea ──enrich──▶ Draft ──human review, flip to──▶ Ready ─�
   first if the Notion edit is the one that should win. An event cancelled on
   the website flips its row to Cancelled.
 - **Update** — a human edited the row and wants those local changes pushed to
-  Wix (the reverse of the Published refresh). The next `sync` diffs the row
+  Wix (the reverse of the Published refresh). The next `push` diffs the row
   against the live event, patches Wix, and lands the row back on
   **Published**. If Wix already matches, the row just returns to Published.
-- **Cancel** — a human wants the event cancelled. The next `sync` calls the
+- **Cancel** — a human wants the event cancelled. The next `push` calls the
   Wix cancel API (closes registration; Wix sends cancellation notifications to
   registrants if that's enabled on the site) and marks the row **Cancelled**.
   Wix can't un-cancel an event — to reuse it, duplicate the row (without the
@@ -154,7 +159,7 @@ Idea ──enrich──▶ Draft ──human review, flip to──▶ Ready ─�
 - **Cancelled** — cancelled on Wix but still listed there. `pull` also maps
   events cancelled from the Wix dashboard onto their rows as Cancelled.
 - **Delete** — a human wants the event gone from Wix entirely. The next
-  `sync` deletes it via the Wix API (works from Cancelled or any other state,
+  `push` deletes it via the Wix API (works from Cancelled or any other state,
   even rows with sold tickets — cancel first if registrants should be
   notified) and marks the row **Removed**. If the event is already gone, the
   row is simply marked Removed.
@@ -177,11 +182,15 @@ python sync_events.py pull --scope all   # include past events
 python sync_events.py enrich             # fill blanks on Idea/Draft rows (preview/debug; sync does this too)
 python sync_events.py enrich -m aug sep  # only touch specific months
 
-python sync_events.py sync --dry-run     # preview what would change (skips the enrich pass)
-python sync_events.py sync               # enrich pass, push Ready/Update rows, refresh Published rows from Wix
-python sync_events.py sync --no-enrich   # push without the enrich pass
-python sync_events.py sync --draft       # create new events as Wix drafts
-python sync_events.py sync -m aug        # only sync specific months
+python sync_events.py sync               # Wix -> Notion refresh: pull pass, enrich pass, Published refresh (never writes to Wix)
+python sync_events.py sync --no-pull     # skip the pull pass
+python sync_events.py sync --no-enrich   # skip the enrich pass
+python sync_events.py sync -m aug        # only refresh specific months
+
+python sync_events.py push --dry-run     # preview what would change in Wix
+python sync_events.py push               # Notion -> Wix: create Ready rows, apply Update edits, run Cancel/Delete
+python sync_events.py push --draft       # create new events as Wix drafts
+python sync_events.py push -m aug        # only push specific months
 
 python sync_events.py pull-site-config   # Wix tax mappings -> Site Config DB
 python sync_events.py push-site-config --dry-run
@@ -200,13 +209,23 @@ Notes:
 - `pull` never overwrites rows in Idea/Draft/Ready/Update/Error/Skip status.
   If a pulled Wix event matches such a row by title+date+time, the row is
   *linked* (Wix Event ID written) but its fields are left alone.
-- `sync` starts with the same enrich pass as the `enrich` command (skip with
-  `--no-enrich`; dry runs skip it automatically since enrich writes to
-  Notion). Drafts still need a human flip to Ready before anything is pushed.
-- `sync` matches rows to Wix by `Wix Event ID` first, then by
+- `pull` shows each Wix-native recurring series (weekly events created on the
+  website) as **one row** — the occurrence Wix marks as the series' next
+  upcoming one. Other occurrences are skipped (rows already linked to one
+  keep refreshing). When an occurrence passes, the next one rolls in on the
+  following pull/sync. `scripts/archive_recurring_rows.py` (dry-run by
+  default, `--apply` to write) archives clutter rows created before this
+  rule.
+- `sync` starts with a pull pass (skip with `--no-pull`) and the same enrich
+  pass as the `enrich` command (skip with `--no-enrich`; dry runs skip both
+  automatically since they write to Notion). Drafts still need a human flip
+  to Ready — and then an explicit `push` run — before anything reaches Wix.
+- `sync` never writes to Wix: rows in Ready/Update/Cancel/Delete are counted
+  and reported as "waiting for push".
+- `push` matches rows to Wix by `Wix Event ID` first, then by
   title+date+time — so a hand-added Ready row that duplicates an existing Wix
   event updates it instead of creating a duplicate.
-- If a Ready row matches a Wix draft, `sync` publishes the draft (unless
+- If a Ready row matches a Wix draft, `push` publishes the draft (unless
   `--draft` is passed).
 
 ## Default "New Event" template (create by hand — the API can't create templates)
@@ -230,7 +249,7 @@ From then on, clicking `New` gives a row where you only link the Template and
 pick the Date (the Name fills itself from the template at enrich time — type
 one only to override it). If someone skips the template (or a value), the
 pipeline still fills every blank from Settings at `enrich` time — and as a
-safety net at `sync` time for rows flipped straight to `Ready`.
+safety net at `push` time for rows flipped straight to `Ready`.
 
 ## Recommended views (create by hand — the API can't create views)
 
@@ -244,10 +263,13 @@ safety net at `sync` time for rows flipped straight to `Ready`.
 Runs are plain CLI invocations — locally or via GitHub Actions
 ([.github/workflows/sync-events.yml](../.github/workflows/sync-events.yml)):
 
-- **Daily cron** runs `sync` (which starts with an enrich pass) at 9 AM EST.
-- **Manual**: Actions tab → "Sync Events from Notion to Wix" → Run workflow.
+- **Cron** runs `sync` (pull pass + enrich pass + Published refresh; never
+  writes to Wix) every 30 minutes.
+- **Manual**: Actions tab → "Sync Events from Wix to Notion" → Run workflow.
+- **Pushing to Wix is never scheduled** — run `python sync_events.py push`
+  from a terminal when rows are ready to go live.
 - **From Notion** (optional, paid plan): a database automation or button with
-  a *Send webhook* action can fire the workflow instantly:
+  a *Send webhook* action can fire the sync workflow instantly:
   - URL: `https://api.github.com/repos/{owner}/{repo}/dispatches`
   - Headers: `Authorization: Bearer <GitHub PAT with repo scope>`,
     `Accept: application/vnd.github.v3+json`

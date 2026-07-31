@@ -1,18 +1,22 @@
-name: Sync Events from Notion to Wix
+# Scheduled refresh only — `sync` never writes to Wix. It pulls new/changed
+# Wix events into Notion, runs the enrich pass, and refreshes Published rows.
+# Pushing rows to Wix (Ready/Update/Cancel/Delete) is a deliberate human
+# action: run `python sync_events.py push` from a terminal.
+name: Sync Events from Wix to Notion
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 14 * * *'  # 14:00 UTC = 9 AM EST (winter) / 10 AM EDT (summer)
+    - cron: '*/30 * * * *'  # every 30 minutes
   # Notion automations/buttons can fire this via a webhook to
   # https://api.github.com/repos/{owner}/{repo}/dispatches with
   # body {"event_type": "notion-sync"}. See docs/NOTION_BACKEND.md.
   repository_dispatch:
     types: [notion-sync]
 
-# Never run two syncs at once: overlapping runs each snapshot the Wix event
-# index at start, so both would see the same Ready row as unmatched and
-# double-create it. Queue instead of cancel — a mid-flight sync must finish.
+# Never run two syncs at once: overlapping runs would race their Notion
+# writes (pull-created rows and Published refreshes could double up).
+# Queue instead of cancel — a mid-flight sync must finish.
 concurrency:
   group: wix-sync
   cancel-in-progress: false
@@ -40,8 +44,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # `sync` starts with an enrich pass, so one step covers both.
-      - name: Enrich + sync events from Notion to Wix
+      # `sync` runs the pull and enrich passes first, so one step covers all
+      # three (pull + enrich + Published refresh). It never writes to Wix.
+      - name: Pull + enrich + refresh events from Wix into Notion
         env:
           WIX_API_KEY: ${{ secrets.WIX_API_KEY }}
           WIX_ACCOUNT_ID: ${{ secrets.WIX_ACCOUNT_ID }}

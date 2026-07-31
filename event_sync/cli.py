@@ -21,6 +21,7 @@ WIX_COMMANDS = {
     "list",
     "pull",
     "sync",
+    "push",
     "pull-site-config",
     "push-site-config",
 }
@@ -73,7 +74,7 @@ def _ensure_command_config(command: str, config) -> None:
         config.ensure_notion_valid()
         return
 
-    if command in {"sync", "pull", "pull-site-config", "push-site-config"}:
+    if command in {"sync", "push", "pull", "pull-site-config", "push-site-config"}:
         config.ensure_notion_valid()
         config.ensure_wix_valid()
         return
@@ -197,29 +198,25 @@ def build_parser() -> argparse.ArgumentParser:
         "sync",
         parents=[common, wix_common],
         help=(
-            "Sync Notion with Wix: push Ready/Update rows, refresh Published "
-            "rows from Wix (runs an enrich pass first)"
+            "Refresh Notion from Wix (never writes to Wix): pull pass, "
+            "enrich pass, then refresh Published rows. Rows flipped to "
+            "Ready/Update/Cancel/Delete wait for an explicit `push`."
         ),
+    )
+    sync_parser.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="Skip the pull pass that normally runs before the refresh",
     )
     sync_parser.add_argument(
         "--no-enrich",
         action="store_true",
-        help="Skip the enrich pass that normally runs before syncing",
-    )
-    sync_parser.add_argument(
-        "--no-tickets",
-        action="store_true",
-        help="Disable automatic ticket creation",
-    )
-    sync_parser.add_argument(
-        "--draft",
-        action="store_true",
-        help="Create new events as Wix drafts (publish by re-running sync without --draft)",
+        help="Skip the enrich pass that normally runs before the refresh",
     )
     sync_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would change without writing to Wix or Notion",
+        help="Show what would change without writing to Notion",
     )
     sync_parser.add_argument(
         "-m",
@@ -227,6 +224,37 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MONTH",
         nargs="+",
         help="Only sync rows in these months (e.g., -m apr may). Default: all rows.",
+    )
+
+    push_parser = subparsers.add_parser(
+        "push",
+        parents=[common, wix_common],
+        help=(
+            "Push Notion rows to Wix (the only command that writes to Wix): "
+            "create Ready rows, apply Update edits, execute Cancel/Delete"
+        ),
+    )
+    push_parser.add_argument(
+        "--no-tickets",
+        action="store_true",
+        help="Disable automatic ticket creation",
+    )
+    push_parser.add_argument(
+        "--draft",
+        action="store_true",
+        help="Create new events as Wix drafts (publish by re-running push without --draft)",
+    )
+    push_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing to Wix or Notion",
+    )
+    push_parser.add_argument(
+        "-m",
+        "--month",
+        metavar="MONTH",
+        nargs="+",
+        help="Only push rows in these months (e.g., -m apr may). Default: all rows.",
     )
 
     subparsers.add_parser(
@@ -295,11 +323,21 @@ def _cmd_sync(args, config, runtime) -> bool:
     from .notion_orchestrator import notion_sync_events
     return notion_sync_events(
         runtime,
+        dry_run=args.dry_run,
+        month_filters=args.month,
+        run_enrich=not args.no_enrich,
+        run_pull=not args.no_pull,
+    )
+
+
+def _cmd_push(args, config, runtime) -> bool:
+    from .notion_orchestrator import notion_push_events
+    return notion_push_events(
+        runtime,
         auto_create_tickets=not args.no_tickets,
         draft=args.draft,
         dry_run=args.dry_run,
         month_filters=args.month,
-        run_enrich=not args.no_enrich,
     )
 
 
@@ -322,6 +360,7 @@ COMMANDS = {
     "pull": _cmd_pull,
     "enrich": _cmd_enrich,
     "sync": _cmd_sync,
+    "push": _cmd_push,
     "pull-site-config": _cmd_pull_site_config,
     "push-site-config": _cmd_push_site_config,
 }

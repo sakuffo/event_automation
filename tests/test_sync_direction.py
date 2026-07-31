@@ -1,14 +1,15 @@
 """Tests for the sync direction semantics of Published vs Update rows.
 
-Published rows treat Wix as authoritative (Wix -> Notion refresh); Update
-rows push local Notion changes to Wix and land back on Published.
+Published rows treat Wix as authoritative (Wix -> Notion refresh, handled by
+`sync`); Update rows push local Notion changes to Wix via the explicit `push`
+flow and land back on Published.
 """
 
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from event_sync import notion_orchestrator
-from event_sync.notion_orchestrator import notion_sync_events
+from event_sync.notion_orchestrator import notion_push_events, notion_sync_events
 from event_sync.notion_store import row_to_event_record
 
 
@@ -141,12 +142,21 @@ def patch_wix_side(monkeypatch, wix_event, config_row):
     monkeypatch.setattr(notion_orchestrator.time, "sleep", lambda s: None)
 
 
-def test_sync_fetches_update_rows(monkeypatch):
+def test_sync_fetches_all_lifecycle_rows(monkeypatch):
     store = StoreStub([])
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert store.fetch_calls == [
         ["Ready", "Published", "Update", "Cancel", "Delete"]
     ]
+
+
+def test_push_fetches_only_pushable_statuses(monkeypatch):
+    # Push never touches Published rows — they belong to the sync refresh.
+    store = StoreStub([])
+    assert notion_push_events(make_runtime(store)) is True
+    assert store.fetch_calls == [["Ready", "Update", "Cancel", "Delete"]]
 
 
 def test_published_row_matching_wix_is_skipped(monkeypatch):
@@ -157,7 +167,9 @@ def test_published_row_matching_wix_is_skipped(monkeypatch):
         monkeypatch, {"id": "wix-1", "status": "UPCOMING"}, config_row
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert store.upserts == []
     assert store.raw_upserts == []
     assert store.sync_results == []
@@ -170,7 +182,9 @@ def test_published_row_is_refreshed_from_wix(monkeypatch):
         monkeypatch, {"id": "wix-1", "status": "UPCOMING"}, config_row
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert len(store.upserts) == 1
     record, status, source, page_id = store.upserts[0]
     assert status == "Published"
@@ -190,7 +204,9 @@ def test_published_row_cancelled_in_wix_becomes_cancelled(monkeypatch):
         monkeypatch, {"id": "wix-1", "status": "CANCELED"}, config_row
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert len(store.upserts) == 1
     _, status, _, _ = store.upserts[0]
     assert status == "Cancelled"
@@ -219,7 +235,7 @@ def test_update_row_pushes_local_changes_and_returns_to_published(monkeypatch):
         lambda client, runtime, record, wix_id, wix_event, p: applied.append(wix_id) or True,
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     assert applied == ["wix-1"]
     assert store.upserts == []  # no Wix -> Notion refresh for Update rows
     assert len(store.sync_results) == 1
@@ -246,7 +262,7 @@ def test_update_row_without_changes_flips_back_to_published(monkeypatch):
         },
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     assert len(store.sync_results) == 1
     page_id, kwargs = store.sync_results[0]
     assert page_id == "page-1"
@@ -262,7 +278,7 @@ def test_update_row_missing_from_wix_gets_error_note(monkeypatch):
     )
     monkeypatch.setattr(notion_orchestrator.time, "sleep", lambda s: None)
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     assert len(store.sync_results) == 1
     page_id, kwargs = store.sync_results[0]
     assert page_id == "page-1"

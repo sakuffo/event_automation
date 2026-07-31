@@ -1,9 +1,12 @@
-"""Characterization tests for the sync loop, pull, and enrich write behavior.
+"""Characterization tests for the sync/push loops, pull, and enrich writes.
 
-These pin the status-lifecycle semantics before the Phase 1/2 refactor:
-Cancel/Delete/Published branches act before record validation, Ready rows
-matching Wix drafts get published (never duplicated), dry runs write nothing
-to Wix or Notion, and pull only refreshes code-owned rows.
+These pin the status-lifecycle semantics: sync (``notion_sync_events``) is
+Wix-read-only — it refreshes Published rows and only *reports* rows waiting
+in Ready/Update/Cancel/Delete; push (``notion_push_events``) is the only flow
+that mutates Wix — Cancel/Delete branches act before record validation, Ready
+rows matching Wix drafts get published (never duplicated). Dry runs write
+nothing to Wix or Notion, and pull only refreshes code-owned rows (one row
+per Wix-native recurring series).
 """
 
 from types import SimpleNamespace
@@ -14,6 +17,7 @@ import pytest
 from event_sync import notion_orchestrator
 from event_sync.notion_orchestrator import (
     enrich_events,
+    notion_push_events,
     notion_sync_events,
     pull_events,
 )
@@ -219,7 +223,7 @@ def test_ready_row_matching_wix_draft_is_published_with_tickets(monkeypatch):
         ) or True,
     )
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.published == ["wix-1"]
     # Single-price TICKETING row without ticket_name -> _ensure_ticket_definition.
     assert ensured == [("wix-1", 35.0)]
@@ -247,7 +251,7 @@ def test_ready_row_safety_net_writes_ticket_capacity_back(monkeypatch):
         ) or True,
     )
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert captured == ["24"]
     fills = [
         props for _, props in store.field_updates
@@ -273,7 +277,7 @@ def test_ready_row_with_named_tickets_passes_specs_through(monkeypatch):
         lambda c, wix_id, record, **kw: seen.append(record.ticket_name) or True,
     )
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.published == ["wix-1"]
     assert seen == ["GA; VIP"]
 
@@ -325,7 +329,7 @@ def test_ready_row_matching_live_event_updates_never_creates(monkeypatch):
         lambda c, wix_id, record, **kw: ensured.append(wix_id) or True,
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     # No changes -> row simply linked back to Published with a fresh hash.
     assert len(store.sync_results) == 1
     _, kwargs = store.sync_results[0]
@@ -355,7 +359,7 @@ def test_ready_row_matches_by_title_date_time_when_id_missing(monkeypatch):
         notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: True
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["wix_event_id"] == "wix-9"
 
@@ -367,7 +371,7 @@ def test_ready_row_without_match_creates_event(monkeypatch):
         notion_orchestrator, "create_wix_event", lambda record, **k: "new-wix-id"
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     assert len(store.sync_results) == 1
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Published"
@@ -382,9 +386,7 @@ def test_ready_row_create_in_draft_mode_stays_ready_with_note(monkeypatch):
         notion_orchestrator, "create_wix_event", lambda record, **k: "new-wix-id"
     )
 
-    assert (
-        notion_sync_events(make_runtime(store), run_enrich=False, draft=True) is True
-    )
+    assert notion_push_events(make_runtime(store), draft=True) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Ready"
     assert "draft" in kwargs["error"].lower()
@@ -397,7 +399,7 @@ def test_ready_row_create_failure_lands_error(monkeypatch):
         notion_orchestrator, "create_wix_event", lambda record, **k: None
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is False
+    assert notion_push_events(make_runtime(store)) is False
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Error"
 
@@ -406,7 +408,7 @@ def test_invalid_ready_row_gets_error_status(monkeypatch):
     store = StoreStub([make_row("Ready", start_date="", wix_event_id="")])
     patch_index(monkeypatch)
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is False
+    assert notion_push_events(make_runtime(store)) is False
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Error"
     assert "Invalid row" in kwargs["error"]
@@ -416,7 +418,7 @@ def test_ready_row_matching_canceled_event_flips_to_cancelled(monkeypatch):
     store = StoreStub([make_row("Ready")])
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "CANCELED"}})
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Cancelled"
     assert "Cancelled in Wix" in kwargs["error"]
@@ -432,7 +434,7 @@ def test_cancel_row_cancels_live_event(monkeypatch):
     client = ClientStub()
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.cancelled == ["wix-1"]
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Cancelled"
@@ -447,7 +449,7 @@ def test_cancel_acts_on_incomplete_row_before_validation(monkeypatch):
     client = ClientStub()
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.cancelled == ["wix-1"]
 
 
@@ -455,7 +457,7 @@ def test_cancel_row_missing_from_wix_writes_note_without_status(monkeypatch):
     store = StoreStub([make_row("Cancel")])
     patch_index(monkeypatch)
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     _, kwargs = store.sync_results[0]
     assert "nothing to cancel" in kwargs["error"]
     assert "status" not in kwargs
@@ -466,7 +468,7 @@ def test_cancel_row_already_cancelled_in_wix_just_records_status(monkeypatch):
     client = ClientStub()
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "CANCELED"}})
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.cancelled == []
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Cancelled"
@@ -477,7 +479,7 @@ def test_cancel_row_on_wix_draft_fails_with_guidance(monkeypatch):
     client = ClientStub()
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "DRAFT"}})
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is False
+    assert notion_push_events(make_runtime(store, client)) is False
     assert client.cancelled == []
     _, kwargs = store.sync_results[0]
     assert "Delete" in kwargs["error"]
@@ -488,7 +490,7 @@ def test_delete_row_deletes_with_force(monkeypatch):
     client = ClientStub()
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.deleted == [("wix-1", True)]
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Removed"
@@ -498,7 +500,7 @@ def test_delete_row_missing_from_wix_marks_removed(monkeypatch):
     store = StoreStub([make_row("Delete", wix_event_id="")])
     patch_index(monkeypatch)
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Removed"
 
@@ -509,7 +511,7 @@ def test_delete_failure_lands_error(monkeypatch):
     client.delete_result = False
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is False
+    assert notion_push_events(make_runtime(store, client)) is False
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Error"
 
@@ -523,7 +525,9 @@ def test_published_row_missing_from_wix_writes_note(monkeypatch):
     store = StoreStub([make_row("Published")])
     patch_index(monkeypatch)
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     _, kwargs = store.sync_results[0]
     assert "Not found in Wix" in kwargs["error"]
     assert "status" not in kwargs
@@ -538,7 +542,9 @@ def test_published_refresh_with_invalid_wix_event_lands_raw_row(monkeypatch):
         monkeypatch, make_wix_config_row(start_date="", end_date="")
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert len(store.raw_upserts) == 1
     _, kwargs = store.raw_upserts[0]
     assert kwargs["page_id"] == "page-1"
@@ -550,12 +556,10 @@ def test_published_refresh_with_invalid_wix_event_lands_raw_row(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_dry_run_writes_nothing_across_all_branches(monkeypatch):
+def test_push_dry_run_writes_nothing_across_all_branches(monkeypatch):
     rows = [
         make_row("Cancel", page_id="p1", event_name="A", wix_event_id="w1"),
         make_row("Delete", page_id="p2", event_name="B", wix_event_id="w2"),
-        make_row("Published", page_id="p3", event_name="C", wix_event_id="w3",
-                 short_description="stale"),
         make_row("Update", page_id="p4", event_name="D", wix_event_id="w4"),
         make_row("Ready", page_id="p5", event_name="E", wix_event_id=""),
         make_row("Ready", page_id="p6", event_name="F", wix_event_id="w6"),
@@ -565,12 +569,10 @@ def test_dry_run_writes_nothing_across_all_branches(monkeypatch):
     by_id = {
         "w1": {"id": "w1", "status": "UPCOMING"},
         "w2": {"id": "w2", "status": "UPCOMING"},
-        "w3": {"id": "w3", "status": "UPCOMING"},
         "w4": {"id": "w4", "status": "UPCOMING"},
         "w6": {"id": "w6", "status": "DRAFT"},
     }
     patch_index(monkeypatch, by_id=by_id)
-    patch_config_row(monkeypatch, make_wix_config_row(event_name="C"))
     monkeypatch.setattr(
         notion_orchestrator, "compute_event_update_plan", lambda *a: stub_plan()
     )
@@ -586,8 +588,66 @@ def test_dry_run_writes_nothing_across_all_branches(monkeypatch):
     )
 
     assert (
+        notion_push_events(make_runtime(store, client), dry_run=True) is True
+    )
+    assert store.all_writes() == []
+    assert client.published == client.cancelled == []
+    assert client.deleted == []
+
+
+def test_sync_dry_run_writes_nothing(monkeypatch):
+    # A stale Published row would normally be refreshed; on a dry run the
+    # write is withheld (and the pull/enrich passes are skipped upstream).
+    store = StoreStub([
+        make_row("Published", page_id="p3", event_name="C", wix_event_id="w3",
+                 short_description="stale"),
+    ])
+    client = ClientStub(forbid_mutations=True)
+    patch_index(monkeypatch, by_id={"w3": {"id": "w3", "status": "UPCOMING"}})
+    patch_config_row(monkeypatch, make_wix_config_row(event_name="C"))
+
+    assert (
         notion_sync_events(make_runtime(store, client), dry_run=True) is True
     )
+    assert store.all_writes() == []
+
+
+# ---------------------------------------------------------------------------
+# Sync never writes to Wix — pending rows wait for an explicit push
+# ---------------------------------------------------------------------------
+
+
+def test_sync_never_pushes_pending_rows(monkeypatch):
+    # NOT a dry run: even with live, matched Ready/Update/Cancel/Delete rows,
+    # sync performs zero Wix mutations and zero status flips — the rows are
+    # only reported as waiting for `push`.
+    rows = [
+        make_row("Cancel", page_id="p1", event_name="A", wix_event_id="w1"),
+        make_row("Delete", page_id="p2", event_name="B", wix_event_id="w2"),
+        make_row("Update", page_id="p4", event_name="D", wix_event_id="w4"),
+        make_row("Ready", page_id="p5", event_name="E", wix_event_id=""),
+    ]
+    store = StoreStub(rows)
+    client = ClientStub(forbid_mutations=True)
+    patch_index(monkeypatch, by_id={
+        "w1": {"id": "w1", "status": "UPCOMING"},
+        "w2": {"id": "w2", "status": "UPCOMING"},
+        "w4": {"id": "w4", "status": "UPCOMING"},
+    })
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "apply_event_update_plan",
+        lambda *a, **k: pytest.fail("sync must never push Update rows"),
+    )
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "create_wix_event",
+        lambda *a, **k: pytest.fail("sync must never create events"),
+    )
+
+    assert notion_sync_events(
+        make_runtime(store, client), run_enrich=False, run_pull=False
+    ) is True
     assert store.all_writes() == []
     assert client.published == client.cancelled == []
     assert client.deleted == []
@@ -598,8 +658,11 @@ def test_dry_run_writes_nothing_across_all_branches(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def wix_event(id_, title, status="UPCOMING"):
-    return {"id": id_, "title": title, "status": status}
+def wix_event(id_, title, status="UPCOMING", recurrence=None):
+    event = {"id": id_, "title": title, "status": status}
+    if recurrence is not None:
+        event["dateAndTimeSettings"] = {"recurrenceStatus": recurrence}
+    return event
 
 
 def config_row_for(event):
@@ -739,6 +802,69 @@ def test_pull_returns_false_when_no_events(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Recurring series: one Notion row per series (the next upcoming occurrence)
+# ---------------------------------------------------------------------------
+
+
+def test_is_secondary_recurring_occurrence_enum():
+    from event_sync.wix_mapping import is_secondary_recurring_occurrence
+
+    def make(status):
+        return {"dateAndTimeSettings": {"recurrenceStatus": status}}
+
+    assert is_secondary_recurring_occurrence(make("RECURRING")) is True
+    assert is_secondary_recurring_occurrence(make("RECURRING_RECENTLY_ENDED")) is True
+    assert is_secondary_recurring_occurrence(make("RECURRING_RECENTLY_CANCELED")) is True
+    assert is_secondary_recurring_occurrence(make("RECURRING_UPCOMING")) is False
+    assert is_secondary_recurring_occurrence(make("ONE_TIME")) is False
+    assert is_secondary_recurring_occurrence({}) is False
+
+
+def test_pull_skips_unmatched_recurring_occurrence(monkeypatch):
+    # A secondary occurrence of a recurring series never becomes a row —
+    # and is skipped before the per-event ticket-definitions fetch.
+    store = StoreStub([])
+    patch_pull(monkeypatch)
+    events = [wix_event("w1", "Tinker Tuesday", recurrence="RECURRING")]
+    client = ClientStub(events=events)
+
+    assert pull_events(make_runtime(store, client)) is True
+    assert store.all_writes() == []
+    assert getattr(client, "ticket_def_calls", 0) == 0
+
+
+def test_pull_creates_row_for_recurring_upcoming_occurrence(monkeypatch):
+    # The series' representative (next upcoming occurrence) pulls normally.
+    store = StoreStub([])
+    patch_pull(monkeypatch)
+    events = [wix_event("w1", "Tinker Tuesday", recurrence="RECURRING_UPCOMING")]
+
+    assert pull_events(make_pull_runtime(store, events)) is True
+    assert len(store.upserts) == 1
+    assert store.upserts[0][0].wix_event_id == "w1"
+
+
+def test_pull_still_refreshes_linked_recurring_occurrence(monkeypatch):
+    # A row already linked to a secondary occurrence keeps refreshing —
+    # pull never abandons a row it created.
+    existing = make_row("Published", event_name="Tinker Tuesday", wix_event_id="w1")
+    store = StoreStub([existing])
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "wix_event_to_config_row",
+        lambda event, ticket_defs, tz_name=TZ: make_wix_config_row(
+            event_name=event["title"], short_description="edited on the website"
+        ),
+    )
+    events = [wix_event("w1", "Tinker Tuesday", recurrence="RECURRING")]
+
+    assert pull_events(make_pull_runtime(store, events)) is True
+    assert len(store.upserts) == 1
+    _, status, _, page_id = store.upserts[0]
+    assert (status, page_id) == ("Published", "page-1")
+
+
+# ---------------------------------------------------------------------------
 # Enrich write behavior (pins the current always-write shape; Phase 3
 # deliberately changes this — update these tests alongside that change)
 # ---------------------------------------------------------------------------
@@ -839,7 +965,9 @@ def test_published_refresh_preserves_drive_image_when_wix_has_none(monkeypatch):
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
     patch_config_row(monkeypatch, make_wix_config_row(image_url=""))
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert len(store.upserts) == 1
     record, _, _, _ = store.upserts[0]
     assert record.image_url == DRIVE_URL
@@ -858,7 +986,9 @@ def test_published_refresh_skips_when_only_difference_was_missing_wix_image(monk
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
     patch_config_row(monkeypatch, config_row)
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     assert store.upserts == []
 
 
@@ -870,7 +1000,9 @@ def test_published_refresh_respects_deliberate_wix_image_removal(monkeypatch):
     patch_index(monkeypatch, by_id={"wix-1": {"id": "wix-1", "status": "UPCOMING"}})
     patch_config_row(monkeypatch, make_wix_config_row(image_url=""))
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_sync_events(
+        make_runtime(store), run_enrich=False, run_pull=False
+    ) is True
     record, _, _, _ = store.upserts[0]
     assert record.image_url is None
 
@@ -905,7 +1037,7 @@ def test_create_with_failed_image_upload_gets_sync_error_note(monkeypatch):
     monkeypatch.setattr(notion_orchestrator, "create_wix_event", fake_create)
 
     runtime = make_runtime(store)
-    assert notion_sync_events(runtime, run_enrich=False) is True
+    assert notion_push_events(runtime) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Published"
     assert "upload failed" in kwargs["error"]
@@ -928,7 +1060,7 @@ def test_create_with_failed_tickets_gets_sync_error_note(monkeypatch):
     monkeypatch.setattr(notion_orchestrator, "create_wix_event", fake_create)
 
     runtime = make_runtime(store)
-    assert notion_sync_events(runtime, run_enrich=False) is True
+    assert notion_push_events(runtime) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Published"
     assert "ticket creation failed" in kwargs["error"]
@@ -944,7 +1076,7 @@ def test_publish_draft_with_failed_tickets_writes_note(monkeypatch):
         notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: False
     )
 
-    assert notion_sync_events(make_runtime(store, client), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store, client)) is True
     assert client.published == ["wix-1"]
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Published"
@@ -964,7 +1096,7 @@ def test_matched_live_row_with_failed_tickets_writes_note(monkeypatch):
         notion_orchestrator, "ensure_event_tickets", lambda *a, **kw: False
     )
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is True
+    assert notion_push_events(make_runtime(store)) is True
     _, kwargs = store.sync_results[0]
     assert kwargs["status"] == "Published"
     assert "ticket creation failed" in kwargs["error"]
@@ -1020,7 +1152,7 @@ def test_failed_notion_write_does_not_abort_remaining_rows(monkeypatch):
         original(page_id, **kwargs)
     store.write_sync_result = flaky
 
-    assert notion_sync_events(make_runtime(store), run_enrich=False) is False
+    assert notion_push_events(make_runtime(store)) is False
     # Row B was still processed and marked Removed.
     assert len(store.sync_results) == 1
     page_id, kwargs = store.sync_results[0]

@@ -3,8 +3,9 @@
 Events are planned in a Notion workspace and pushed to the Wix Events website
 by a Python CLI — run locally or on a GitHub Actions schedule. Anyone on the
 team can drop an event placeholder into Notion; the system enriches it from
-the class catalog, a human flips it to Ready, and the sync publishes it to
-Wix with tickets, categories, and images.
+the class catalog, a human flips it to Ready, and an explicit `push` run
+publishes it to Wix with tickets, categories, and images. A scheduled `sync`
+keeps Notion mirroring the website (it never writes to Wix).
 
 > The previous Google Sheets pipeline has been removed; it remains
 > recoverable from the `legacy-sheets-final` git tag. Google Drive is still
@@ -17,13 +18,15 @@ Wix with tickets, categories, and images.
 2. `enrich` fills in the blanks (categories, price, description, image) from
    the **Catalog** (class + recurring-event templates) and **Settings** defaults
 3. A human reviews the Draft in Notion and flips Status to **Ready**
-4. `sync` creates the event in Wix (tickets, categories, image included) and
+4. `push` creates the event in Wix (tickets, categories, image included) and
    writes back the Wix ID, sync time, and status — so Notion always shows
-   what's posted, what's pending, and what failed
-5. Once a row is Published, the Wix website is the source of truth: each sync
-   refreshes the Notion row from the live event. To push local Notion edits
-   back to Wix instead, flip the row to **Update** — it's pushed on the next
-   sync and lands back on Published
+   what's posted, what's pending, and what failed. Pushing is always an
+   explicit human action; the scheduled `sync` never writes to Wix
+5. Once a row is Published, the Wix website is the source of truth: each
+   `sync` (scheduled every 30 minutes) pulls new/changed Wix events into
+   Notion and refreshes Published rows from the live events. To push local
+   Notion edits back to Wix instead, flip the row to **Update** and run
+   `push` — it lands back on Published
 
 Full backend reference: [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md)
 
@@ -66,24 +69,32 @@ python sync_events.py enrich
 
 # 3. Review the Draft rows in Notion, fix anything, flip Status to Ready.
 
-# 4. Preview, then push to Wix (sync enriches first; --no-enrich to skip)
-python sync_events.py sync --dry-run
+# 4. Preview, then push to Wix — pushing is always this explicit step
+python sync_events.py push --dry-run
+python sync_events.py push
+
+# The scheduled sync (or a manual run) keeps Notion mirroring the website:
+# pull pass + enrich pass + Published refresh, never writing to Wix
 python sync_events.py sync
 ```
 
 Tips:
 
-- Month filter: `python sync_events.py enrich -m aug sep` / `sync -m aug`.
-- `sync --draft` creates events as Wix drafts; re-run `sync` without the flag
+- Month filter: `python sync_events.py enrich -m aug sep` / `push -m aug`.
+- `push --draft` creates events as Wix drafts; re-run `push` without the flag
   to publish them.
-- Re-running `sync` is always safe — unchanged rows are skipped (content
-  hash), Published rows are refreshed from Wix, failures land in the row's
-  `Sync Error` with Status `Error`.
+- Re-running `sync` or `push` is always safe — unchanged rows are skipped
+  (content hash), Published rows are refreshed from Wix by `sync`, failures
+  land in the row's `Sync Error` with Status `Error`. `sync` reports any
+  Ready/Update/Cancel/Delete rows as "waiting for push".
 - To edit live events, edit the row in Notion, flip Status to `Update`, and
-  run `sync` — the changes are pushed to Wix and the row returns to
+  run `push` — the changes are pushed to Wix and the row returns to
   `Published`. (Editing a `Published` row without the flip gets overwritten
   from Wix on the next sync, since the website is authoritative for
   Published rows.)
+- Wix-native recurring series (e.g. weekly jams created on the website) show
+  up in Notion as **one row per series** — the next upcoming occurrence.
+  When it passes, the next occurrence rolls in on the following sync.
 
 ## Commands
 
@@ -98,7 +109,8 @@ python sync_events.py setup-notion        # One-time: create Notion databases (r
 python sync_events.py import-event-templates  # One-time: events-export CSV -> Type=event catalog rows
 python sync_events.py pull                # Wix -> Notion backfill/refresh (--scope all for past events)
 python sync_events.py enrich              # Fill blanks on Idea/Draft rows (-m for months; sync does this too)
-python sync_events.py sync                # Enrich pass + push Ready/Update rows, refresh Published rows from Wix (--no-enrich, --dry-run, --draft, -m)
+python sync_events.py sync                # Wix -> Notion refresh: pull pass + enrich pass + Published refresh; never writes to Wix (--no-pull, --no-enrich, --dry-run, -m)
+python sync_events.py push                # Notion -> Wix: create Ready rows, apply Update edits, run Cancel/Delete (--dry-run, --draft, --no-tickets, -m)
 
 # Site config: eCommerce tax-by-location (pay-link checkout tax)
 python sync_events.py pull-site-config    # Wix tax regions/mappings -> Notion Site Config DB
@@ -134,10 +146,11 @@ Recommended views to add by hand: Calendar on Date, Board by Status, a
 ## Automation (GitHub Actions)
 
 [.github/workflows/sync-events.yml](.github/workflows/sync-events.yml) runs
-`sync` (which starts with an enrich pass) daily at 9 AM EST, on manual
-dispatch, and on `repository_dispatch` (type `notion-sync`) so a Notion
-button/automation webhook can trigger an instant run — see
-[docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
+`sync` (pull pass + enrich pass + Published refresh; never writes to Wix)
+every 30 minutes, on manual dispatch, and on `repository_dispatch` (type
+`notion-sync`) so a Notion button/automation webhook can trigger an instant
+run — see [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
+Pushing to Wix is not scheduled: run `python sync_events.py push` yourself.
 
 Required repo secrets: `WIX_API_KEY`, `WIX_ACCOUNT_ID`, `WIX_SITE_ID`,
 `GOOGLE_CREDENTIALS` (Drive images), `NOTION_ACCESS_TOKEN`, and the four
@@ -177,12 +190,12 @@ WIX_PROD_SITE_ID=your_prod_site_id
 ### Targeting production
 
 `WIX_SITE_ID` should always stay on the dev site. To run against production,
-pass `--production` to any Wix-touching command (`sync`, `pull`, `test`,
-`list`, `validate`, `pull-site-config`, `push-site-config`):
+pass `--production` to any Wix-touching command (`sync`, `push`, `pull`,
+`test`, `list`, `validate`, `pull-site-config`, `push-site-config`):
 
 ```bash
-python sync_events.py sync --dry-run --production   # preview against prod
-python sync_events.py sync --production             # real prod sync
+python sync_events.py push --dry-run --production   # preview against prod
+python sync_events.py push --production             # real prod push
 ```
 
 The flag retargets the run onto `WIX_PROD_SITE_ID` — no `.env` editing. As a

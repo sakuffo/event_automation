@@ -220,9 +220,9 @@ Automatic ticketing only fires when **all** of these conditions are true:
    (Wix accepts a `fixedPrice` of `0` and marks the ticket free) so people
    can still register for free events. Only a genuinely blank price creates
    nothing.
-3. You run `python sync_events.py sync` **without** the `--no-tickets` flag.
+3. You run `python sync_events.py push` **without** the `--no-tickets` flag.
 
-In practice a ticketed row can no longer reach sync with a blank price: the
+In practice a ticketed row can no longer reach a push with a blank price: the
 enrich pass guarantees one via the fill hierarchy — template
 `Default Ticket Names/Prices/Capacities` → template `Price Override` →
 `CATEGORY_PRICING` by tag → the `default_ticket_price` Setting (seeded 30).
@@ -247,7 +247,7 @@ Status to `Update` to retry.
   create nothing when flipped to `Update`. For a new row, use an RSVP
   registration type or `--no-tickets` — an explicit `0` price now means
   "create a free ticket", not "skip".
-- **Entire run:** call `python sync_events.py sync --no-tickets`. The log will remind you to rerun without the flag when you are ready.
+- **Entire run:** call `python sync_events.py push --no-tickets`. The log will remind you to rerun without the flag when you are ready.
 
 #### Mixed Rows Example
 
@@ -262,10 +262,10 @@ Status to `Update` to retry.
 
 ```bash
 # Default behaviour (auto tickets when eligible)
-python sync_events.py sync
+python sync_events.py push
 
 # Skip ticket creation for this run
-python sync_events.py sync --no-tickets
+python sync_events.py push --no-tickets
 ```
 
 ### Implementation

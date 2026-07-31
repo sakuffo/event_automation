@@ -996,6 +996,15 @@ class NotionStore:
         time.sleep(WRITE_DELAY_SECONDS)
         return page
 
+    def archive_page(self, page_id: str) -> None:
+        """Archive (soft-delete) a page — it lands in Notion's trash,
+        restorable from the UI."""
+        self._api(
+            f"page archive {page_id}",
+            lambda: self.client.pages.update(page_id=page_id, archived=True),
+        )
+        time.sleep(WRITE_DELAY_SECONDS)
+
     # -- database creation (setup-notion) -----------------------------------
 
     def _ensure_select_options(
