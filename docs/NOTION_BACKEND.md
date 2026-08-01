@@ -268,8 +268,12 @@ Runs are plain CLI invocations — locally or via GitHub Actions
   `sync` never writes to Wix — it mirrors the live site into Notion.
   Requires the `WIX_PROD_SITE_ID` repo secret.
 - **Manual**: Actions tab → "Sync Events from Wix to Notion" → Run workflow.
-- **Pushing to Wix is never scheduled** — run `python sync_events.py push`
-  from a terminal when rows are ready to go live.
+- **Push from GitHub**: Actions tab → "Push Events from Notion to Wix" → Run
+  workflow. Leave the default `preview` mode for a dry run. For a real
+  production push, select `push`, type `PUSH`, and run it from `main`. This
+  processes all waiting `Ready`, `Update`, `Cancel`, and `Delete` rows.
+- **Pushing to Wix is never scheduled** — use that manual action when away
+  from a terminal, or run `python sync_events.py push` locally.
 - **From Notion** (optional, paid plan): a database automation or button with
   a *Send webhook* action can fire the sync workflow instantly:
   - URL: `https://api.github.com/repos/{owner}/{repo}/dispatches`

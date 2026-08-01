@@ -77,7 +77,8 @@ Add these repository secrets (Settings → Secrets and variables → Actions):
 | Secret | Value |
 | --- | --- |
 | `WIX_API_KEY` | from Part 1 |
-| `WIX_SITE_ID` | the site the automation should target |
+| `WIX_SITE_ID` | the dev site id (kept as the safe default) |
+| `WIX_PROD_SITE_ID` | the production site id targeted by `--production` |
 | `WIX_ACCOUNT_ID` | optional (Site Media) |
 | `NOTION_ACCESS_TOKEN` | from Part 2 |
 | `NOTION_EVENT_SCHEDULING_DB_ID` | printed by setup-notion |
@@ -87,8 +88,14 @@ Add these repository secrets (Settings → Secrets and variables → Actions):
 | `GOOGLE_CREDENTIALS` | from Part 3 |
 
 [.github/workflows/sync-events.yml](.github/workflows/sync-events.yml) then
-runs `sync` daily, on manual dispatch, and on the `notion-sync`
-repository-dispatch webhook. Runs are serialized by a concurrency group.
+runs `sync --production` every 30 minutes, on manual dispatch, and on the
+`notion-sync` repository-dispatch webhook.
+
+[.github/workflows/push-events.yml](.github/workflows/push-events.yml) is a
+separate, unscheduled action for manually previewing or pushing all waiting
+`Ready`, `Update`, `Cancel`, and `Delete` rows to production. A real push
+requires selecting `push` and typing `PUSH`. Both workflows share a
+concurrency group so their Notion writes cannot overlap.
 
 ## Part 6: Dev safety
 

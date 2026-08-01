@@ -34,8 +34,9 @@ def _enforce_site_guard(command: str, args, config) -> Optional[str]:
     Without the explicit ``--production`` flag, a run whose ``WIX_SITE_ID``
     matches it is refused. With the flag, the run is retargeted onto the
     production site id — the flag is the *only* supported way to hit
-    production, and it is human-only: automation and AI agents must never
-    pass it.
+    production, and it is human-only. Autonomous jobs and AI agents must
+    never pass it; the guarded manual GitHub workflow may pass it when
+    explicitly dispatched by a human.
 
     Returns an error message to print, or None when the run may proceed.
     """
@@ -117,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Target the production Wix site (WIX_PROD_SITE_ID) instead of "
-            "WIX_SITE_ID. Human-only — never passed by automation or agents."
+            "WIX_SITE_ID. Human-only — never passed by autonomous jobs or agents."
         ),
     )
 

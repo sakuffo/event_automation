@@ -151,7 +151,12 @@ writes to Wix, so mirroring the production site is safe) every 30 minutes,
 on manual dispatch, and on `repository_dispatch` (type `notion-sync`) so a
 Notion button/automation webhook can trigger an instant run — see
 [docs/NOTION_BACKEND.md](docs/NOTION_BACKEND.md#triggering-runs).
-Pushing to Wix is not scheduled: run `python sync_events.py push` yourself.
+
+[.github/workflows/push-events.yml](.github/workflows/push-events.yml) provides
+a separate manual-only action for times when a local terminal is unavailable.
+It defaults to a production dry-run; a real push requires selecting `push` and
+typing `PUSH`. The action processes every waiting `Ready`, `Update`, `Cancel`,
+and `Delete` row. It is never scheduled.
 
 Required repo secrets: `WIX_API_KEY`, `WIX_ACCOUNT_ID`, `WIX_SITE_ID`,
 `WIX_PROD_SITE_ID` (the `--production` target), `GOOGLE_CREDENTIALS`
@@ -202,7 +207,9 @@ python sync_events.py push --production             # real prod push
 The flag retargets the run onto `WIX_PROD_SITE_ID` — no `.env` editing. As a
 backstop, if `WIX_SITE_ID` is ever pointed at the production id, every Wix
 command refuses to run until `--production` is passed explicitly. The flag is
-**human-only**: automation and AI agents must never pass it.
+**human-only**: use it directly or through the explicitly dispatched
+`push-events.yml` workflow; autonomous jobs and AI agents must never trigger a
+production push.
 
 ## How It Works
 
@@ -241,7 +248,7 @@ command refuses to run until `--production` is passed explicitly. The flag is
 ├── scripts/                   # Operational one-offs (set status, diag hashes)
 │   └── dev/                   # Manual Wix dev tools (never collected by pytest)
 ├── docs/NOTION_BACKEND.md     # Notion data model + lifecycle + triggers
-├── .github/workflows/         # ci.yml, sync-events.yml
+├── .github/workflows/         # CI, scheduled sync, and manual production push
 └── tests/                     # pytest suite (pyproject.toml confines collection)
 ```
 
