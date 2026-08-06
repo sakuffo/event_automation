@@ -68,11 +68,13 @@ from .wix_mapping import (
     event_match_key,
     is_secondary_recurring_occurrence,
     log_event_diff,
+    order_summary_revenue,
     parse_month_value,
     select_default_tax_group_id,
     site_config_row_sort_key,
     tax_mapping_to_site_row,
     ticket_policy_status,
+    ticket_sales_summary,
     wix_event_to_config_row,
 )
 from .runtime import SyncRuntime
@@ -98,6 +100,7 @@ DEFAULT_SETTINGS_SEED: List[tuple] = [
     ("default_checkout_form", "", "Checkout Form for ticketed rows: PER_TICKET (each ticket needs its own registration form) or PER_ORDER (one form per checkout). Leave blank to keep the Wix dashboard setting."),
     ("default_duration_hours", "2", "End time = start + this many hours when a row has no end time"),
     ("default_ticket_policy", "", "Policy blurb printed on every ticket of every event (e.g. insurance notice). Max 1000 characters; leave blank to disable. Run scripts/apply_ticket_policy.py to backfill tickets that already exist in Wix."),
+    ("dashboard_page_id", "", "Auto-managed by sync: page id of the generated Events Dashboard. Blank = sync creates the page under NOTION_PARENT_PAGE_ID on its next run; clear to regenerate."),
 ]
 
 
@@ -620,14 +623,16 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                     except ValidationError:
                         row_hash = None
                     if row_hash == record.synced_hash and row_status == target_status:
-                        # Policy status isn't hashed — drift alone must still
-                        # trigger the bookkeeping write to become visible.
+                        # Policy status and the pull-only sales columns aren't
+                        # hashed — drift alone must still trigger the
+                        # bookkeeping write to become visible.
                         stale_bookkeeping = (
                             (existing.get("synced_hash") or "") != record.synced_hash
                             or (existing.get("wix_event_id") or "").strip() != wix_id
                             or bool((existing.get("sync_error") or "").strip())
                             or (existing.get("ticket_policy_status") or "")
                             != (record.ticket_policy_status or "")
+                            or _sales_bookkeeping_stale(existing, record)
                         )
                         if stale_bookkeeping:
                             store.write_sync_result(
@@ -636,6 +641,9 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                                 ticket_policy_status=(
                                     record.ticket_policy_status or ""
                                 ),
+                                tickets_sold=record.tickets_sold,
+                                tickets_sold_by_type=record.tickets_sold_by_type,
+                                revenue=record.revenue,
                             )
                         results["skipped"].append(title)
                         logger.info("   ⏭️  Unchanged (matches Wix)")
@@ -1477,10 +1485,20 @@ def _wix_event_to_record(
         if (wix_event.get("status") or "") == "CANCELED"
         else STATUS_PUBLISHED
     )
-    ticket_defs = client.get_ticket_definitions(wix_id)
+    ticket_defs = client.get_ticket_definitions(wix_id, include_sales=True)
     config_row = wix_event_to_config_row(wix_event, ticket_defs, tz_name=tz_name)
     policy_status = ticket_policy_status(ticket_defs, policy_text)
     config_row["ticket_policy_status"] = policy_status
+
+    # Pull-only sales columns (read path only — never pushed to Wix).
+    # Revenue needs one extra read; skipped for events without tickets.
+    tickets_sold, tickets_sold_by_type = ticket_sales_summary(ticket_defs)
+    revenue: Optional[float] = None
+    if ticket_defs:
+        revenue = order_summary_revenue(client.get_order_summary(wix_id))
+    config_row["tickets_sold"] = tickets_sold
+    config_row["tickets_sold_by_type"] = tickets_sold_by_type
+    config_row["revenue"] = revenue
 
     record: Optional[EventRecord] = None
     invalid_note = ""
@@ -1677,6 +1695,35 @@ def _handle_delete_row(
     _pace_wix(ctx)
 
 
+def _numbers_differ(row_value: Any, record_value: Any) -> bool:
+    """Compare a Notion number (float|None) against a record number.
+
+    None means "unknown this run" on the record side — never a reason to
+    write (the existing value is left alone).
+    """
+    if record_value is None:
+        return False
+    if row_value is None:
+        return True
+    return float(row_value) != float(record_value)
+
+
+def _sales_bookkeeping_stale(
+    row: Dict[str, Any], wix_record: EventRecord
+) -> bool:
+    """Do the pull-only sales columns need a refresh write?"""
+    by_type_differs = (
+        wix_record.tickets_sold_by_type is not None
+        and (row.get("tickets_sold_by_type") or "")
+        != wix_record.tickets_sold_by_type
+    )
+    return (
+        _numbers_differ(row.get("tickets_sold"), wix_record.tickets_sold)
+        or by_type_differs
+        or _numbers_differ(row.get("revenue"), wix_record.revenue)
+    )
+
+
 def _refresh_published_row(
     ctx: _SyncContext, row: Dict[str, Any], name: str, page_id: str
 ) -> None:
@@ -1724,20 +1771,25 @@ def _refresh_published_row(
 
     row_status = row.get("status") or ""
     if row_hash == wix_record.synced_hash and row_status == target_status:
-        # Policy status isn't hashed, so drift alone (a dashboard-side policy
-        # edit) must count as stale bookkeeping or it would stay invisible.
+        # Policy status and the pull-only sales columns aren't hashed, so
+        # drift alone (a policy edit, a ticket purchase) must count as stale
+        # bookkeeping or it would stay invisible.
         stale_bookkeeping = (
             (row.get("synced_hash") or "") != wix_record.synced_hash
             or (row.get("wix_event_id") or "").strip() != wix_id
             or bool((row.get("sync_error") or "").strip())
             or (row.get("ticket_policy_status") or "")
             != (wix_record.ticket_policy_status or "")
+            or _sales_bookkeeping_stale(row, wix_record)
         )
         if stale_bookkeeping:
             _write_row_result(
                 ctx, page_id, wix_event_id=wix_id,
                 synced_hash=wix_record.synced_hash, error=None,
                 ticket_policy_status=wix_record.ticket_policy_status or "",
+                tickets_sold=wix_record.tickets_sold,
+                tickets_sold_by_type=wix_record.tickets_sold_by_type,
+                revenue=wix_record.revenue,
             )
         logger.info("  ⏭️  %s (matches Wix)", name)
         ctx.results["skipped"].append(name)
@@ -2290,6 +2342,15 @@ def notion_sync_events(
             empty_message="No Ready/Published/Update/Cancel/Delete rows to sync.",
             dry_run=dry_run,
         )
+
+        # Rebuild the read-only Events Dashboard page from the refreshed
+        # rows. Contained: a dashboard failure never fails the sync.
+        if dry_run:
+            logger.info("\n⏭️  Skipping dashboard refresh (dry run)")
+        else:
+            from .notion_dashboard import refresh_dashboard
+            refresh_dashboard(runtime)
+
         if results is None:
             return True
         _log_sync_summary(results, dry_run, runtime.cache_stats)

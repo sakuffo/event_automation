@@ -112,8 +112,11 @@ class StoreStub:
 
 
 class ClientStub:
-    def get_ticket_definitions(self, wix_id):
+    def get_ticket_definitions(self, wix_id, include_sales=False):
         return []
+
+    def get_order_summary(self, wix_id):
+        return None
 
 
 def make_runtime(store: StoreStub) -> SimpleNamespace:
@@ -147,8 +150,11 @@ def test_sync_fetches_all_lifecycle_rows(monkeypatch):
     assert notion_sync_events(
         make_runtime(store), run_enrich=False, run_pull=False
     ) is True
+    # One fetch for the status loop, one (Published only) for the
+    # Events Dashboard rebuild that follows it.
     assert store.fetch_calls == [
-        ["Ready", "Published", "Update", "Cancel", "Delete"]
+        ["Ready", "Published", "Update", "Cancel", "Delete"],
+        ["Published"],
     ]
 
 

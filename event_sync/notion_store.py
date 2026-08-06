@@ -149,6 +149,11 @@ class EventProps:
     # Read-only: does the live event's tickets carry the Settings
     # default_ticket_policy? Written by sync/pull, never by humans.
     TICKET_POLICY_STATUS = "Ticket Policy Status"
+    # Pull-only sales columns: written by sync/pull from live Wix sales
+    # data, never read by any push path — no Wix write can originate here.
+    TICKETS_SOLD = "Tickets Sold"
+    TICKETS_SOLD_BY_TYPE = "Tickets Sold By Type"
+    REVENUE = "Revenue"
     SOURCE = "Source"
     EXTERNAL_REF = "External Ref"
 
@@ -238,6 +243,9 @@ def _events_db_properties(catalog_data_source_id: Optional[str]) -> Dict[str, An
         EventProps.SYNCED_HASH: {"rich_text": {}},
         EventProps.SYNC_ERROR: {"rich_text": {}},
         EventProps.TICKET_POLICY_STATUS: {"rich_text": {}},
+        EventProps.TICKETS_SOLD: {"number": {"format": "number"}},
+        EventProps.TICKETS_SOLD_BY_TYPE: {"rich_text": {}},
+        EventProps.REVENUE: {"number": {"format": "canadian_dollar"}},
         EventProps.SOURCE: {
             "select": {
                 "options": [
@@ -643,6 +651,11 @@ def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, str]:
         "ticket_policy_status": v_plain_text(
             page, EventProps.TICKET_POLICY_STATUS
         ).strip(),
+        "tickets_sold": v_number(page, EventProps.TICKETS_SOLD),
+        "tickets_sold_by_type": v_plain_text(
+            page, EventProps.TICKETS_SOLD_BY_TYPE
+        ).strip(),
+        "revenue": v_number(page, EventProps.REVENUE),
         "template_relation_ids": v_relation_ids(page, EventProps.TEMPLATE),
     }
     return row
@@ -691,6 +704,9 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
         wix_event_id=row.get("wix_event_id") or None,
         status=row.get("status") or None,
         synced_hash=row.get("synced_hash") or None,
+        tickets_sold=row.get("tickets_sold"),
+        tickets_sold_by_type=row.get("tickets_sold_by_type") or None,
+        revenue=row.get("revenue"),
     )
 
 
@@ -848,6 +864,16 @@ def event_properties_from_record(
         props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
             record.ticket_policy_status
         )
+        # Pull-only sales columns: None = unknown (e.g. the order-summary
+        # call failed) — leave the existing Notion value alone.
+        if record.tickets_sold is not None:
+            props[EventProps.TICKETS_SOLD] = p_number(record.tickets_sold)
+        if record.tickets_sold_by_type is not None:
+            props[EventProps.TICKETS_SOLD_BY_TYPE] = p_rich_text(
+                record.tickets_sold_by_type
+            )
+        if record.revenue is not None:
+            props[EventProps.REVENUE] = p_number(record.revenue)
         if record.status:
             props[EventProps.STATUS] = p_select(record.status)
 
@@ -1004,6 +1030,93 @@ class NotionStore:
             lambda: self.client.pages.update(page_id=page_id, archived=True),
         )
         time.sleep(WRITE_DELAY_SECONDS)
+
+    # -- plain pages and blocks (Events Dashboard) ---------------------------
+
+    def create_child_page(self, parent_page_id: str, title: str) -> str:
+        """Create an empty page under another page; return its id."""
+        page = self._api(
+            f"page create under {parent_page_id}",
+            lambda: self.client.pages.create(
+                parent={"type": "page_id", "page_id": parent_page_id},
+                properties={
+                    "title": {
+                        "title": [
+                            {"type": "text", "text": {"content": title}}
+                        ]
+                    }
+                },
+            ),
+            retry=False,
+        )
+        time.sleep(WRITE_DELAY_SECONDS)
+        return page["id"]
+
+    # Notion caps children.append at 100 blocks per request, nested blocks
+    # (table rows) included — chunk conservatively.
+    BLOCK_APPEND_CHUNK = 80
+
+    def replace_page_blocks(
+        self, page_id: str, blocks: List[Dict[str, Any]]
+    ) -> None:
+        """Replace a page's content blocks (delete all, append the new set).
+
+        Deleting a table block deletes its nested rows with it, so only the
+        top-level children need removing. Appends are chunked under Notion's
+        100-blocks-per-request cap, counting one level of nesting.
+        """
+        cursor: Optional[str] = None
+        existing_ids: List[str] = []
+        while True:
+            kwargs: Dict[str, Any] = {"block_id": page_id, "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            response = self._api(
+                f"block children list {page_id}",
+                lambda: self.client.blocks.children.list(**kwargs),
+            )
+            existing_ids.extend(
+                b["id"] for b in response.get("results", []) if b.get("id")
+            )
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+
+        for block_id in existing_ids:
+            self._api(
+                f"block delete {block_id}",
+                lambda: self.client.blocks.delete(block_id=block_id),
+            )
+            time.sleep(WRITE_DELAY_SECONDS)
+
+        chunk: List[Dict[str, Any]] = []
+        chunk_weight = 0
+
+        def _flush() -> None:
+            nonlocal chunk, chunk_weight
+            if not chunk:
+                return
+            children = list(chunk)
+            self._api(
+                f"block children append {page_id}",
+                lambda: self.client.blocks.children.append(
+                    block_id=page_id, children=children
+                ),
+                retry=False,
+            )
+            time.sleep(WRITE_DELAY_SECONDS)
+            chunk = []
+            chunk_weight = 0
+
+        for block in blocks:
+            weight = 1 + len(
+                (block.get("table") or {}).get("children") or []
+            )
+            if chunk and chunk_weight + weight > self.BLOCK_APPEND_CHUNK:
+                _flush()
+            chunk.append(block)
+            chunk_weight += weight
+        _flush()
 
     # -- database creation (setup-notion) -----------------------------------
 
@@ -1301,12 +1414,16 @@ class NotionStore:
         error: Optional[str] = None,
         source: Optional[str] = None,
         ticket_policy_status: Optional[str] = None,
+        tickets_sold: Optional[int] = None,
+        tickets_sold_by_type: Optional[str] = None,
+        revenue: Optional[float] = None,
     ) -> None:
         """Write sync bookkeeping back onto an Events row.
 
         ``error=None`` clears the Sync Error property; pass a message to set it.
         ``ticket_policy_status=None`` leaves the column untouched; pass ``""``
-        to clear it.
+        to clear it. The pull-only sales values follow the same convention:
+        None leaves the column alone (sales data unavailable this run).
         """
         props: Dict[str, Any] = {
             EventProps.LAST_SYNCED: _last_synced_prop(),
@@ -1324,6 +1441,14 @@ class NotionStore:
             props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
                 ticket_policy_status
             )
+        if tickets_sold is not None:
+            props[EventProps.TICKETS_SOLD] = p_number(tickets_sold)
+        if tickets_sold_by_type is not None:
+            props[EventProps.TICKETS_SOLD_BY_TYPE] = p_rich_text(
+                tickets_sold_by_type
+            )
+        if revenue is not None:
+            props[EventProps.REVENUE] = p_number(revenue)
         self.update_page(page_id, props)
 
     def update_event_fields(self, page_id: str, props: Dict[str, Any]) -> None:
@@ -1362,7 +1487,8 @@ class NotionStore:
 
         Lets ``pull`` land incomplete Wix events (no date, no location) in
         Notion with a Sync Error note instead of dropping them.
-        ``ticket_policy_status=None`` leaves that column untouched.
+        ``ticket_policy_status=None`` leaves that column untouched, as do
+        absent/None sales values in the row.
         """
         props = event_properties_from_raw_row(row, self.config.timezone)
         props[EventProps.WIX_EVENT_ID] = p_rich_text(wix_event_id)
@@ -1370,6 +1496,14 @@ class NotionStore:
             props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
                 ticket_policy_status
             )
+        if row.get("tickets_sold") is not None:
+            props[EventProps.TICKETS_SOLD] = p_number(row["tickets_sold"])
+        if row.get("tickets_sold_by_type") is not None:
+            props[EventProps.TICKETS_SOLD_BY_TYPE] = p_rich_text(
+                row["tickets_sold_by_type"]
+            )
+        if row.get("revenue") is not None:
+            props[EventProps.REVENUE] = p_number(row["revenue"])
         return self._stamp_and_write_event(
             props, status=status, source=source, error=error, page_id=page_id
         )

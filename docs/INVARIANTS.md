@@ -48,6 +48,18 @@ Code-owned rich text on Event Scheduling showing whether the live tickets carry 
 
 *Pinned by `tests/test_ticket_policy.py`.*
 
+## Sales columns are pull-only (Tickets Sold / Tickets Sold By Type / Revenue)
+
+Code-owned columns on Event Scheduling refreshed from live Wix sales data by `sync`'s Published refresh and by `pull` — **never by humans, never toward Wix**. `Tickets Sold` (number) and `Tickets Sold By Type` (semicolon list, positionally aligned with `Ticket Names` because both come from the same ticket-definition order) sum `salesDetails.soldCount` from the ticket-definitions fetch the refresh already makes (`include_sales=True` requests the `SALES_DETAILS` fieldset); `Revenue` comes from the read-only `GET /events/v1/orders/summary` endpoint (confirmed orders; one extra read per ticketed event, skipped for events without ticket definitions). The wording/values are owned by `wix_mapping.ticket_sales_summary` and `wix_mapping.order_summary_revenue`. Pull-only is structural: the fields are bookkeeping on `EventRecord` (never in `HASHED_FIELDS`, so sales drift never flips a row toward push), no push path reads them, and `build_wix_event_payload`/`diff_event_fields` never reference them — there is no Wix write these columns can cause. Like `Ticket Policy Status`, sales drift alone counts as `stale_bookkeeping` on the hash fast-paths (a ticket purchase becomes visible without a full row rewrite), and a failed order-summary call yields `None` = "leave the column alone" — existing values are never blanked by an API hiccup. Human edits to these columns are simply overwritten on the next refresh.
+
+*Pinned by `tests/test_sales_dashboard.py`.*
+
+## Events Dashboard page (generated, display-only)
+
+`sync` finishes by rewriting one Notion page (`notion_dashboard.refresh_dashboard`): an upcoming-events table (sold / capacity / % with the old GitHub Pages dashboard's 70%/100% color thresholds) and a by-month sales summary, built purely from the Published rows (`build_dashboard_blocks`, pure function). The page is identified by the auto-managed `dashboard_page_id` Setting — blank means "create under `NOTION_PARENT_PAGE_ID` next sync and remember it"; a deleted page is recreated once. Display-only and contained: nothing on the page feeds back into sync/push, building it never talks to Wix, a dashboard failure never fails the sync, and dry runs skip it entirely.
+
+*Pinned by `tests/test_sales_dashboard.py` (block builder) and `tests/test_sync_direction.py` (fetch pattern).*
+
 ## Checkout Form
 
 `Checkout Form` select (`PER_TICKET` / `PER_ORDER`) on Event Scheduling maps to the event-level Wix `registration.tickets.guestsAssignedSeparately` boolean (PER_TICKET = each ticket needs its own registration form). Modeled exactly like `Ticket Limit Per Order`: blank = not managed (nothing sent on create, never diffed, dashboard setting untouched); enrich fills blank ticketed rows from the `default_checkout_form` Setting (seeded blank); pull/Published refresh read the live value back (Wix omits false booleans — a non-empty tickets object reads as `PER_ORDER`). `checkout_form` is a hashed `EventRecord` field, so its introduction re-writes each Published row's hash once.

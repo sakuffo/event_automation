@@ -734,6 +734,49 @@ def ticket_policy_status(
     return f"{len(mismatched)} of {total} ticket{plural} {kind} policy"
 
 
+def ticket_sales_summary(
+    ticket_defs: List[Dict[str, Any]],
+) -> Tuple[Optional[int], Optional[str]]:
+    """``(total_sold, by_type)`` from live ticket definitions' sales details.
+
+    The single owner of the values written to the pull-only ``Tickets Sold``
+    and ``Tickets Sold By Type`` columns. ``by_type`` is a semicolon list in
+    ticket-definition order — the same order ``wix_event_to_config_row``
+    uses for Ticket Names, so the two columns align positionally. Events
+    with no ticket definitions (RSVP etc.) return ``(None, None)`` — the
+    columns stay blank rather than showing a misleading 0. Definitions must
+    be fetched with ``include_sales=True`` (the ``SALES_DETAILS`` fieldset);
+    a definition without sales details counts as 0 sold.
+    """
+    if not ticket_defs:
+        return None, None
+    counts = [
+        int((td.get("salesDetails") or {}).get("soldCount") or 0)
+        for td in ticket_defs
+    ]
+    return sum(counts), "; ".join(str(c) for c in counts)
+
+
+def order_summary_revenue(summary: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Total confirmed-order revenue from ``GET /events/v1/orders/summary``.
+
+    The response groups sales by currency; this venue sells in one currency,
+    so entries are summed. An empty ``sales`` list means no confirmed orders
+    — 0.0. ``None`` in (the API call failed) returns ``None`` out, so the
+    caller leaves the existing Notion value alone instead of blanking it.
+    """
+    if summary is None:
+        return None
+    total = 0.0
+    for entry in summary.get("sales") or []:
+        value = (entry.get("revenue") or {}).get("value")
+        try:
+            total += float(value)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Site-config (tax-by-location) row builders
 # ---------------------------------------------------------------------------

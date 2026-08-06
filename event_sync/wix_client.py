@@ -514,6 +514,23 @@ class WixClient:
             logger.warning("Could not query ticket definitions for %s: %s", event_id, exc)
             return []
 
+    def get_order_summary(self, event_id: str) -> Optional[Dict[str, Any]]:
+        """Total confirmed ticket sales for an event (read-only).
+
+        ``GET /events/v1/orders/summary`` — revenue/total grouped by
+        currency. Returns None on failure so callers can leave existing
+        values alone instead of blanking them.
+        """
+        try:
+            response = self._request(
+                'GET', '/events/v1/orders/summary',
+                params={'eventId': event_id},
+            )
+            return response.json()
+        except Exception as exc:
+            logger.warning("Could not fetch order summary for %s: %s", event_id, exc)
+            return None
+
     # Category Operations
 
     def query_categories(self) -> List[Dict[str, Any]]:

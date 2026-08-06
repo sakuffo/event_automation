@@ -47,6 +47,9 @@ scheduled, plus what's being ideated on and yet to be scheduled. Replaces the
 | Synced Hash | rich text | **code only** | Hash of the last-synced payload (either direction); drives change detection |
 | Sync Error | rich text | **code only** | Why a row failed or what's missing; empty = healthy |
 | Ticket Policy Status | rich text | **code only** | Do the live tickets carry the Settings `default_ticket_policy`? Blank = policy off or no tickets; `OK (3 tickets)` = all match; `2 of 3 tickets missing policy` = drift (flip to Update, or wait for the next sync, to converge) |
+| Tickets Sold | number | **code only** (pull-only) | Total tickets sold across the event's ticket types, from the live ticket definitions' `salesDetails`. Refreshed by sync/pull; blank = not a ticketed event (or sales unknown). Never pushed to Wix |
+| Tickets Sold By Type | rich text | **code only** (pull-only) | Semicolon per-type sold counts positionally aligned with Ticket Names (e.g. `12; 3`). Never pushed to Wix |
+| Revenue | number (CAD) | **code only** (pull-only) | Confirmed-order revenue from the read-only Wix orders-summary endpoint. A failed read leaves the previous value in place. Never pushed to Wix |
 | Source | select | **code only** | `manual` / `wix` / `gcal` (future Google Calendar importer) |
 | External Ref | rich text | **code only** | Reserved for external importers |
 
@@ -103,6 +106,7 @@ Replaces the `defaults` tab, and holds the pipeline defaults (seeded by
 | `default_checkout_form` | (blank) | `PER_TICKET` (each ticket needs its own registration form) or `PER_ORDER` (one form per checkout) for TICKETS rows without a Checkout Form value. Blank = not managed — rows stay blank and the Wix dashboard setting wins |
 | `default_duration_hours` | 2 | End time = start + this many hours when a row has no end time (template Default End Time wins when set) |
 | `default_ticket_policy` | (blank) | Policy blurb printed on every ticket of every event (Wix `policyText`, max 1000 chars) — e.g. the insurance notice that must accompany each ticket sold. Blank = off. Applied to every ticket the pipeline creates, and converged onto existing tickets when an event is diffed (Ready-match or Update flip); run `scripts/apply_ticket_policy.py --apply` to backfill events already live in Wix |
+| `dashboard_page_id` | (blank) | **Auto-managed by sync**: page id of the generated Events Dashboard. Blank = sync creates the page under `NOTION_PARENT_PAGE_ID` on its next run and stores the id here; clear the value to have a fresh page created |
 
 ### Site Config — tax by location
 

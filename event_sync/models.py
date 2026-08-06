@@ -74,6 +74,14 @@ class EventRecord(BaseModel):
     # event's ticket definitions carry the Settings `default_ticket_policy`.
     # Bookkeeping like synced_hash — never hashed, never pushed to Wix.
     ticket_policy_status: Optional[str] = None
+    # Pull-only sales columns (code-owned, refreshed from Wix by sync/pull):
+    # total sold, per-ticket-type sold counts (semicolon list in ticket
+    # definition order, mirroring Ticket Names), and confirmed-order revenue.
+    # Bookkeeping like synced_hash — never hashed, never pushed to Wix; there
+    # is no write path from these fields to any Wix endpoint.
+    tickets_sold: Optional[int] = None
+    tickets_sold_by_type: Optional[str] = None
+    revenue: Optional[float] = None
 
     @field_validator("start_date", "end_date", mode="before")
     @classmethod
@@ -161,6 +169,21 @@ class EventRecord(BaseModel):
             )
         return value
 
+    @field_validator("tickets_sold", mode="before")
+    @classmethod
+    def normalize_tickets_sold(cls, value):
+        """Notion number properties come back as floats; blank means unknown."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return int(round(float(value)))
+
+    @field_validator("revenue", mode="before")
+    @classmethod
+    def normalize_revenue(cls, value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return float(value)
+
     @field_validator("checkout_form", mode="before")
     @classmethod
     def normalize_checkout_form(cls, value):
@@ -179,7 +202,7 @@ class EventRecord(BaseModel):
         "image_url", "teaser", "description", "event_type", "category",
         "ticket_name", "ticket_price_raw", "ticket_capacity",
         "fee_type", "sale_start", "sale_end",
-        "tax_name", "tax_rate", "tax_type",
+        "tax_name", "tax_rate", "tax_type", "tickets_sold_by_type",
         mode="before",
     )
     @classmethod

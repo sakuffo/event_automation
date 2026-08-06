@@ -81,6 +81,11 @@ class ClientStub:
     def get_ticket_definitions(self, event_id, include_sales=False):
         return self.ticket_defs
 
+    def get_order_summary(self, event_id):
+        # Order summary unavailable — revenue stays untouched, keeping
+        # these tests focused on the policy column.
+        return None
+
     def create_ticket_definition(self, **kwargs):
         self.created.append(kwargs)
         return {"initialLimit": kwargs.get("capacity"), "limited": True}
@@ -338,6 +343,12 @@ def make_notion_row(**overrides) -> Dict[str, Any]:
         "synced_hash": "",
         "sync_error": "",
         "ticket_policy_status": "",
+        # Steady-state sales bookkeeping matching one live ticket definition
+        # with no sales — otherwise every refresh here would also see the
+        # one-time sales-column backfill write.
+        "tickets_sold": 0.0,
+        "tickets_sold_by_type": "0",
+        "revenue": None,
         "template_relation_ids": [],
     }
     row.update(overrides)
