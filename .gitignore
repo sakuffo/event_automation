@@ -48,5 +48,12 @@ temp/
 *.csv
 *.xlsx
 
-# Claude Code session artifacts (worktrees, local settings, memory)
-.claude/
+# Claude Code: shared agent config IS tracked (settings.json, hooks/, skills/,
+# commands/, agents/). Volatile session state (worktrees, local overrides) is not.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/skills/
+!.claude/commands/
+!.claude/agents/
+.claude/settings.local.json
