@@ -102,6 +102,7 @@ def test_sales_fields_never_change_content_hash():
     plain = build_record()
     with_sales = build_record(
         tickets_sold=42, tickets_sold_by_type="40; 2", revenue=1234.5,
+        hidden_from_schedule=True,
     )
     assert plain.content_hash() == with_sales.content_hash()
     for field in ("tickets_sold", "tickets_sold_by_type", "revenue"):
@@ -139,7 +140,7 @@ def test_sales_columns_round_trip_through_notion_properties():
 
     record = build_record(
         tickets_sold=7, tickets_sold_by_type="5; 2", revenue=245.0,
-        wix_event_id="w1", synced_hash="abc",
+        wix_event_id="w1", synced_hash="abc", hidden_from_schedule=True,
     )
     props = event_properties_from_record(record, TZ, include_bookkeeping=True)
     assert props[EventProps.TICKETS_SOLD]["number"] == 7
@@ -150,6 +151,7 @@ def test_sales_columns_round_trip_through_notion_properties():
     assert rebuilt.tickets_sold == 7
     assert rebuilt.tickets_sold_by_type == "5; 2"
     assert rebuilt.revenue == 245.0
+    assert rebuilt.hidden_from_schedule is True
 
 
 def test_unknown_sales_values_are_not_written():
@@ -503,6 +505,29 @@ def test_dashboard_percent_colors_match_thresholds():
     ]
     colors = [c.get("annotations", {}).get("color", "default") for c in pct_cells]
     assert colors == ["green", "orange", "red"]
+
+
+def test_dashboard_hides_windowed_row_but_keeps_month_history():
+    rows = [
+        dash_row(start_date="2026-08-12", event_name="Visible"),
+        dash_row(
+            page_id="p2",
+            start_date="2026-08-19",
+            event_name="Hidden Tinker",
+            hidden_from_schedule=True,
+        ),
+    ]
+    blocks = build_dashboard_blocks(rows, now=NOW)
+    assert any("Upcoming events (1)" in t for t in block_texts(blocks))
+
+    upcoming_table, month_table = find_tables(blocks)
+    upcoming_names = [
+        row["table_row"]["cells"][1][0]["text"]["content"]
+        for row in upcoming_table["table"]["children"][1:]
+    ]
+    assert upcoming_names == ["Visible"]
+    august = month_table["table"]["children"][1]
+    assert august["table_row"]["cells"][1][0]["text"]["content"] == "2"
 
 
 def test_dashboard_unknown_sales_and_capacity_show_dashes():

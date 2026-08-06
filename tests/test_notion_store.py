@@ -74,6 +74,9 @@ def properties_to_page(props: Dict[str, Any], page_id: str = "page-1") -> Dict[s
         elif "number" in value:
             prop["type"] = "number"
             prop["number"] = value["number"]
+        elif "checkbox" in value:
+            prop["type"] = "checkbox"
+            prop["checkbox"] = value["checkbox"]
         elif "url" in value:
             prop["type"] = "url"
             prop["url"] = value["url"]
@@ -170,6 +173,23 @@ class TestPropertyRoundTrip:
         assert row["checkout_form"] == ""
         assert row_to_event_record(row).checkout_form is None
 
+    def test_hidden_from_schedule_round_trips_as_bookkeeping(self):
+        record = build_record(hidden_from_schedule=True)
+        props = event_properties_from_record(
+            record, TZ, include_bookkeeping=True
+        )
+        assert props[EventProps.HIDDEN_FROM_SCHEDULE] == {"checkbox": True}
+        row = event_page_to_row(properties_to_page(props), TZ)
+        assert row["hidden_from_schedule"] is True
+        assert row_to_event_record(row).hidden_from_schedule is True
+
+    def test_visible_record_writes_explicit_false_checkbox(self):
+        record = build_record(hidden_from_schedule=False)
+        props = event_properties_from_record(
+            record, TZ, include_bookkeeping=True
+        )
+        assert props[EventProps.HIDDEN_FROM_SCHEDULE] == {"checkbox": False}
+
     def test_long_description_is_chunked_and_rejoined(self):
         long_text = "x" * 4500
         record = build_record(description=long_text)
@@ -246,6 +266,7 @@ class TestContentHash:
         b.wix_event_id = "some-wix-id"
         b.status = "Published"
         b.synced_hash = "deadbeef"
+        b.hidden_from_schedule = True
         b.ticket_policy_status = "2 of 3 tickets missing policy"
         assert a.content_hash() == b.content_hash()
 
@@ -439,6 +460,10 @@ class TestStatusLifecycle:
             o["name"] for o in props[EventProps.STATUS]["select"]["options"]
         }
         assert {"Cancel", "Cancelled", "Delete", "Removed"} <= option_names
+
+    def test_events_schema_includes_schedule_visibility_checkbox(self):
+        props = notion_store._events_db_properties(None)
+        assert props[EventProps.HIDDEN_FROM_SCHEDULE] == {"checkbox": {}}
 
     def _schema_with_options(self, names: List[str]) -> Dict[str, Any]:
         return {
@@ -675,19 +700,27 @@ class TestEnsureEventProperties:
         return NotionStore(make_config()), fake
 
     def test_adds_missing_events_properties(self, monkeypatch):
-        # A database created before Instructor/Template existed.
+        # A database created before Instructor/Template/visibility existed.
         live = {
             name: {"id": f"prop-{i}"}
             for i, name in enumerate(
                 notion_store._events_db_properties("ds-db-catalog")
             )
-            if name not in (EventProps.INSTRUCTOR, EventProps.TEMPLATE)
+            if name not in (
+                EventProps.HIDDEN_FROM_SCHEDULE,
+                EventProps.INSTRUCTOR,
+                EventProps.TEMPLATE,
+            )
         }
         store, fake = self._store_with_live_props(monkeypatch, live)
 
         added = store.ensure_event_properties()
 
-        assert added == sorted([EventProps.INSTRUCTOR, EventProps.TEMPLATE])
+        assert added == sorted([
+            EventProps.HIDDEN_FROM_SCHEDULE,
+            EventProps.INSTRUCTOR,
+            EventProps.TEMPLATE,
+        ])
         sent = fake.data_sources.update_calls[0]["properties"]
         assert sent[EventProps.TEMPLATE]["relation"]["data_source_id"] == "ds-db-catalog"
 

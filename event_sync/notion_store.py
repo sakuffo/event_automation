@@ -146,6 +146,9 @@ class EventProps:
     LAST_SYNCED = "Last Synced"
     SYNCED_HASH = "Synced Hash"
     SYNC_ERROR = "Sync Error"
+    # Code-owned visibility flag. Checked rows stay in the database for
+    # history and matching but are hidden from operational schedule views.
+    HIDDEN_FROM_SCHEDULE = "Hidden from Schedule"
     # Read-only: does the live event's tickets carry the Settings
     # default_ticket_policy? Written by sync/pull, never by humans.
     TICKET_POLICY_STATUS = "Ticket Policy Status"
@@ -242,6 +245,7 @@ def _events_db_properties(catalog_data_source_id: Optional[str]) -> Dict[str, An
         EventProps.LAST_SYNCED: {"date": {}},
         EventProps.SYNCED_HASH: {"rich_text": {}},
         EventProps.SYNC_ERROR: {"rich_text": {}},
+        EventProps.HIDDEN_FROM_SCHEDULE: {"checkbox": {}},
         EventProps.TICKET_POLICY_STATUS: {"rich_text": {}},
         EventProps.TICKETS_SOLD: {"number": {"format": "number"}},
         EventProps.TICKETS_SOLD_BY_TYPE: {"rich_text": {}},
@@ -354,6 +358,10 @@ def p_number(value: Optional[float]) -> Dict[str, Any]:
     return {"number": value}
 
 
+def p_checkbox(value: bool) -> Dict[str, Any]:
+    return {"checkbox": bool(value)}
+
+
 def p_url(url: Optional[str]) -> Dict[str, Any]:
     return {"url": url or None}
 
@@ -427,6 +435,10 @@ def v_multi_select(page: Dict[str, Any], name: str) -> List[str]:
 
 def v_number(page: Dict[str, Any], name: str) -> Optional[float]:
     return _prop(page, name).get("number")
+
+
+def v_checkbox(page: Dict[str, Any], name: str) -> bool:
+    return bool(_prop(page, name).get("checkbox", False))
 
 
 def v_url(page: Dict[str, Any], name: str) -> str:
@@ -560,6 +572,10 @@ def event_property_for_field(
         return EventProps.NAME, p_title(row.get("event_name") or "")
     if field == "status":
         return EventProps.STATUS, p_select(row.get("status") or None)
+    if field == "hidden_from_schedule":
+        return EventProps.HIDDEN_FROM_SCHEDULE, p_checkbox(
+            bool(row.get("hidden_from_schedule"))
+        )
     if field == "registration_type":
         return EventProps.REGISTRATION_TYPE, p_select(
             row.get("registration_type") or None
@@ -603,7 +619,7 @@ def event_property_for_field(
 # ---------------------------------------------------------------------------
 
 
-def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, str]:
+def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, Any]:
     """Flatten an Events page into a plain string-keyed row dict.
 
     Keys mirror the canonical column names used by the sheet readers so the
@@ -648,6 +664,9 @@ def event_page_to_row(page: Dict[str, Any], tz_name: str) -> Dict[str, str]:
         "wix_event_id": v_plain_text(page, EventProps.WIX_EVENT_ID).strip(),
         "synced_hash": v_plain_text(page, EventProps.SYNCED_HASH).strip(),
         "sync_error": v_plain_text(page, EventProps.SYNC_ERROR).strip(),
+        "hidden_from_schedule": v_checkbox(
+            page, EventProps.HIDDEN_FROM_SCHEDULE
+        ),
         "ticket_policy_status": v_plain_text(
             page, EventProps.TICKET_POLICY_STATUS
         ).strip(),
@@ -704,6 +723,7 @@ def row_to_event_record(row: Dict[str, Any]) -> EventRecord:
         wix_event_id=row.get("wix_event_id") or None,
         status=row.get("status") or None,
         synced_hash=row.get("synced_hash") or None,
+        hidden_from_schedule=bool(row.get("hidden_from_schedule")),
         tickets_sold=row.get("tickets_sold"),
         tickets_sold_by_type=row.get("tickets_sold_by_type") or None,
         revenue=row.get("revenue"),
@@ -787,7 +807,7 @@ def event_properties_from_raw_row(row: Dict[str, Any], tz_name: str) -> Dict[str
     end_iso = _iso_or_blank(row.get("end_date", ""))
     price_number, multi_price = split_price(row.get("ticket_price"))
 
-    return _event_content_props(
+    props = _event_content_props(
         name=row.get("event_name") or "(untitled)",
         date_prop=p_date(
             start_iso,
@@ -815,6 +835,10 @@ def event_properties_from_raw_row(row: Dict[str, Any], tz_name: str) -> Dict[str
         description=row.get("detailed_description") or "",
         image_url=(row.get("image_url") or "").strip(),
     )
+    props[EventProps.HIDDEN_FROM_SCHEDULE] = p_checkbox(
+        bool(row.get("hidden_from_schedule"))
+    )
+    return props
 
 
 def event_properties_from_record(
@@ -861,6 +885,9 @@ def event_properties_from_record(
     if include_bookkeeping:
         props[EventProps.WIX_EVENT_ID] = p_rich_text(record.wix_event_id)
         props[EventProps.SYNCED_HASH] = p_rich_text(record.synced_hash)
+        props[EventProps.HIDDEN_FROM_SCHEDULE] = p_checkbox(
+            record.hidden_from_schedule
+        )
         props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
             record.ticket_policy_status
         )
@@ -1413,6 +1440,7 @@ class NotionStore:
         synced_hash: Optional[str] = None,
         error: Optional[str] = None,
         source: Optional[str] = None,
+        hidden_from_schedule: Optional[bool] = None,
         ticket_policy_status: Optional[str] = None,
         tickets_sold: Optional[int] = None,
         tickets_sold_by_type: Optional[str] = None,
@@ -1437,6 +1465,10 @@ class NotionStore:
             props[EventProps.SYNCED_HASH] = p_rich_text(synced_hash)
         if source:
             props[EventProps.SOURCE] = p_select(source)
+        if hidden_from_schedule is not None:
+            props[EventProps.HIDDEN_FROM_SCHEDULE] = p_checkbox(
+                hidden_from_schedule
+            )
         if ticket_policy_status is not None:
             props[EventProps.TICKET_POLICY_STATUS] = p_rich_text(
                 ticket_policy_status

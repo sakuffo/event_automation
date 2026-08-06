@@ -170,7 +170,11 @@ def build_dashboard_blocks(
 
     dated = [r for r in rows if _row_start_date(r)]
     upcoming = sorted(
-        (r for r in dated if _row_start_date(r) >= today),
+        (
+            r for r in dated
+            if _row_start_date(r) >= today
+            and not bool(r.get("hidden_from_schedule"))
+        ),
         key=_row_start_date,
     )
 

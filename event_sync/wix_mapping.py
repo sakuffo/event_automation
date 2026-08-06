@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from html import escape
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - standard library on Python 3.9+
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -44,6 +44,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 logger = get_logger(__name__)
+
+TINKER_TUESDAY_TITLE = "tinker tuesday"
+TINKER_TUESDAY_WINDOW = 4
+CURRENT_WIX_EVENT_STATUSES = frozenset({"UPCOMING", "STARTED"})
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +211,53 @@ def is_secondary_recurring_occurrence(wix_event: Dict[str, Any]) -> bool:
         (wix_event.get("dateAndTimeSettings") or {}).get("recurrenceStatus") or ""
     )
     return status.startswith("RECURRING") and status != "RECURRING_UPCOMING"
+
+
+def is_tinker_tuesday(wix_event: Dict[str, Any]) -> bool:
+    """Whether an event is the exact title covered by the rolling window."""
+    return (
+        (wix_event.get("title") or "").strip().casefold()
+        == TINKER_TUESDAY_TITLE
+    )
+
+
+def select_schedule_wix_event_ids(
+    wix_events: List[Dict[str, Any]],
+) -> Set[str]:
+    """Return Wix IDs that belong in operational scheduling views.
+
+    Normal one-time events are current while Wix reports UPCOMING or STARTED.
+    Wix-native recurring series keep their existing single representative,
+    except Tinker Tuesday: its earliest four current occurrences are selected,
+    regardless of recurrence status.
+    """
+    current = [
+        event
+        for event in wix_events
+        if (event.get("status") or "") in CURRENT_WIX_EVENT_STATUSES
+        and event.get("id")
+    ]
+    tinker_events = sorted(
+        (event for event in current if is_tinker_tuesday(event)),
+        key=lambda event: (
+            normalize_wix_timestamp(
+                (event.get("dateAndTimeSettings") or {}).get("startDate")
+                or ""
+            )
+            or "\uffff",
+            event.get("id") or "",
+        ),
+    )
+
+    selected: Set[str] = {
+        event["id"] for event in tinker_events[:TINKER_TUESDAY_WINDOW]
+    }
+    for event in current:
+        if is_tinker_tuesday(event):
+            continue
+        if not is_secondary_recurring_occurrence(event):
+            selected.add(event["id"])
+    return selected
 
 
 # ---------------------------------------------------------------------------

@@ -70,6 +70,9 @@ class EventRecord(BaseModel):
     wix_event_id: Optional[str] = None
     status: Optional[str] = None
     synced_hash: Optional[str] = None
+    # Code-owned visibility flag. Hidden rows stay available for history and
+    # Wix matching, but leave operational views. Never hashed or pushed.
+    hidden_from_schedule: bool = False
     # Read-only drift indicator (code-owned Notion column): whether the live
     # event's ticket definitions carry the Settings `default_ticket_policy`.
     # Bookkeeping like synced_hash — never hashed, never pushed to Wix.
@@ -437,5 +440,3 @@ __all__ = [
     "CHECKOUT_FORM_PER_ORDER",
     "VALID_CHECKOUT_FORMS",
 ]
-
-

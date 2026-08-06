@@ -1,9 +1,10 @@
 """Archive Notion rows for secondary occurrences of Wix recurring series.
 
-Pull keeps one Notion row per Wix-native recurring series (the occurrence Wix
-marks ``RECURRING_UPCOMING``), but rows created before that rule — one per
-occurrence of series like Fringe or Tinker Tuesday — are still cluttering the
-Event Scheduling DB. This one-off archives them: rows in a code-owned status
+Pull keeps one Notion row per ordinary Wix-native recurring series (the
+occurrence Wix marks ``RECURRING_UPCOMING``), but rows created before that
+rule may still clutter the Event Scheduling DB. Tinker Tuesday is excluded:
+its rolling four-event policy retains extra rows as hidden history. This
+one-off archives other secondary occurrences: rows in a code-owned status
 (``Published``/``Cancelled``) whose ``Wix Event ID`` points at a secondary
 recurring occurrence are moved to Notion's trash (restorable from the UI).
 Rows in human statuses are reported but never touched.
@@ -24,7 +25,10 @@ from event_sync.config import load_config
 from event_sync.logging_utils import configure_logging, get_logger
 from event_sync.notion_store import STATUS_CANCELLED, STATUS_PUBLISHED
 from event_sync.runtime import SyncRuntime
-from event_sync.wix_mapping import is_secondary_recurring_occurrence
+from event_sync.wix_mapping import (
+    is_secondary_recurring_occurrence,
+    is_tinker_tuesday,
+)
 
 
 logger = get_logger(__name__)
@@ -64,7 +68,10 @@ def main() -> int:
     for event in client.iter_events(page_size=100, include_drafts=False):
         event_id = event.get("id") or ""
         if event_id:
-            secondary_by_id[event_id] = is_secondary_recurring_occurrence(event)
+            secondary_by_id[event_id] = (
+                not is_tinker_tuesday(event)
+                and is_secondary_recurring_occurrence(event)
+            )
     logger.info("Indexed %d Wix event(s)\n", len(secondary_by_id))
 
     rows = store.fetch_event_rows()

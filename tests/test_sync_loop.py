@@ -658,10 +658,21 @@ def test_sync_never_pushes_pending_rows(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def wix_event(id_, title, status="UPCOMING", recurrence=None):
+def wix_event(
+    id_,
+    title,
+    status="UPCOMING",
+    recurrence=None,
+    start="2026-08-12T23:00:00Z",
+):
     event = {"id": id_, "title": title, "status": status}
+    date_settings = {}
     if recurrence is not None:
-        event["dateAndTimeSettings"] = {"recurrenceStatus": recurrence}
+        date_settings["recurrenceStatus"] = recurrence
+    if start is not None:
+        date_settings["startDate"] = start
+    if date_settings:
+        event["dateAndTimeSettings"] = date_settings
     return event
 
 
@@ -802,7 +813,7 @@ def test_pull_returns_false_when_no_events(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Recurring series: one Notion row per series (the next upcoming occurrence)
+# Recurring series and the Tinker Tuesday rolling-window exception
 # ---------------------------------------------------------------------------
 
 
@@ -825,7 +836,7 @@ def test_pull_skips_unmatched_recurring_occurrence(monkeypatch):
     # and is skipped before the per-event ticket-definitions fetch.
     store = StoreStub([])
     patch_pull(monkeypatch)
-    events = [wix_event("w1", "Tinker Tuesday", recurrence="RECURRING")]
+    events = [wix_event("w1", "Weekly Rope Jam", recurrence="RECURRING")]
     client = ClientStub(events=events)
 
     assert pull_events(make_runtime(store, client)) is True
@@ -837,7 +848,9 @@ def test_pull_creates_row_for_recurring_upcoming_occurrence(monkeypatch):
     # The series' representative (next upcoming occurrence) pulls normally.
     store = StoreStub([])
     patch_pull(monkeypatch)
-    events = [wix_event("w1", "Tinker Tuesday", recurrence="RECURRING_UPCOMING")]
+    events = [
+        wix_event("w1", "Weekly Rope Jam", recurrence="RECURRING_UPCOMING")
+    ]
 
     assert pull_events(make_pull_runtime(store, events)) is True
     assert len(store.upserts) == 1
@@ -847,7 +860,9 @@ def test_pull_creates_row_for_recurring_upcoming_occurrence(monkeypatch):
 def test_pull_still_refreshes_linked_recurring_occurrence(monkeypatch):
     # A row already linked to a secondary occurrence keeps refreshing —
     # pull never abandons a row it created.
-    existing = make_row("Published", event_name="Tinker Tuesday", wix_event_id="w1")
+    existing = make_row(
+        "Published", event_name="Weekly Rope Jam", wix_event_id="w1"
+    )
     store = StoreStub([existing])
     monkeypatch.setattr(
         notion_orchestrator,
@@ -856,12 +871,105 @@ def test_pull_still_refreshes_linked_recurring_occurrence(monkeypatch):
             event_name=event["title"], short_description="edited on the website"
         ),
     )
-    events = [wix_event("w1", "Tinker Tuesday", recurrence="RECURRING")]
+    events = [wix_event("w1", "Weekly Rope Jam", recurrence="RECURRING")]
 
     assert pull_events(make_pull_runtime(store, events)) is True
     assert len(store.upserts) == 1
     _, status, _, page_id = store.upserts[0]
     assert (status, page_id) == ("Published", "page-1")
+
+
+def test_tinker_selector_is_exact_case_insensitive_and_order_independent():
+    from event_sync.wix_mapping import select_schedule_wix_event_ids
+
+    events = [
+        wix_event(
+            "tt-5", "Tinker Tuesday", recurrence="RECURRING",
+            start="2026-09-08T23:00:00Z",
+        ),
+        wix_event(
+            "tt-2", "tinker tuesday", recurrence="RECURRING",
+            start="2026-08-18T23:00:00Z",
+        ),
+        wix_event(
+            "special", "Tinker Tuesday Special", recurrence="RECURRING",
+            start="2026-08-11T23:00:00Z",
+        ),
+        wix_event(
+            "tt-4", "TINKER TUESDAY", recurrence="RECURRING",
+            start="2026-09-01T23:00:00Z",
+        ),
+        wix_event(
+            "tt-1", "Tinker Tuesday", recurrence="RECURRING",
+            start="2026-08-11T23:00:00Z",
+        ),
+        wix_event(
+            "tt-3", "Tinker Tuesday", recurrence="RECURRING",
+            start="2026-08-25T23:00:00Z",
+        ),
+        wix_event("jam", "Open Jam", recurrence="ONE_TIME"),
+    ]
+
+    assert select_schedule_wix_event_ids(events) == {
+        "tt-1", "tt-2", "tt-3", "tt-4", "jam",
+    }
+
+
+def test_pull_creates_only_next_four_tinker_occurrences(monkeypatch):
+    store = StoreStub([])
+    patch_pull(monkeypatch)
+    events = [
+        wix_event(
+            f"tt-{i}",
+            "Tinker Tuesday",
+            recurrence="RECURRING",
+            start=f"2026-09-{i:02d}T23:00:00Z",
+        )
+        for i in (6, 2, 5, 1, 4, 3)
+    ]
+    events.append(wix_event("jam", "Open Jam"))
+    client = ClientStub(events=events)
+
+    assert pull_events(make_runtime(store, client)) is True
+    assert {record.wix_event_id for record, *_ in store.upserts} == {
+        "tt-1", "tt-2", "tt-3", "tt-4", "jam",
+    }
+    assert getattr(client, "ticket_def_calls", 0) == 5
+
+
+def test_pull_hides_linked_tinker_rows_outside_window_without_refresh(
+    monkeypatch,
+):
+    rows = [
+        make_row(
+            "Published",
+            page_id=f"page-{i}",
+            event_name="Tinker Tuesday",
+            wix_event_id=f"tt-{i}",
+        )
+        for i in range(1, 7)
+    ]
+    store = StoreStub(rows)
+    patch_pull(monkeypatch)
+    events = [
+        wix_event(
+            f"tt-{i}",
+            "Tinker Tuesday",
+            recurrence="RECURRING",
+            start=f"2026-09-{i:02d}T23:00:00Z",
+        )
+        for i in (6, 2, 5, 1, 4, 3)
+    ]
+    client = ClientStub(events=events)
+
+    assert pull_events(make_runtime(store, client)) is True
+    assert getattr(client, "ticket_def_calls", 0) == 4
+    hidden_updates = {
+        page_id
+        for page_id, props in store.field_updates
+        if props.get(EventProps.HIDDEN_FROM_SCHEDULE) == {"checkbox": True}
+    }
+    assert hidden_updates == {"page-5", "page-6"}
 
 
 # ---------------------------------------------------------------------------

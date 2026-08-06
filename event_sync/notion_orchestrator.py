@@ -67,9 +67,11 @@ from .wix_mapping import (
     blank_region_site_row,
     event_match_key,
     is_secondary_recurring_occurrence,
+    is_tinker_tuesday,
     log_event_diff,
     order_summary_revenue,
     parse_month_value,
+    select_schedule_wix_event_ids,
     select_default_tax_group_id,
     site_config_row_sort_key,
     tax_mapping_to_site_row,
@@ -234,7 +236,9 @@ def setup_notion(runtime: SyncRuntime) -> bool:
         logger.info("%s=%s", env_name, db_id)
 
     logger.info(
-        "\nRecommended Notion views to add by hand (the API cannot create views):"
+        "\nRecommended Notion views to configure in the workspace:"
+        "\n  • Operational views: Hidden from Schedule is unchecked"
+        "\n  • History: Hidden from Schedule is checked"
         "\n  • Events: Calendar view on the Date property"
         "\n  • Events: Board view grouped by Status"
         "\n  • Events: Table view 'Needs attention' filtered to Sync Error is not empty"
@@ -440,6 +444,43 @@ def import_event_templates(
 # ---------------------------------------------------------------------------
 
 
+def _desired_schedule_hidden(
+    row: Dict[str, Any], schedule_wix_ids: Set[str]
+) -> bool:
+    """Visibility for an existing row without changing its lifecycle status."""
+    status = (row.get("status") or "").strip()
+    if status in {STATUS_CANCELLED, STATUS_REMOVED}:
+        return True
+    if status != STATUS_PUBLISHED:
+        return False
+    wix_id = (row.get("wix_event_id") or "").strip()
+    return bool(wix_id) and wix_id not in schedule_wix_ids
+
+
+def _set_schedule_hidden(
+    store: NotionStore,
+    row: Dict[str, Any],
+    hidden: bool,
+    *,
+    dry_run: bool = False,
+) -> bool:
+    """Write only the visibility checkbox when its value has drifted."""
+    if bool(row.get("hidden_from_schedule")) == hidden:
+        return False
+    updated = dict(row)
+    updated["hidden_from_schedule"] = hidden
+    tz_name = getattr(
+        getattr(store, "config", None), "timezone", "America/Toronto"
+    )
+    prop_name, payload = event_property_for_field(
+        updated, "hidden_from_schedule", tz_name
+    )
+    if not dry_run:
+        store.update_event_fields(row["page_id"], {prop_name: payload})
+    row["hidden_from_schedule"] = hidden
+    return True
+
+
 def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
     """Backfill/refresh the Notion Events DB from live Wix events.
 
@@ -451,10 +492,9 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
     the sync flow.
 
     Wix-native recurring series (each occurrence is its own Wix event) land
-    as **one** row per series: only the occurrence Wix marks
-    ``RECURRING_UPCOMING`` is created; the rest are skipped unless a Notion
-    row is already linked to them. As occurrences pass, the next one becomes
-    ``RECURRING_UPCOMING`` and rolls in on the next pull.
+    as **one** row per series, except exact-title Tinker Tuesday events: their
+    next four UPCOMING/STARTED occurrences are kept operational. Existing
+    rows outside the operational window remain as hidden history.
     """
     if scope not in {"upcoming", "all"}:
         logger.error("Invalid scope '%s' (expected 'upcoming' or 'all')", scope)
@@ -486,6 +526,7 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
             return False
 
         logger.info("Found %d Wix event(s) to pull\n", len(wix_events))
+        schedule_wix_ids = select_schedule_wix_event_ids(wix_events)
 
         # Index existing Notion rows by wix id and by (title|date|time).
         notion_rows = store.fetch_event_rows()
@@ -502,11 +543,33 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
 
         results = {
             "created": [], "refreshed": [], "linked": [], "skipped": [],
-            "recurring": [], "failed": [],
+            "recurring": [], "windowed": [], "hidden": [], "shown": [],
+            "failed": [],
         }
 
         # Rows in these statuses are code-owned and safe to refresh from Wix.
         refreshable_statuses = {STATUS_PUBLISHED, STATUS_CANCELLED}
+
+        # Reconcile visibility independently from content refreshes. This is
+        # what rolls ended events and excess Tinker occurrences out of the
+        # operational views without archiving their historical rows.
+        for row in notion_rows:
+            desired_hidden = _desired_schedule_hidden(row, schedule_wix_ids)
+            try:
+                if _set_schedule_hidden(store, row, desired_hidden):
+                    bucket = "hidden" if desired_hidden else "shown"
+                    results[bucket].append(
+                        row.get("event_name") or "(unnamed)"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "   ⚠️  Failed to update schedule visibility for '%s': %s",
+                    row.get("event_name") or "(unnamed)",
+                    exc,
+                )
+                results["failed"].append(
+                    row.get("event_name") or "(unnamed)"
+                )
 
         for i, wix_event in enumerate(wix_events, 1):
             title = wix_event.get("title", "Untitled")
@@ -518,12 +581,27 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
             # entirely.
             existing = by_wix_id.get(wix_id)
 
+            # Tinker Tuesday intentionally overrides the generic one-row
+            # recurring rule: only its earliest four current occurrences are
+            # operational. Existing extras were retained and hidden by the
+            # visibility pass above; none are refreshed here.
+            if is_tinker_tuesday(wix_event) and wix_id not in schedule_wix_ids:
+                results["windowed"].append(title)
+                logger.info(
+                    "   🪟 Skipped (outside next four Tinker Tuesdays)"
+                )
+                continue
+
             # One Notion row per Wix-native recurring series: only the
             # occurrence Wix marks RECURRING_UPCOMING (the series' next up)
             # gets a row. Other occurrences are skipped before any per-event
             # Wix calls — unless a row already linked to one exists, which
             # keeps refreshing (pull never abandons a row it created).
-            if existing is None and is_secondary_recurring_occurrence(wix_event):
+            if (
+                existing is None
+                and not is_tinker_tuesday(wix_event)
+                and is_secondary_recurring_occurrence(wix_event)
+            ):
                 results["recurring"].append(title)
                 logger.info(
                     "   🔁 Skipped recurring occurrence (series row is its"
@@ -543,7 +621,11 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                 # row, so the record is built here (one ticket-defs call).
                 record, config_row, target_status, invalid_note = (
                     _wix_event_to_record(
-                        client, wix_event, tz_name, policy_text=policy_text
+                        client,
+                        wix_event,
+                        tz_name,
+                        policy_text=policy_text,
+                        hidden_from_schedule=wix_id not in schedule_wix_ids,
                     )
                 )
                 record_built = True
@@ -606,7 +688,11 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                 if not record_built:
                     record, config_row, target_status, invalid_note = (
                         _wix_event_to_record(
-                            client, wix_event, tz_name, policy_text=policy_text
+                            client,
+                            wix_event,
+                            tz_name,
+                            policy_text=policy_text,
+                            hidden_from_schedule=wix_id not in schedule_wix_ids,
                         )
                     )
 
@@ -632,12 +718,17 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
                             or bool((existing.get("sync_error") or "").strip())
                             or (existing.get("ticket_policy_status") or "")
                             != (record.ticket_policy_status or "")
+                            or bool(existing.get("hidden_from_schedule"))
+                            != record.hidden_from_schedule
                             or _sales_bookkeeping_stale(existing, record)
                         )
                         if stale_bookkeeping:
                             store.write_sync_result(
                                 existing["page_id"], wix_event_id=wix_id,
                                 synced_hash=record.synced_hash, error=None,
+                                hidden_from_schedule=(
+                                    record.hidden_from_schedule
+                                ),
                                 ticket_policy_status=(
                                     record.ticket_policy_status or ""
                                 ),
@@ -678,12 +769,16 @@ def pull_events(runtime: SyncRuntime, scope: str = "upcoming") -> bool:
         logger.info("\n📈 Pull complete!")
         logger.info(
             "   ➕ %d created, ♻️ %d refreshed, 🔗 %d linked, ⏭️ %d skipped, "
-            "🔁 %d recurring occurrences skipped, ❌ %d failed",
+            "🔁 %d recurring occurrences skipped, 🪟 %d Tinker occurrences "
+            "outside window, 🙈 %d hidden, 👁️ %d restored, ❌ %d failed",
             len(results["created"]),
             len(results["refreshed"]),
             len(results["linked"]),
             len(results["skipped"]),
             len(results["recurring"]),
+            len(results["windowed"]),
+            len(results["hidden"]),
+            len(results["shown"]),
             len(results["failed"]),
         )
         return len(results["failed"]) == 0
@@ -1418,6 +1513,7 @@ class _SyncContext:
     client: Any
     by_id: Dict[str, Dict[str, Any]]
     by_key: Dict[str, Dict[str, Any]]
+    schedule_wix_ids: Set[str]
     results: Dict[str, List[str]]
     dry_run: bool
     draft: bool
@@ -1465,7 +1561,11 @@ def _match_wix_event(
 
 
 def _wix_event_to_record(
-    client, wix_event: Dict[str, Any], tz_name: str, policy_text: str = ""
+    client,
+    wix_event: Dict[str, Any],
+    tz_name: str,
+    policy_text: str = "",
+    hidden_from_schedule: bool = False,
 ) -> tuple:
     """Build the Notion-side view of a live Wix event.
 
@@ -1487,6 +1587,7 @@ def _wix_event_to_record(
     )
     ticket_defs = client.get_ticket_definitions(wix_id, include_sales=True)
     config_row = wix_event_to_config_row(wix_event, ticket_defs, tz_name=tz_name)
+    config_row["hidden_from_schedule"] = hidden_from_schedule
     policy_status = ticket_policy_status(ticket_defs, policy_text)
     config_row["ticket_policy_status"] = policy_status
 
@@ -1511,6 +1612,7 @@ def _wix_event_to_record(
         )
     if record is not None:
         record.wix_event_id = wix_id
+        record.hidden_from_schedule = hidden_from_schedule
         record.ticket_policy_status = policy_status
         record.synced_hash = record.content_hash()
     return record, config_row, target_status, invalid_note
@@ -1619,6 +1721,7 @@ def _handle_cancel_row(
         _write_row_result(
             ctx, page_id, status=STATUS_CANCELLED,
             wix_event_id=wix_id, error=None,
+            hidden_from_schedule=True,
         )
         return
     if wix_status == "DRAFT":
@@ -1645,6 +1748,7 @@ def _handle_cancel_row(
         _write_row_result(
             ctx, page_id, status=STATUS_CANCELLED,
             wix_event_id=wix_id, error=None,
+            hidden_from_schedule=True,
         )
     except Exception as exc:
         logger.error("  ❌ Failed to cancel %s: %s", name, exc)
@@ -1667,7 +1771,10 @@ def _handle_delete_row(
             "  🗑️  %s: not found in Wix — marking Removed", name,
         )
         ctx.results["removed"].append(name)
-        _write_row_result(ctx, page_id, status=STATUS_REMOVED, error=None)
+        _write_row_result(
+            ctx, page_id, status=STATUS_REMOVED, error=None,
+            hidden_from_schedule=True,
+        )
         return
 
     if ctx.dry_run:
@@ -1684,6 +1791,7 @@ def _handle_delete_row(
         _write_row_result(
             ctx, page_id, status=STATUS_REMOVED,
             wix_event_id=wix_id, error=None,
+            hidden_from_schedule=True,
         )
     else:
         logger.error("  ❌ Failed to delete %s", name)
@@ -1741,9 +1849,26 @@ def _refresh_published_row(
         )
         return
 
+    hidden_from_schedule = wix_id not in ctx.schedule_wix_ids
+    if (
+        hidden_from_schedule
+        and (wix_event.get("status") or "") != "CANCELED"
+    ):
+        changed = _set_schedule_hidden(
+            ctx.store, row, True, dry_run=ctx.dry_run
+        )
+        logger.info(
+            "  🙈 %s (%s schedule history)",
+            name,
+            "would move to" if ctx.dry_run and changed else "kept in",
+        )
+        ctx.results["skipped"].append(name)
+        return
+
     wix_record, config_row, target_status, invalid_note = _wix_event_to_record(
         ctx.client, wix_event, ctx.runtime.config.timezone,
         policy_text=ctx.runtime.get_ticket_policy_text(),
+        hidden_from_schedule=hidden_from_schedule,
     )
     _apply_image_preservation(wix_record, config_row, row)
 
@@ -1780,12 +1905,15 @@ def _refresh_published_row(
             or bool((row.get("sync_error") or "").strip())
             or (row.get("ticket_policy_status") or "")
             != (wix_record.ticket_policy_status or "")
+            or bool(row.get("hidden_from_schedule"))
+            != wix_record.hidden_from_schedule
             or _sales_bookkeeping_stale(row, wix_record)
         )
         if stale_bookkeeping:
             _write_row_result(
                 ctx, page_id, wix_event_id=wix_id,
                 synced_hash=wix_record.synced_hash, error=None,
+                hidden_from_schedule=wix_record.hidden_from_schedule,
                 ticket_policy_status=wix_record.ticket_policy_status or "",
                 tickets_sold=wix_record.tickets_sold,
                 tickets_sold_by_type=wix_record.tickets_sold_by_type,
@@ -2074,6 +2202,11 @@ def _refresh_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
     if (row.get("status") or "") == STATUS_PUBLISHED:
         _refresh_published_row(ctx, row, name, row["page_id"])
         return
+    # A human action brings a historical row back into the operational view
+    # while it waits for the explicit push command.
+    _set_schedule_hidden(
+        ctx.store, row, False, dry_run=ctx.dry_run
+    )
     ctx.results["pending_push"].append(name)
 
 
@@ -2086,6 +2219,9 @@ def _push_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
     """
     page_id = row["page_id"]
     row_status = row.get("status") or ""
+    _set_schedule_hidden(
+        ctx.store, row, False, dry_run=ctx.dry_run
+    )
 
     if row_status == STATUS_CANCEL:
         _handle_cancel_row(ctx, row, name, page_id)
@@ -2120,6 +2256,7 @@ def _push_row(ctx: _SyncContext, row: Dict[str, Any], name: str) -> None:
         ctx.results["skipped"].append(name)
         _write_row_result(
             ctx, page_id, status=STATUS_CANCELLED, wix_event_id=wix_id,
+            hidden_from_schedule=True,
             error="Cancelled in Wix. Set Status to Delete to remove it, "
             "or duplicate the row without the Wix Event ID to recreate.",
         )
@@ -2240,6 +2377,7 @@ def _run_status_loop(
     by_id, by_key = index_events_by_id_and_key(
         runtime, fieldsets=["DETAILS", "CATEGORIES", "REGISTRATION"],
     )
+    schedule_wix_ids = select_schedule_wix_event_ids(list(by_id.values()))
 
     ctx = _SyncContext(
         runtime=runtime,
@@ -2247,6 +2385,7 @@ def _run_status_loop(
         client=client,
         by_id=by_id,
         by_key=by_key,
+        schedule_wix_ids=schedule_wix_ids,
         results={
             "created": [],
             "updated": [],

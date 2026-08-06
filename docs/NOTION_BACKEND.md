@@ -46,6 +46,7 @@ scheduled, plus what's being ideated on and yet to be scheduled. Replaces the
 | Last Synced | date | **code only** | |
 | Synced Hash | rich text | **code only** | Hash of the last-synced payload (either direction); drives change detection |
 | Sync Error | rich text | **code only** | Why a row failed or what's missing; empty = healthy |
+| Hidden from Schedule | checkbox | **code only** | Checked for ended/cancelled/removed events and Tinker Tuesday occurrences outside the next-four window. Rows stay in Notion for history and matching; operational views hide checked rows. Never hashed or pushed to Wix |
 | Ticket Policy Status | rich text | **code only** | Do the live tickets carry the Settings `default_ticket_policy`? Blank = policy off or no tickets; `OK (3 tickets)` = all match; `2 of 3 tickets missing policy` = drift (flip to Update, or wait for the next sync, to converge) |
 | Tickets Sold | number | **code only** (pull-only) | Total tickets sold across the event's ticket types, from the live ticket definitions' `salesDetails`. Refreshed by sync/pull; blank = not a ticketed event (or sales unknown). Never pushed to Wix |
 | Tickets Sold By Type | rich text | **code only** (pull-only) | Semicolon per-type sold counts positionally aligned with Ticket Names (e.g. `12; 3`). Never pushed to Wix |
@@ -145,9 +146,11 @@ command that writes to Wix.
   tickets + categories + image), writes back the Wix Event ID, and marks it
   Published. Rows flipped straight to Ready (skipping enrich) get the same
   default fill at push time, written back to the row.
-- **Published** — live on Wix, and **Wix is now the source of truth**: each
-  `sync` refreshes the Notion row from the live event, so edits made on the
-  website (or by other tools) flow back into Notion. Local edits to a
+- **Published** — live on Wix, and **Wix is now the source of truth**:
+  operational rows refresh from the live event on each `sync`, so edits made
+  on the website (or by other tools) flow back into Notion. Hidden historical
+  rows keep their last snapshot and skip ticket/sales reads until they enter
+  the current window again. Local edits to a
   Published row are overwritten on the next sync — flip the row to Update
   first if the Notion edit is the one that should win. An event cancelled on
   the website flips its row to Cancelled.
@@ -213,13 +216,15 @@ Notes:
 - `pull` never overwrites rows in Idea/Draft/Ready/Update/Error/Skip status.
   If a pulled Wix event matches such a row by title+date+time, the row is
   *linked* (Wix Event ID written) but its fields are left alone.
-- `pull` shows each Wix-native recurring series (weekly events created on the
-  website) as **one row** — the occurrence Wix marks as the series' next
-  upcoming one. Other occurrences are skipped (rows already linked to one
-  keep refreshing). When an occurrence passes, the next one rolls in on the
-  following pull/sync. `scripts/archive_recurring_rows.py` (dry-run by
-  default, `--apply` to write) archives clutter rows created before this
-  rule.
+- `pull` shows each ordinary Wix-native recurring series (weekly events
+  created on the website) as **one row** — the occurrence Wix marks as the
+  series' next upcoming one. Exact-title **Tinker Tuesday** is the exception:
+  the earliest four Wix `UPCOMING`/`STARTED` occurrences are operational,
+  regardless of recurrence status. Older and farther-future linked rows stay
+  in Notion with `Hidden from Schedule` checked; they are not refreshed until
+  they enter the window. `pull --scope all` can still backfill non-Tinker
+  history, but does not create extra Tinker rows. The optional
+  `scripts/archive_recurring_rows.py` cleanup excludes Tinker rows.
 - `sync` starts with a pull pass (skip with `--no-pull`) and the same enrich
   pass as the `enrich` command (skip with `--no-enrich`; dry runs skip both
   automatically since they write to Notion). Drafts still need a human flip
@@ -255,12 +260,16 @@ one only to override it). If someone skips the template (or a value), the
 pipeline still fills every blank from Settings at `enrich` time — and as a
 safety net at `push` time for rows flipped straight to `Ready`.
 
-## Recommended views (create by hand — the API can't create views)
+## Recommended views
 
-- **Calendar** on the Date property — the planning view.
-- **Board** grouped by Status — what's posted / pending / failed at a glance.
-- **Needs attention** — table filtered to `Sync Error` is not empty.
-- **This month / Next month** — table filtered on Date for the posting cycle.
+- **Calendar** on the Date property — filter `Hidden from Schedule` unchecked.
+- **Board** grouped by Status — filter `Hidden from Schedule` unchecked.
+- **Needs attention** — filter `Sync Error` is not empty; leave history visible
+  here when an error needs investigation.
+- **This month / Next month** — filter on Date and `Hidden from Schedule`
+  unchecked.
+- **History** — filter `Hidden from Schedule` checked. These rows remain
+  available for reference and by-month dashboard totals.
 
 ## Triggering runs
 

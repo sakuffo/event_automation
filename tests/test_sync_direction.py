@@ -112,7 +112,11 @@ class StoreStub:
 
 
 class ClientStub:
+    def __init__(self):
+        self.ticket_def_calls = 0
+
     def get_ticket_definitions(self, wix_id, include_sales=False):
+        self.ticket_def_calls += 1
         return []
 
     def get_order_summary(self, wix_id):
@@ -216,6 +220,63 @@ def test_published_row_cancelled_in_wix_becomes_cancelled(monkeypatch):
     assert len(store.upserts) == 1
     _, status, _, _ = store.upserts[0]
     assert status == "Cancelled"
+
+
+def test_sync_without_pull_rolls_fifth_tinker_into_window(monkeypatch):
+    config_row = make_wix_config_row(event_name="Tinker Tuesday")
+    matching_hash = row_to_event_record(config_row).content_hash()
+    row = make_row(
+        "Published",
+        event_name="Tinker Tuesday",
+        wix_event_id="tt-5",
+        synced_hash=matching_hash,
+    )
+    store = StoreStub([row])
+    client = ClientStub()
+    runtime = make_runtime(store)
+    runtime.get_wix_client = lambda: client
+
+    def event(i, status="UPCOMING"):
+        return {
+            "id": f"tt-{i}",
+            "title": "Tinker Tuesday",
+            "status": status,
+            "dateAndTimeSettings": {
+                "startDate": f"2026-09-{i:02d}T23:00:00Z",
+                "recurrenceStatus": "RECURRING",
+            },
+        }
+
+    events = [event(i) for i in range(1, 7)]
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "index_events_by_id_and_key",
+        lambda runtime, fieldsets=None: (
+            {e["id"]: e for e in events}, {}
+        ),
+    )
+    monkeypatch.setattr(
+        notion_orchestrator,
+        "wix_event_to_config_row",
+        lambda event, ticket_defs, tz_name=TZ: dict(config_row),
+    )
+
+    assert notion_sync_events(
+        runtime, run_enrich=False, run_pull=False
+    ) is True
+    assert client.ticket_def_calls == 0
+    assert store.field_updates[-1][1][
+        notion_orchestrator.EventProps.HIDDEN_FROM_SCHEDULE
+    ] == {"checkbox": True}
+
+    events[0] = event(1, status="ENDED")
+    store.field_updates.clear()
+    store.sync_results.clear()
+    assert notion_sync_events(
+        runtime, run_enrich=False, run_pull=False
+    ) is True
+    assert client.ticket_def_calls == 1
+    assert store.sync_results[-1][1]["hidden_from_schedule"] is False
 
 
 def test_update_row_pushes_local_changes_and_returns_to_published(monkeypatch):

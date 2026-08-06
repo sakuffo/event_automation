@@ -56,7 +56,7 @@ Code-owned columns on Event Scheduling refreshed from live Wix sales data by `sy
 
 ## Events Dashboard page (generated, display-only)
 
-`sync` finishes by rewriting one Notion page (`notion_dashboard.refresh_dashboard`): an upcoming-events table (sold / capacity / % with the old GitHub Pages dashboard's 70%/100% color thresholds) and a by-month sales summary, built purely from the Published rows (`build_dashboard_blocks`, pure function). The page is identified by the auto-managed `dashboard_page_id` Setting — blank means "create under `NOTION_PARENT_PAGE_ID` next sync and remember it"; a deleted page is recreated once. Display-only and contained: nothing on the page feeds back into sync/push, building it never talks to Wix, a dashboard failure never fails the sync, and dry runs skip it entirely.
+`sync` finishes by rewriting one Notion page (`notion_dashboard.refresh_dashboard`): an upcoming-events table (non-historical dates whose `Hidden from Schedule` checkbox is clear; sold / capacity / % with the old GitHub Pages dashboard's 70%/100% color thresholds) and a by-month sales summary over every dated Published row, including hidden history. Both are built purely from Published rows (`build_dashboard_blocks`, pure function). The page is identified by the auto-managed `dashboard_page_id` Setting — blank means "create under `NOTION_PARENT_PAGE_ID` next sync and remember it"; a deleted page is recreated once. Display-only and contained: nothing on the page feeds back into sync/push, building it never talks to Wix, a dashboard failure never fails the sync, and dry runs skip it entirely.
 
 *Pinned by `tests/test_sales_dashboard.py` (block builder) and `tests/test_sync_direction.py` (fetch pattern).*
 
@@ -68,7 +68,7 @@ Code-owned columns on Event Scheduling refreshed from live Wix sales data by `sy
 
 ## Sync direction by status
 
-Once a row is `Published`, **Wix is authoritative** — each `sync` refreshes the Notion row from the live event (via `wix_event_to_config_row` + `upsert_event_from_record`, like `pull`; a row matching a Wix `CANCELED` event flips to `Cancelled`, and Wix events too incomplete to validate land with a `Sync Error` note). To push local Notion edits to Wix instead, humans flip the row to `Update` and run `push`: it diffs the row against Wix (`compute_event_update_plan`, no hash fast-path — an explicit Update always diffs), applies the plan, and lands the row back on `Published` (no changes needed → straight back to `Published`). The Published refresh needs no record validation (an incomplete Notion row can still be refreshed); Update rows that fail validation become `Error`.
+Once a row is `Published`, **Wix is authoritative** — each operational (not hidden) row is refreshed by `sync` from the live event (via `wix_event_to_config_row` + `upsert_event_from_record`, like `pull`; a row matching a Wix `CANCELED` event flips to `Cancelled`, and Wix events too incomplete to validate land with a `Sync Error` note). Published rows outside the current schedule window retain their last snapshot and skip ticket/sales reads until they become current again. To push local Notion edits to Wix instead, humans flip the row to `Update` and run `push`: it diffs the row against Wix (`compute_event_update_plan`, no hash fast-path — an explicit Update always diffs), applies the plan, and lands the row back on `Published` (no changes needed → straight back to `Published`). The Published refresh needs no record validation (an incomplete Notion row can still be refreshed); Update rows that fail validation become `Error`.
 
 *Pinned by `tests/test_sync_direction.py`.*
 
@@ -80,7 +80,7 @@ A failed image upload at create time still creates the event but writes a `Sync 
 
 ## Hash-based change detection
 
-After each successful push (and each Published refresh), `EventRecord.content_hash()` is stored in `Synced Hash`. Published rows skip the Notion write when the row already matches the Wix-derived record's hash. The hash canonicalizes formatting (`35.0`≡`35`, None≡"") and hashes `ticket_price_raw` over the derived `ticket_price`. Empty semicolon tokens are kept positionally (`20; ; 4` ≢ `20; 4`) — an unlimited live ticket reads back as an empty capacity slot, and collapsing it would hide dashboard capacity edits from the refresh forever.
+After each successful push (and each Published refresh), `EventRecord.content_hash()` is stored in `Synced Hash`. Published rows skip the Notion write when the row already matches the Wix-derived record's hash. The hash canonicalizes formatting (`35.0`≡`35`, None≡"") and hashes `ticket_price_raw` over the derived `ticket_price`. Empty semicolon tokens are kept positionally (`20; ; 4` ≢ `20; 4`) — an unlimited live ticket reads back as an empty capacity slot, and collapsing it would hide dashboard capacity edits from the refresh forever. `Hidden from Schedule` is bookkeeping and is never hashed or sent to Wix.
 
 *Pinned by `tests/test_notion_store.py` (hash stability).*
 
@@ -92,15 +92,19 @@ Rows match Wix by `Wix Event ID` first, falling back to `(title, start_date, sta
 
 ## Pull is non-destructive
 
-`pull` creates/refreshes only `Published`/`Cancelled` (code-owned) rows; rows in any human status (including `Update`) are linked (Wix ID written) but their fields are never overwritten. Wix events too incomplete to validate still land in Notion with a `Sync Error` note (`upsert_event_from_raw_row`).
+`pull` creates/refreshes only `Published`/`Cancelled` (code-owned) rows; rows in any human status (including `Update`) are linked (Wix ID written) but their content fields are never overwritten. The code-owned `Hidden from Schedule` flag may be cleared when a human status needs attention. Wix events too incomplete to validate still land in Notion with a `Sync Error` note (`upsert_event_from_raw_row`).
 
 *Pinned by `tests/test_sync_loop.py` (pull links-but-never-overwrites human rows).*
 
-## One row per recurring series
+## Schedule visibility and recurring series
 
-Wix-native recurring events (each occurrence its own Wix event) carry `dateAndTimeSettings.recurrenceStatus` — `wix_mapping.is_secondary_recurring_occurrence` (the single owner of the enum) is true for every `RECURRING*` value except `RECURRING_UPCOMING`, the occurrence Wix designates as the series' next-up. `pull` skips unmatched secondary occurrences *before* the per-event ticket-defs fetch (already-linked rows keep refreshing), so each series shows in Notion once and rolls forward to the next occurrence as time passes. `scripts/archive_recurring_rows.py` (dry-run default, `--apply`) archives pre-rule clutter rows in code-owned statuses.
+`Hidden from Schedule` is a code-owned checkbox that removes stale rows from operational Event Scheduling views without archiving them. `wix_mapping.select_schedule_wix_event_ids` is the single owner of the selection: only Wix `UPCOMING`/`STARTED` events are current; ordinary Wix-native recurring series retain only the occurrence whose `dateAndTimeSettings.recurrenceStatus` is `RECURRING_UPCOMING`; exact case-insensitive title `Tinker Tuesday` is the deliberate exception and retains the earliest four current occurrences, sorted by Wix start timestamp then ID. A `STARTED` Tinker occurrence consumes one of the four slots.
 
-*Pinned by the recurring tests in `tests/test_sync_loop.py`.*
+Published rows whose Wix ID is outside that set, plus `Cancelled`/`Removed` rows, are checked hidden and retained as history. Human workflow statuses are kept visible. Hidden Published rows skip content/ticket/sales refreshes, but remain in the complete Wix ID/key indexes: push matching is never visibility-filtered, so Update/Cancel/Delete actions cannot create duplicates. As an occurrence ends, the next Tinker row is unhidden on the next pull/sync. `pull --scope all` still backfills non-Tinker history as hidden, but does not create extra Tinker rows outside the four-event window. `scripts/archive_recurring_rows.py` excludes Tinker rows from its optional cleanup.
+
+The generated dashboard's Upcoming section excludes checked rows; its by-month summary still includes them. Operational Notion views filter to unchecked, while a History view filters to checked.
+
+*Pinned by `tests/test_sync_loop.py`, `tests/test_sync_direction.py`, `tests/test_notion_store.py`, and `tests/test_sales_dashboard.py`.*
 
 ## Notion property conventions
 
@@ -116,6 +120,6 @@ Notion dates are written as naive local datetimes with `time_zone: America/Toron
 
 Rows live in the Site Config DB; only `tax_name`/`tax_type`/`tax_rate` (percent) are editable; push updates/bulk-creates mappings, never deletes; the row-processing core is `wix_flows.process_site_config_rows`. Requires the eCommerce **Manage Orders** scope.
 
-## Views can't be created via API
+## Views are one-time workspace configuration
 
-Calendar/board/filtered views are added by hand in Notion (documented in `docs/NOTION_BACKEND.md`).
+The runtime Notion client manages data-source schemas and rows, not database views. Operational views must filter `Hidden from Schedule` to unchecked, with a separate checked History view (documented in `docs/NOTION_BACKEND.md`).
