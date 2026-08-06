@@ -4,6 +4,12 @@ This folder contains technical documentation for the Event Automation project.
 
 ## Documentation Files
 
+- [INVARIANTS.md](INVARIANTS.md) — **normative**
+  - The full, binding text of the design invariants (status lifecycle, tickets/capacity, hashing, matching, sync direction, …)
+  - Each section names the tests that pin it
+  - **Read before changing sync/push behavior**; summaries live in [AGENTS.md](../AGENTS.md)
+- [NOTION_BACKEND.md](NOTION_BACKEND.md)
+  - Notion database schemas, views, and manual setup steps (views/templates the API can't create)
 - [DEV_TOOLS.md](DEV_TOOLS.md)
   - Day-to-day CLI usage
   - Sandbox vs production configuration
@@ -12,35 +18,23 @@ This folder contains technical documentation for the Event Automation project.
   - REST API vs JavaScript SDK differences
   - Automatic ticket creation controls
   - Troubleshooting and best practices
-- [CODE_AUDIT.md](CODE_AUDIT.md)
-  - Architecture snapshot
-  - Module map and hardening history
-  - Remaining opportunities
+- [CAPACITY_MIGRATION.md](CAPACITY_MIGRATION.md)
+  - The one-time migration that retired the event-level Capacity columns
+- [CODE_AUDIT.md](CODE_AUDIT.md) — *historical snapshot (2026-05-27), superseded by the July 2026 Notion-only refactor*
 - [HISTORY.md](HISTORY.md)
   - Project timeline and change log
-  - Feature additions, fixes, and deprecations
 
 ## Quick Reference
 
-### Most Important Documents
-
-1. **New to the project?** Start with [TICKETING.md](TICKETING.md)
-2. **Want to develop/test?** Read [DEV_TOOLS.md](DEV_TOOLS.md)
-3. **Understanding architecture?** Check [CODE_AUDIT.md](CODE_AUDIT.md)
-4. **Recent changes?** See [HISTORY.md](HISTORY.md)
-
-### Project Status
-
-✅ **Production Ready** (snapshot: 2026-04-18)
-- All core functionality working
-- Code refactored and optimized
-- Categories-only round-trip (`pull-categories` / `push-categories`) added with `--scope upcoming|all`
-- Zero known bugs or regressions
-- Documentation complete and current
+1. **Changing sync/push behavior?** [INVARIANTS.md](INVARIANTS.md) first — it is binding.
+2. **New to the project?** Start with [AGENTS.md](../AGENTS.md), then [TICKETING.md](TICKETING.md).
+3. **Want to develop/test?** Read [DEV_TOOLS.md](DEV_TOOLS.md).
+4. **Recent changes?** See [HISTORY.md](HISTORY.md) and `git log`.
 
 ## Main Documentation
 
 Return to main project documentation:
+- [AGENTS.md](../AGENTS.md) - Canonical agent/developer context (commands, architecture, working agreements)
 - [README.md](../README.md) - Project overview
 - [SETUP.md](../SETUP.md) - Setup guide
 - [CHECKLIST.md](../CHECKLIST.md) - Setup checklist
