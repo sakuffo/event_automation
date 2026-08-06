@@ -1,4 +1,4 @@
-.PHONY: help setup install install-dev validate test list sync unit clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-add-ticket dev-search dev-clean-drafts dev-clean-test dev-clean-all
+.PHONY: help setup install install-dev validate test list sync unit lint clean activate dev-help dev-list dev-create dev-create-ticket dev-samples dev-add-ticket dev-search dev-clean-drafts dev-clean-test dev-clean-all
 
 # Default target
 help:
@@ -13,6 +13,7 @@ help:
 	@echo "  make list       - List existing Wix events"
 	@echo "  make sync       - Run the event sync"
 	@echo "  make unit       - Run automated unit tests"
+	@echo "  make lint       - Run ruff lint check (same as CI)"
 	@echo "  make clean      - Remove virtual environment and cache files"
 	@echo "  make activate   - Show how to activate virtual environment"
 	@echo ""
@@ -71,10 +72,12 @@ sync:
 	@python sync_events.py sync
 
 
-# Generate and write to a sheet tab
-
 unit:
 	@pytest
+
+# Lint (same check CI runs)
+lint:
+	@ruff check .
 
 # Clean up
 clean:
