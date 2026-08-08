@@ -1,4 +1,4 @@
-"""Dev helper: set the Status of a Notion Events row by page id.
+g"""Dev helper: set the Status of a Notion Events row by page id.
 
 Usage: python scripts/set_event_status.py <page_id> <status>
 """
